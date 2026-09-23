@@ -319,6 +319,12 @@ import FrameMedia
             status = "Added \(added.rawValue) · ⌘Z to undo"
         }
     }
+    /// Removes an empty added track; the tracks above move down one number.
+    func removeTrack(_ lane: Lane) {
+        if edit("Remove \(lane.rawValue)", { try Editing.removeTrack(lane,from:&$0) }) {
+            status = "Removed \(lane.rawValue) · ⌘Z to undo"
+        }
+    }
     func addText() {
         var id: UUID?
         if edit("Add text", { id = try Editing.addText(at:playhead,to:&$0) }) { selectedClipID = id }

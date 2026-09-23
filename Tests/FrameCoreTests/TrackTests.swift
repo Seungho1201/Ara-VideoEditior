@@ -91,6 +91,36 @@ final class TrackTests: XCTestCase {
         r = try r.validated()
         XCTAssertThrowsError(try Editing.addText(at:.init(seconds:1),to:&r))
     }
+    func testRemovingAnEmptyAddedTrackShiftsTheTracksAbove() throws {
+        var (p,_) = project()
+        try Editing.addTrack(.video,to:&p); try Editing.addTrack(.video,to:&p)                  // V3, V4
+        XCTAssertThrowsError(try Editing.removeTrack(.v2,from:&p))                              // the first two stay
+        // A title on V4 keeps drawing over V2 and V1 after empty V3 goes.
+        let title = Clip(name:"Title",kind:.text,lane:Lane(.video,4),start:.zero,duration:.init(seconds:2))
+        p.clips.append(title); p = try p.validated()
+        XCTAssertThrowsError(try Editing.removeTrack(Lane(.video,4),from:&p))                   // not empty
+        try Editing.removeTrack(Lane(.video,3),from:&p)
+        XCTAssertEqual(p.videoTrackCount,3)
+        XCTAssertEqual(p.clips.first { $0.id == title.id }?.lane,Lane(.video,3))
+        XCTAssertThrowsError(try Editing.removeTrack(Lane(.video,3),from:&p))                   // now holds the title
+    }
+    func testRemovingATrackMovesLinkedPartnersTogetherOrNotAtAll() throws {
+        var (p,media) = project()
+        try Editing.addTrack(.video,to:&p); try Editing.addTrack(.video,to:&p)                  // V3, V4
+        let pair = try Editing.add(mediaID:media.id,lane:Lane(.video,4),at:.zero,to:&p)         // V4 + A4 (A3 added on the way)
+        XCTAssertEqual(p.audioTrackCount,4)
+        var free = p
+        try Editing.removeTrack(Lane(.video,3),from:&free)
+        XCTAssertEqual(Set(free.group(for:pair).map(\.lane)),[Lane(.video,3),Lane(.audio,3)])
+        XCTAssertEqual(free.videoTrackCount,3); XCTAssertEqual(free.audioTrackCount,4)
+        // A3 busy where the pair's audio would land: refused, nothing changes.
+        let music = MediaReference(name:"Music",path:"/music.wav",kind:.audio,duration:.init(seconds:30),hasAudio:true)
+        p.media.append(music)
+        _ = try Editing.add(mediaID:music.id,lane:Lane(.audio,3),at:.init(seconds:1),to:&p)
+        let before = p
+        XCTAssertThrowsError(try Editing.removeTrack(Lane(.video,3),from:&p))
+        XCTAssertEqual(p,before)
+    }
     func testPastingFromATrackThisTimelineLacksBringsTheTrack() throws {
         var (source,media) = project()
         try Editing.addTrack(.video,to:&source)

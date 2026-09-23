@@ -30,6 +30,24 @@ public enum Editing {
     /// A three-second title at `time`, on the track just above every video clip it overlaps, so it
     /// is never drawn underneath one. V2 at the lowest (V1 is the picture). When that track does
     /// not exist yet it is added, up to the track limit.
+    /// Removes an empty added track (V3/A3 and up). The tracks above it move down one number, and a
+    /// linked partner moves with its clip so each pair keeps one number; if that lands on a busy
+    /// spot, nothing is removed.
+    public static func removeTrack(_ lane: Lane, from project: inout Project) throws {
+        guard lane.number > Project.trackCounts.lowerBound, project.hasLane(lane) else { throw EditError("Only added tracks (V3 or A3 and up) can be removed.") }
+        guard !project.clips.contains(where: { $0.lane == lane }) else { throw EditError("\(lane.rawValue) is not empty.") }
+        var candidate = project
+        let above = candidate.clips.filter { $0.lane.kind == lane.kind && $0.lane.number > lane.number }
+        let links = Set(above.compactMap(\.linkID)), moving = Set(above.map(\.id))
+        for i in candidate.clips.indices {
+            let clip = candidate.clips[i]
+            guard moving.contains(clip.id) || clip.linkID.map(links.contains) == true else { continue }
+            candidate.clips[i].lane = Lane(clip.lane.kind,clip.lane.number-1)
+        }
+        if lane.isVideo { candidate.videoTrackCount -= 1 } else { candidate.audioTrackCount -= 1 }
+        do { project = try candidate.validated() }
+        catch { throw EditError("\(lane.rawValue) cannot be removed here: linked \(lane.isVideo ? "audio" : "video") above it would move onto a busy \(lane.isVideo ? "A" : "V")\(lane.number).") }
+    }
     public static func addText(at time: MediaTime, to project: inout Project) throws -> UUID {
         let start = project.frameRate.quantize(max(.zero,time)), duration = project.frameRate.quantize(.init(seconds:3))
         let covering = project.clips.filter { $0.lane.isVideo && $0.start < start+duration && start < $0.end }.map(\.lane.number).max() ?? 0

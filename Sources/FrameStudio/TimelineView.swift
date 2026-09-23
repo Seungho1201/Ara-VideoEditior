@@ -17,7 +17,18 @@ struct TimelineView: View {
                         HStack(spacing:7) {
                             RoundedRectangle(cornerRadius:1).fill(lane.isVideo ? Color.blue.opacity(0.8) : Theme.accent).frame(width:3,height:22)
                             VStack(alignment:.leading,spacing:4) { Text(lane.rawValue).font(.system(size:11,weight:.semibold)); Text(lane.isVideo ? (lane.number == 1 ? "Picture" : "Overlay") : "Audio").font(.system(size:8)).foregroundStyle(Theme.muted) }
+                                .lineLimit(1).fixedSize()
                             Spacer(minLength:0)
+                            if removable(lane) {
+                                Button { store.removeTrack(lane) } label: {
+                                    Image(systemName:"xmark").font(.system(size:8,weight:.bold)).foregroundStyle(Theme.muted)
+                                        .frame(width:16,height:18).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain).padding(.trailing,4)
+                                .disabled(store.isExporting)
+                                .help("Remove \(lane.rawValue) · the tracks above move down")
+                                .accessibilityLabel("Remove track \(lane.rawValue)")
+                            }
                         }.padding(.leading,12).frame(height:TimelineCanvas.rowHeight).overlay(alignment:.bottom){Divider()}
                     }
                     addTrackButton(.audio)
@@ -30,10 +41,14 @@ struct TimelineView: View {
                 // Clipping only hides: without this, a "+" scrolled out of view still takes clicks
                 // on the TRACKS header and the toolbar above it.
                 .contentShape(Rectangle())
-            }.frame(width:78).background(Theme.panel)
+            }.frame(width:86).background(Theme.panel)
             Rectangle().fill(.white.opacity(0.08)).frame(width:1)
             TimelineSurface(store:store,scroll:scroll)
         }.background(Theme.background)
+    }
+    /// Added tracks (V3/A3 and up) can be removed while nothing is on them.
+    private func removable(_ lane: Lane) -> Bool {
+        lane.number > Project.trackCounts.lowerBound && !store.project.clips.contains { $0.lane == lane }
     }
     /// "+" above the top video track and below the bottom audio track.
     private func addTrackButton(_ kind: Lane.Kind) -> some View {
