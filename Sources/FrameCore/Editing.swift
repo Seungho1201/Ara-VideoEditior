@@ -45,8 +45,14 @@ public enum Editing {
             candidate.clips[i].lane = Lane(clip.lane.kind,clip.lane.number-1)
         }
         if lane.isVideo { candidate.videoTrackCount -= 1 } else { candidate.audioTrackCount -= 1 }
-        do { project = try candidate.validated() }
+        let result: Project
+        do { result = try candidate.validated() }
         catch { throw EditError("\(lane.rawValue) cannot be removed here: linked \(lane.isVideo ? "audio" : "video") above it would move onto a busy \(lane.isVideo ? "A" : "V")\(lane.number).") }
+        // Moving a linked partner can separate it from the clip it has a transition with.
+        guard result.transitions.count == project.transitions.count else {
+            throw EditError("\(lane.rawValue) cannot be removed: a transition above it would be lost when its clips move to different tracks.")
+        }
+        project = result
     }
     public static func addText(at time: MediaTime, to project: inout Project) throws -> UUID {
         let start = project.frameRate.quantize(max(.zero,time)), duration = project.frameRate.quantize(.init(seconds:3))
@@ -105,6 +111,8 @@ public enum Editing {
             if clip.kind == .video || clip.kind == .audio { right.sourceStart = clip.sourceStart + clip.sourceLength - (clip.duration - leftDuration).scaled(by: clip.speed) }
             right.duration = clip.duration - leftDuration
             candidate.clips.append(right)
+            // The transition on the clip's end now belongs to the right-hand piece.
+            for t in candidate.transitions.indices where candidate.transitions[t].from == clip.id { candidate.transitions[t].from = right.id }
         }
         project = try candidate.validated()
     }
@@ -130,6 +138,9 @@ public enum Editing {
         }
         let ids = Set(project.group(for: id).map(\.id))
         var candidate = project
+        // During a slider drag every sample starts from the drag's first snapshot, transitions
+        // included: dragging away and back must not lose a transition a middle sample dropped.
+        if let base { candidate.transitions = base.transitions }
         for i in candidate.clips.indices where ids.contains(candidate.clips[i].id) {
             candidate.clips[i].speed = speed
             candidate.clips[i].duration = duration

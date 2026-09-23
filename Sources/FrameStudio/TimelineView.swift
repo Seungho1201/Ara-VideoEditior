@@ -147,6 +147,8 @@ struct TimelineSurface: NSViewRepresentable {
     private var candidate: Clip?
     private var candidateValid = true
     private var dropped: (UUID,Lane,MediaTime)?
+    /// A transition dragged from the library, over the clip edge it would land on.
+    private var transitionDrop: (kind: TransitionKind, lane: Lane, time: MediaTime, from: UUID?, to: UUID?)?
     private var moved = false
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -166,6 +168,24 @@ struct TimelineSurface: NSViewRepresentable {
                 }
             }
         }
+    }
+    /// The lower part of the row around a transition's window, so the clip titles and trim
+    /// handles above it stay reachable.
+    private func rect(_ transition: FrameCore.Transition) -> NSRect? {
+        guard let store, let window = store.project.window(of:transition),
+              let clip = (transition.from ?? transition.to).flatMap(store.project.clip),
+              let index = lanes.firstIndex(of:clip.lane) else { return nil }
+        let height = rowHeight-10
+        return NSRect(x:window.start.seconds*pixelsPerSecond,y:rowTop(index)+5+height*0.4,width:max(8,window.duration.seconds*pixelsPerSecond),height:height*0.6)
+    }
+    /// The clip edge nearest `point` on its track, within reach of the pointer.
+    private func transitionEdge(at point: NSPoint) -> (lane: Lane, time: MediaTime, from: UUID?, to: UUID?)? {
+        guard let store, let lane = lane(at:point), lane.isVideo else { return nil }
+        let edges = store.project.clips.filter { $0.lane == lane }.flatMap { [$0.start,$0.end] }
+        guard let time = edges.min(by: { abs($0.seconds*pixelsPerSecond-point.x) < abs($1.seconds*pixelsPerSecond-point.x) }),
+              abs(time.seconds*pixelsPerSecond-point.x) <= 18,
+              let edge = Editing.edge(on:lane,at:time,in:store.project) else { return nil }
+        return (lane,time,edge.from,edge.to)
     }
     private func rect(_ clip:Clip) -> NSRect {
         let x = clip.start.seconds*pixelsPerSecond, width = max(2,clip.duration.seconds*pixelsPerSecond)
@@ -212,6 +232,20 @@ struct TimelineSurface: NSViewRepresentable {
             guard box.intersects(visible) else { continue }
             drawClip(clip,box:box,selected:linked.contains(clip.id),ghost:false,in:visible)
         }
+        for transition in store.project.transitions {
+            guard let box = rect(transition), box.intersects(visible) else { continue }
+            drawTransition(transition,box:box,selected:store.selectedTransitionID == transition.id)
+        }
+        if let drop = transitionDrop, let index = lanes.firstIndex(of:drop.lane) {
+            let x = drop.time.seconds*pixelsPerSecond
+            Theme.accentNS.setFill(); NSRect(x:x-1.5,y:rowTop(index)+2,width:3,height:rowHeight-4).fill()
+            let text = drop.from != nil && drop.to != nil ? drop.kind.name : drop.to != nil ? "\(drop.kind.name) · in" : "\(drop.kind.name) · out"
+            let attributes: [NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:10,weight:.semibold),.foregroundColor:NSColor.black]
+            let size = (text as NSString).size(withAttributes:attributes)
+            let pill = NSRect(x:x-size.width/2-7,y:rowTop(index)+rowHeight/2-9,width:size.width+14,height:18)
+            Theme.accentNS.setFill(); NSBezierPath(roundedRect:pill,xRadius:9,yRadius:9).fill()
+            (text as NSString).draw(at:NSPoint(x:pill.minX+7,y:pill.minY+(18-size.height)/2),withAttributes:attributes)
+        }
         if let candidate, moved {
             drawClip(candidate,box:rect(candidate),selected:true,ghost:true,in:visible)
             if let original, let link = original.linkID,
@@ -250,6 +284,29 @@ struct TimelineSurface: NSViewRepresentable {
             let color = Theme.accentNS; color.setStroke(); color.setFill()
             let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:top)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 1.5; line.stroke()
             let head = NSBezierPath(); head.move(to:NSPoint(x:x-5,y:top)); head.line(to:NSPoint(x:x+5,y:top)); head.line(to:NSPoint(x:x+5,y:top+8)); head.line(to:NSPoint(x:x,y:top+13)); head.line(to:NSPoint(x:x-5,y:top+8)); head.close(); head.fill()
+        }
+    }
+    /// A translucent strip over the clips with a bow tie, like the transition icons in other editors.
+    private func drawTransition(_ transition: FrameCore.Transition, box: NSRect, selected: Bool) {
+        let path = NSBezierPath(roundedRect:box,xRadius:3,yRadius:3)
+        NSColor.white.withAlphaComponent(selected ? 0.3 : 0.18).setFill(); path.fill()
+        let bow = NSBezierPath()
+        if transition.isCut {
+            bow.move(to:NSPoint(x:box.minX,y:box.minY)); bow.line(to:NSPoint(x:box.maxX,y:box.maxY))
+            bow.move(to:NSPoint(x:box.minX,y:box.maxY)); bow.line(to:NSPoint(x:box.maxX,y:box.minY))
+        } else if transition.to != nil {        // fade in: a ramp up
+            bow.move(to:NSPoint(x:box.minX,y:box.maxY)); bow.line(to:NSPoint(x:box.maxX,y:box.minY))
+        } else {                                // fade out: a ramp down
+            bow.move(to:NSPoint(x:box.minX,y:box.minY)); bow.line(to:NSPoint(x:box.maxX,y:box.maxY))
+        }
+        NSColor.white.withAlphaComponent(0.45).setStroke(); bow.lineWidth = 1; bow.stroke()
+        (selected ? Theme.accentNS : NSColor.white.withAlphaComponent(0.6)).setStroke(); path.lineWidth = selected ? 2 : 1; path.stroke()
+        if box.width > 76 {
+            let attributes: [NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:9,weight:.semibold),.foregroundColor:NSColor.white]
+            let size = (transition.kind.name as NSString).size(withAttributes:attributes)
+            let label = NSRect(x:box.midX-size.width/2-4,y:box.midY-size.height/2-1,width:size.width+8,height:size.height+2)
+            NSColor.black.withAlphaComponent(0.55).setFill(); NSBezierPath(roundedRect:label,xRadius:3,yRadius:3).fill()
+            (transition.kind.name as NSString).draw(at:NSPoint(x:label.minX+4,y:label.minY+1),withAttributes:attributes)
         }
     }
     /// A retimed clip's speed, top right: gauge and factor on a dark pill, like the toolbar's
@@ -326,13 +383,16 @@ struct TimelineSurface: NSViewRepresentable {
         guard let store else { return }
         window?.makeFirstResponder(self); origin = convert(event.locationInWindow,from:nil); moved = false
         if origin.y < rulerTop+ruler { mode = .scrub; store.pause(); store.seek(time(at:origin.x)); return }
+        if let transition = store.project.transitions.last(where: { rect($0)?.contains(origin) == true }) {
+            store.selectTransition(transition.id); mode = nil; needsDisplay = true; return
+        }
         if let clip = store.project.clips.last(where:{rect($0).contains(origin)}) {
             store.selectedClipID = clip.id; store.selectedGap = nil
             original = clip; candidate = clip; candidateValid = true
             let box = rect(clip)
             mode = origin.x-box.minX < 7 ? .start : box.maxX-origin.x < 7 ? .end : .move
         } else {
-            store.selectedClipID = nil
+            store.selectedClipID = nil; store.selectedTransitionID = nil
             // Double-clicking empty track space selects the gap it belongs to, for ⌘⌫.
             if event.clickCount == 2, let lane = lane(at:origin),
                let gap = Editing.gap(on:lane,at:time(at:origin.x),in:store.project) {
@@ -418,7 +478,7 @@ struct TimelineSurface: NSViewRepresentable {
             else { store.step(event.modifierFlags.contains(.shift) ? 10 : 1) }
         case 49: store.togglePlayback()
         case 51,117: store.deleteSelection()
-        case 53: mode = nil; candidate = nil; original = nil; moved = false; store.selectedGap = nil; store.previewTransformID = nil; needsDisplay = true
+        case 53: mode = nil; candidate = nil; original = nil; moved = false; store.selectedGap = nil; store.previewTransformID = nil; store.selectedTransitionID = nil; needsDisplay = true
         default: super.keyDown(with:event)
         }
     }
@@ -427,6 +487,12 @@ struct TimelineSurface: NSViewRepresentable {
     override func draggingUpdated(_ sender:any NSDraggingInfo) -> NSDragOperation {
         guard let store else { return [] }
         let point = convert(sender.draggingLocation,from:nil)
+        if let value = sender.draggingPasteboard.string(forType:.string), let kind = TransitionDrag.kind(from:value) {
+            let edge = transitionEdge(at:point)
+            transitionDrop = edge.map { (kind,$0.lane,$0.time,$0.from,$0.to) }
+            needsDisplay = true
+            return edge == nil ? [] : .copy
+        }
         if let value = sender.draggingPasteboard.string(forType:.string), let id = UUID(uuidString:value), let lane = lane(at:point) {
             let position = store.snapping ? Editing.snapped(time(at:point.x),playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:store.project) : store.project.frameRate.quantize(time(at:point.x))
             var p = store.project
@@ -435,10 +501,11 @@ struct TimelineSurface: NSViewRepresentable {
         }
         return sender.draggingPasteboard.canReadObject(forClasses:[NSURL.self],options:[.urlReadingFileURLsOnly:true]) ? .copy : []
     }
-    override func draggingExited(_ sender:(any NSDraggingInfo)?) { dropped = nil; needsDisplay = true }
+    override func draggingExited(_ sender:(any NSDraggingInfo)?) { dropped = nil; transitionDrop = nil; needsDisplay = true }
     override func performDragOperation(_ sender:any NSDraggingInfo) -> Bool {
         guard let store else { return false }
-        defer { dropped = nil; needsDisplay = true }
+        defer { dropped = nil; transitionDrop = nil; needsDisplay = true }
+        if let drop = transitionDrop { store.applyTransition(drop.kind,from:drop.from,to:drop.to); return true }
         if let (id,lane,time) = dropped { store.addMedia(id,lane:lane,at:time); return true }
         if let files = sender.draggingPasteboard.readObjects(forClasses:[NSURL.self],options:[.urlReadingFileURLsOnly:true]) as? [URL] { store.importFiles(files); return true }
         return false

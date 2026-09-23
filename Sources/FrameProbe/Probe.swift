@@ -287,6 +287,144 @@ actor ProgressFlag {
         }
         try require(a4,"A4's audio is in the composition at 2.5 s")
         print("PASS four video tracks stack in order and A4 audio plays (V3 over V2 over V1)")
+        // Transitions across a cut from red video (base.mp4, 0-3 s) into the green still (3 s on),
+        // one second centred on the cut: each kind at its midpoint, and plain pictures outside it.
+        func frameAt(_ bundle: RenderBundle, _ seconds: Double) async throws -> [UInt8] {
+            let generator = AVAssetImageGenerator(asset:bundle.composition); generator.videoComposition = bundle.videoComposition
+            generator.requestedTimeToleranceBefore = .zero; generator.requestedTimeToleranceAfter = .zero
+            return pixels(try await generator.image(at:CMTime(seconds:seconds,preferredTimescale:600)).image)
+        }
+        func rgb(_ px: [UInt8], _ x: Int, _ y: Int = 45) -> (Int,Int,Int) { let i = (y*160+x)*4; return (Int(px[i]),Int(px[i+1]),Int(px[i+2])) }
+        func isRed(_ c: (Int,Int,Int)) -> Bool { c.0 > 180 && c.1 < 70 }
+        func isGreen(_ c: (Int,Int,Int)) -> Bool { c.1 > 140 && c.0 < 70 }
+        var cut = Project(); cut.media = [project.media[0],project.media[2]]
+        let red = try Editing.add(mediaID:project.media[0].id,lane:.v1,at:.zero,to:&cut)
+        try Editing.trim(red,leading:false,to:.init(seconds:3),in:&cut)
+        let greenClip = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.init(seconds:3),to:&cut)
+        func isBlue(_ c: (Int,Int,Int)) -> Bool { c.2 > 150 && c.0 < 60 && c.1 < 60 }
+        let expectations: [(TransitionKind,TransitionDirection,String,([UInt8]) -> Bool)] = [
+            (.crossDissolve,.left,"a mix of both",{ let c = rgb($0,80); return c.0 > 60 && c.1 > 50 }),
+            (.dipToBlack,.left,"black",{ let c = rgb($0,80); return c.0 < 30 && c.1 < 30 && c.2 < 30 }),
+            (.dipToWhite,.left,"white",{ let c = rgb($0,80); return c.0 > 225 && c.1 > 225 && c.2 > 225 }),
+            (.push,.left,"red left, green right",{ isRed(rgb($0,30)) && isGreen(rgb($0,130)) }),
+            (.push,.right,"green left, red right",{ isGreen(rgb($0,30)) && isRed(rgb($0,130)) }),
+            (.push,.up,"red top, green bottom",{ isRed(rgb($0,80,15)) && isGreen(rgb($0,80,75)) }),
+            (.slide,.left,"red left, green right",{ isRed(rgb($0,30)) && isGreen(rgb($0,130)) }),
+            (.slide,.right,"green left, red right",{ isGreen(rgb($0,30)) && isRed(rgb($0,130)) }),
+            (.whipPan,.left,"red left, green right",{ isRed(rgb($0,30)) && isGreen(rgb($0,130)) }),
+            (.wipe,.left,"red left, green right",{ isRed(rgb($0,30)) && isGreen(rgb($0,130)) }),
+            (.wipe,.up,"red top, green bottom",{ isRed(rgb($0,80,15)) && isGreen(rgb($0,80,75)) }),
+            (.iris,.left,"green centre, red corner",{ isGreen(rgb($0,80)) && isRed(rgb($0,3,3)) }),
+            (.blur,.left,"a mix of both",{ let c = rgb($0,80); return c.0 > 60 && c.1 > 50 }),
+            (.zoom,.left,"a mix of both",{ let c = rgb($0,80); return c.0 > 60 && c.1 > 50 }),
+            (.pixelate,.left,"a mix of both",{ let c = rgb($0,80); return c.0 > 60 && c.1 > 50 }),
+        ]
+        try require(Set(expectations.map(\.0)) == Set(TransitionKind.allCases),"every transition kind is checked")
+        for (kind,direction,expected,test) in expectations {
+            var project = cut
+            try Editing.setTransition(kind,direction:direction,duration:.init(seconds:1),from:red,to:greenClip,in:&project)
+            let bundle = try await builder.build(project,urls:urls)
+            let valid = bundle.videoComposition.isValid(for:bundle.composition.tracks,assetDuration:bundle.composition.duration,
+                                                        timeRange:CMTimeRange(start:.zero,duration:bundle.composition.duration),validationDelegate:nil)
+            try require(valid && bundle.composition.duration == project.duration.cmTime,"\(kind.name): valid composition ending on the timeline end")
+            let middle = try await frameAt(bundle,3.0)
+            try require(test(middle),"\(kind.name) \(direction.rawValue) at its midpoint shows \(expected); got left \(rgb(middle,30)) centre \(rgb(middle,80)) right \(rgb(middle,130)) top \(rgb(middle,80,15)) bottom \(rgb(middle,80,75))")
+            let before = try await frameAt(bundle,2.4), after = try await frameAt(bundle,3.6)
+            try require(isRed(rgb(before,80)) && isGreen(rgb(after,80)),"\(kind.name) leaves the clips alone outside its window")
+            // Blends in the encoded (gamma) domain like other editors: a quarter into a dissolve
+            // the red is about 3/4 of its code value (a linear-light blend stays near 7/8), and
+            // half-way into a dip's first half it is about half (linear: about 3/4).
+            if kind == .crossDissolve || kind == .dipToBlack {
+                let quarter = rgb(try await frameAt(bundle,2.75),80)
+                let range = kind == .crossDissolve ? 165...212 : 100...160
+                try require(range.contains(quarter.0),"\(kind.name) blends in gamma, red \(quarter.0) expected in \(range)")
+            }
+        }
+        // A picture-in-picture over a lower track: a dissolve from a full frame into it mixes the
+        // outgoing picture into what the track below shows, never leaving it to vanish at the end.
+        var pip = Project(); pip.media = [project.media[0],project.media[1],project.media[2]]
+        let backdrop = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.zero,to:&pip)
+        try Editing.trim(backdrop,leading:false,to:.init(seconds:6),in:&pip)
+        let full = try Editing.add(mediaID:project.media[0].id,lane:.v2,at:.zero,to:&pip)
+        try Editing.trim(full,leading:false,to:.init(seconds:3),in:&pip)
+        let inset = try Editing.add(mediaID:project.media[1].id,lane:.v2,at:.init(seconds:3),to:&pip)
+        for i in pip.clips.indices where pip.clips[i].id == inset { pip.clips[i].style.scale = 0.5 }
+        try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:full,to:inset,in:&pip)
+        let pipBundle = try await builder.build(pip,urls:urls)
+        let late = try await frameAt(pipBundle,3.4), done = try await frameAt(pipBundle,3.5)
+        try require(isGreen(rgb(late,5,5)) && rgb(late,5,5).0 > 8,"late in the dissolve the corner is mostly the track below with a trace of red, got \(rgb(late,5,5))")
+        try require(isGreen(rgb(done,5,5)) && isBlue(rgb(done,80)),"after it, the inset over the track below, got \(rgb(done,5,5)) / \(rgb(done,80))")
+        let early = try await frameAt(pipBundle,2.6)
+        try require(isRed(rgb(early,5,5)),"early in the dissolve the corner is still mostly red, got \(rgb(early,5,5))")
+        // No source after the blue clip's end (all of overlay.mp4 is used): its last frame is held,
+        // never black, while the incoming picture slides over.
+        var held = Project(); held.media = [project.media[1],project.media[2]]
+        let blueClip = try Editing.add(mediaID:project.media[1].id,lane:.v1,at:.zero,to:&held)       // the whole 2 s source
+        let after = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.init(seconds:2),to:&held)
+        try Editing.setTransition(.slide,direction:.left,duration:.init(seconds:1),from:blueClip,to:after,in:&held)
+        let heldBundle = try await builder.build(held,urls:urls)
+        let heldFrame = try await frameAt(heldBundle,2.2)
+        try require(isBlue(rgb(heldFrame,10)),"the outgoing clip's last frame is held past its end, got \(rgb(heldFrame,10))")
+        // Linked audio fades with the picture when the other side has no sound: down before the cut.
+        let audioParameters = heldBundle.audioMix.inputParameters.first { p in
+            var start: Float = 0, end: Float = 0, range = CMTimeRange.zero
+            return p.getVolumeRamp(for:CMTime(seconds:1.8,preferredTimescale:600),startVolume:&start,endVolume:&end,timeRange:&range) && start > end
+        }
+        try require(audioParameters != nil,"linked audio fades out into the transition")
+        // A picture shorter than its sound (shortpicture.mp4: 1 s, red then blue; 2 s of audio):
+        // past the picture's end, into and through a transition, the last (blue) frame holds.
+        let shortURL = fixtures.appendingPathComponent("shortpicture.mp4"), shortMedia = try await library.inspect(shortURL)
+        var shortUrls = urls; shortUrls[shortMedia.id] = shortURL
+        var short = Project(); short.media = [shortMedia,project.media[2]]
+        let shortClip = try Editing.add(mediaID:shortMedia.id,lane:.v1,at:.zero,to:&short)
+        guard let shortEnd = short.clips.first(where:{ $0.id == shortClip })?.end else { throw EditError("CHECK FAILED: short clip") }
+        try require(shortEnd > .init(seconds:1.5),"the clip runs as long as its sound, got \(shortEnd.seconds) s")
+        let afterShort = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:shortEnd,to:&short)
+        try Editing.setTransition(.crossDissolve,duration:.init(seconds:0.6),from:shortClip,to:afterShort,in:&short)
+        let shortBundle = try await builder.build(short,urls:shortUrls)
+        let pastPicture = rgb(try await frameAt(shortBundle,1.3),80)
+        let inTransition = rgb(try await frameAt(shortBundle,shortEnd.seconds-0.2),80)
+        try require(isBlue(pastPicture),"past the picture's end its last frame holds, got \(pastPicture)")
+        try require(inTransition.2 > 60 && inTransition.0 < 60,"into the transition the held frame is still the last one (blue into green), got \(inTransition)")
+        // Two sounds across a dissolve with sound to spare on both sides: an equal-power crossfade
+        // on the lane's two audio tracks (about 0.71 each at the cut, not 0.5 as a linear one).
+        var sound = Project(); sound.media = [project.media[0]]
+        let first = try Editing.add(mediaID:project.media[0].id,lane:.v1,at:.zero,to:&sound)
+        try Editing.trim(first,leading:false,to:.init(seconds:3),in:&sound)
+        let second = try Editing.add(mediaID:project.media[0].id,lane:.v1,at:.init(seconds:3),to:&sound)
+        try Editing.trim(second,leading:true,to:.init(seconds:4),in:&sound)                   // source from 1 s
+        try Editing.move(second,to:.init(seconds:3),lane:.v1,in:&sound)
+        try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:first,to:second,in:&sound)
+        let soundBundle = try await builder.build(sound,urls:urls)
+        var falling: Float?, rising: Float?
+        for parameters in soundBundle.audioMix.inputParameters {
+            var start: Float = 0, end: Float = 0, range = CMTimeRange.zero
+            guard parameters.getVolumeRamp(for:CMTime(seconds:3.0,preferredTimescale:600),startVolume:&start,endVolume:&end,timeRange:&range) else { continue }
+            if start > end { falling = start } else if end > start { rising = start }
+        }
+        try require(falling.map { abs($0-0.707) < 0.03 } == true && rising.map { abs($0-0.707) < 0.03 } == true,
+                    "equal-power crossfade at the cut, got out \(String(describing:falling)) in \(String(describing:rising))")
+        let overlapping = soundBundle.composition.tracks(withMediaType:.audio).filter { track in
+            track.segments.contains { !$0.isEmpty && $0.timeMapping.target.start.seconds < 2.6 && $0.timeMapping.target.end.seconds > 3.4 }
+            || track.segments.contains { !$0.isEmpty && abs($0.timeMapping.target.start.seconds-2.5) < 0.01 }
+        }
+        try require(overlapping.count == 2,"both sounds play through the crossfade on their own tracks, got \(overlapping.count)")
+        // A one-sided fade in from black at the start of the timeline.
+        var fading = cut
+        try Editing.setTransition(.dipToBlack,duration:.init(seconds:1),from:nil,to:red,in:&fading)
+        let fadingBundle = try await builder.build(fading,urls:urls)
+        let dark = rgb(try await frameAt(fadingBundle,0.25),80)
+        try require(dark.0 > 20 && dark.0 < 220 && dark.1 < 40,"a fade in starts dark and brightens, got \(dark)")
+        // The exported file carries the transition too (same composition, real writer).
+        var pushed = cut
+        try Editing.setTransition(.push,direction:.left,duration:.init(seconds:1),from:red,to:greenClip,in:&pushed)
+        let pushedMovie = output.appendingPathComponent("validation-transition.mp4")
+        try await exporter.export(try await builder.build(pushed,urls:urls),to:pushedMovie) { _ in }
+        let exportedGenerator = AVAssetImageGenerator(asset:AVURLAsset(url:pushedMovie))
+        exportedGenerator.requestedTimeToleranceBefore = .zero; exportedGenerator.requestedTimeToleranceAfter = .zero
+        let exportedMiddle = pixels(try await exportedGenerator.image(at:CMTime(seconds:3.0,preferredTimescale:600)).image)
+        try require(isRed(rgb(exportedMiddle,30)) && isGreen(rgb(exportedMiddle,130)),"the exported push is mid-way at the cut, got \(rgb(exportedMiddle,30)) / \(rgb(exportedMiddle,130))")
+        print("PASS transitions: \(TransitionKind.allCases.count) kinds (\(expectations.count) with directions) at their midpoints, gamma blends, picture-in-picture dissolve, held last frames, equal-power crossfade, fade in, export")
         var fractional = Project(); fractional.frameRate = .init(30000,1001); fractional.media = [project.media[2]]
         let fractionalID = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.zero,to:&fractional)
         try Editing.trim(fractionalID,leading:false,to:.init(ticks:fractional.frameRate.frame.ticks*31),in:&fractional)

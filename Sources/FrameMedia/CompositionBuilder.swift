@@ -30,7 +30,7 @@ public actor CompositionBuilder {
     /// FHD preview proxy. A stand-in must share the source's timing and aspect ratio; one that has
     /// gone missing (caches can be purged) falls back to the original.
     public func build(_ project: Project, urls: [UUID:URL], height: Int = 1080, videoURLs: [UUID:URL] = [:]) async throws -> RenderBundle {
-        _ = try project.validated()
+        let project = try project.validated()             // transitions reconciled with their clips
         guard project.duration > .zero else { throw EditError("Add a clip to the timeline first.") }
         guard height == 1080 || height == 2160 else { throw EditError("Unsupported output resolution.") }
         for clip in project.clips where clip.kind != .text {
@@ -69,46 +69,152 @@ public actor CompositionBuilder {
             guard let standIn = videoURLs[id], FileManager.default.isReadableFile(atPath:standIn.path) else { return url }
             return standIn
         }
+        // Every source stream a clip plays, and the stretch of time it really covers.
+        var sources: [UUID:(track: AVAssetTrack, available: CMTimeRange)] = [:]
+        for clip in project.clips where clip.kind == .video || clip.kind == .audio {
+            try Task.checkCancellation()
+            guard let id = clip.mediaID, let original = urls[id] else { throw EditError("Missing media URL.") }
+            let type: AVMediaType = clip.lane.isVideo ? .video : .audio
+            let url = type == .video ? pictureURL(id,original) : original
+            let asset = assetCache[url] ?? AVURLAsset(url:url); assetCache[url] = asset
+            guard let source = try await asset.loadTracks(withMediaType:type).first else { throw EditError("No \(type.rawValue) stream in \(clip.name).") }
+            sources[clip.id] = (source,try await source.load(.timeRange))
+        }
+        /// Timeline time the source has to spare before the clip's in-point, or after its out-point.
+        func room(_ clip: Clip, before: Bool) -> MediaTime {
+            guard let available = sources[clip.id]?.available else { return .zero }
+            let spare = before ? clip.sourceStart-MediaTime(available.start) : MediaTime(available.end)-(clip.sourceStart+clip.sourceLength)
+            return spare > .zero ? project.frameRate.floor(spare.scaled(by:1/clip.speed)) : .zero
+        }
+        func linkedSound(_ id: UUID?) -> Clip? {
+            guard let link = id.flatMap(project.clip)?.linkID else { return nil }
+            return project.clips.first { $0.linkID == link && !$0.lane.isVideo }
+        }
+        // Transitions: how far past its edges each visual clip shows across a cut (head before its
+        // start, tail after its end), its side of each transition, and what its linked sound does:
+        // an equal-power crossfade across a cut when both sources have sound beyond it, otherwise
+        // out before the cut and in after it.
+        var head: [UUID:MediaTime] = [:], tail: [UUID:MediaTime] = [:]
+        var sides: [UUID:[LayerTransition]] = [:]
+        var fadeIn: [UUID:MediaTime] = [:], fadeOut: [UUID:MediaTime] = [:]
+        var crossIn: [UUID:TransitionWindow] = [:], crossOut: [UUID:TransitionWindow] = [:]
+        for transition in project.transitions {
+            guard let window = project.window(of:transition) else { continue }
+            // Both pictures at once across a cut; a dip shows one at a time and switches at the cut.
+            let paired = transition.isCut && transition.kind.needsBothPictures
+            let cut = window.start+window.before
+            for (id,role) in [(transition.from,LayerTransition.Role.outgoing),(transition.to,.incoming)] {
+                guard let id else { continue }
+                sides[id,default:[]].append(LayerTransition(id:transition.id,kind:transition.kind,direction:transition.direction,role:role,paired:paired,
+                                                            start:window.start,duration:window.duration,cut:cut))
+            }
+            if paired, let from = transition.from, let to = transition.to { tail[from] = window.after; head[to] = window.before }
+            let outgoing = linkedSound(transition.from), incoming = linkedSound(transition.to)
+            if paired, let outgoing, let incoming, outgoing.lane == incoming.lane, outgoing.end == cut, incoming.start == cut,
+               room(outgoing,before:false) >= window.after, room(incoming,before:true) >= window.before {
+                crossOut[outgoing.id] = window; crossIn[incoming.id] = window
+            } else {
+                if let outgoing, window.before > .zero { fadeOut[outgoing.id] = window.before }
+                if let incoming, window.after > .zero { fadeIn[incoming.id] = window.after }
+            }
+        }
+        // Where each video layer's track holds real frames, and the frames to hold beyond them.
+        var frames: [UUID:(from: MediaTime, to: MediaTime)] = [:]
+        var headHold: [UUID:CMTime] = [:], tailHold: [UUID:CMTime] = [:]
         for lane in project.videoLanes+project.audioLanes {
             let clips = project.clips.filter { $0.lane == lane && ($0.kind == .video || $0.kind == .audio) }.sorted { $0.start < $1.start }
             guard !clips.isEmpty else { continue }
             let type: AVMediaType = lane.isVideo ? .video : .audio
-            guard let track = composition.addMutableTrack(withMediaType:type,preferredTrackID:kCMPersistentTrackID_Invalid) else { throw EditError("Cannot allocate composition track.") }
-            let parameters = AVMutableAudioMixInputParameters(track:track); parameters.setVolume(0,at:.zero)
+            // A/B roll: across a cut that plays both clips at once they decode together, so the
+            // incoming clip goes on the lane's other composition track (each with its own levels).
+            var tracks: [AVMutableCompositionTrack] = [], levels: [AVMutableAudioMixInputParameters] = []
+            func track(_ slot: Int) throws -> AVMutableCompositionTrack {
+                while tracks.count <= slot {
+                    guard let made = composition.addMutableTrack(withMediaType:type,preferredTrackID:kCMPersistentTrackID_Invalid) else { throw EditError("Cannot allocate composition track.") }
+                    tracks.append(made)
+                    let parameters = AVMutableAudioMixInputParameters(track:made); parameters.setVolume(0,at:.zero); levels.append(parameters)
+                }
+                return tracks[slot]
+            }
+            var slots: [Int] = [], slot = 0
             for clip in clips {
+                if (lane.isVideo ? head[clip.id] : crossIn[clip.id]?.before) != nil { slot = 1-slot }
+                slots.append(slot)
+            }
+            for (index,clip) in clips.enumerated() {
                 try Task.checkCancellation()
-                guard let id = clip.mediaID, let original = urls[id] else { throw EditError("Missing media URL.") }
-                let url = type == .video ? pictureURL(id,original) : original
-                let asset = assetCache[url] ?? AVURLAsset(url:url); assetCache[url] = asset
-                guard let source = try await asset.loadTracks(withMediaType:type).first else { throw EditError("No \(type.rawValue) stream in \(clip.name).") }
-                let sourceRange = CMTimeRange(start:clip.sourceStart.cmTime,duration:clip.sourceLength.cmTime)
-                let available = try await source.load(.timeRange)
+                guard let (source,available) = sources[clip.id] else { throw EditError("Missing media URL.") }
+                let target = try track(slots[index])
+                // Frames (or sound) beyond the clip's edges, as much as the source has: the
+                // renderer holds the nearest frame for the rest of a transition.
+                let wantHead = lane.isVideo ? head[clip.id] ?? .zero : crossIn[clip.id]?.before ?? .zero
+                let wantTail = lane.isVideo ? tail[clip.id] ?? .zero : crossOut[clip.id]?.after ?? .zero
+                var extraHead = min(wantHead,room(clip,before:true))
+                let extraTail = min(wantTail,room(clip,before:false))
+                // Never reach back into what the track already holds: an insert there would push it later.
+                let filled = MediaTime(target.timeRange.end)
+                if extraHead > .zero, clip.start-extraHead < filled { extraHead = max(.zero,clip.start-filled) }
+                let headSource = extraHead.scaled(by:clip.speed), tailSource = extraTail.scaled(by:clip.speed)
+                let sourceStart = clip.sourceStart-headSource
+                let sourceLength = clip.sourceLength+headSource+tailSource
+                let begin = clip.start-extraHead, finish = clip.end+extraTail
+                let sourceRange = CMTimeRange(start:sourceStart.cmTime,duration:sourceLength.cmTime)
                 let range = CMTimeRangeGetIntersection(sourceRange,otherRange:available)
+                var framesFrom = clip.start, framesTo = clip.start
                 if range.duration > .zero {
                     if clip.speed == 1 {
-                        try track.insertTimeRange(range,of:source,at:clip.start.cmTime+(range.start-sourceRange.start))
+                        try target.insertTimeRange(range,of:source,at:begin.cmTime+(range.start-sourceRange.start))
+                        framesFrom = begin+MediaTime(range.start-sourceRange.start); framesTo = framesFrom+MediaTime(range.duration)
                     } else {
                         // The retimed segment is laid out in the project clock and never past the
-                        // clip's own end. A float multiply (CMTimeMultiplyByFloat64) moves to a 1e9
-                        // timescale and can round a fraction of a nanosecond beyond the clip; the
-                        // composition then outlasts the video instruction, AVFoundation rejects the
-                        // video composition, and preview and export show no picture at all.
-                        let destination = min(clip.start+MediaTime(range.start-sourceRange.start).scaled(by:1/clip.speed),clip.end)
-                        let length = min(MediaTime(range.duration).scaled(by:1/clip.speed),clip.end-destination)
-                        try track.insertTimeRange(range,of:source,at:destination.cmTime)
+                        // clip's own end (plus its transition tail). A float multiply
+                        // (CMTimeMultiplyByFloat64) moves to a 1e9 timescale and can round a fraction
+                        // of a nanosecond beyond it; the composition then outlasts the video
+                        // instruction, AVFoundation rejects the video composition, and preview and
+                        // export show no picture at all.
+                        let destination = min(begin+MediaTime(range.start-sourceRange.start).scaled(by:1/clip.speed),finish)
+                        let length = min(MediaTime(range.duration).scaled(by:1/clip.speed),finish-destination)
+                        try target.insertTimeRange(range,of:source,at:destination.cmTime)
                         // scaleTimeRange rewrites in place and shifts everything after it. Clips are
-                        // processed in start order and nothing later exists yet, so the shift is harmless.
-                        track.scaleTimeRange(CMTimeRange(start:destination.cmTime,duration:range.duration),toDuration:length.cmTime)
+                        // processed in start order and nothing later exists on this track yet.
+                        target.scaleTimeRange(CMTimeRange(start:destination.cmTime,duration:range.duration),toDuration:length.cmTime)
+                        framesFrom = destination; framesTo = destination+length
                     }
                 }
                 if lane.isVideo {
-                    layerTracks[clip.id] = track.trackID; transforms[clip.id] = try await source.load(.preferredTransform)
+                    layerTracks[clip.id] = target.trackID; transforms[clip.id] = try await source.load(.preferredTransform)
+                    frames[clip.id] = (framesFrom,framesTo)
+                    // The first and last frames the track has, when a transition (or a source
+                    // shorter than the clip) reaches past them. The clip's own first frame is the
+                    // decoder fallback already.
+                    if range.duration > .zero {
+                        if framesFrom > clip.start-wantHead, range.start != clip.sourceStart.cmTime { headHold[clip.id] = range.start }
+                        if framesTo < clip.end+wantTail { tailHold[clip.id] = (MediaTime(range.end)-MediaTime(ticks:1)).cmTime }
+                    }
                 } else {
-                    parameters.setVolume(clip.style.muted ? 0 : Float(clip.style.volume),at:clip.start.cmTime)
-                    parameters.setVolume(0,at:clip.end.cmTime)
+                    let parameters = levels[slots[index]]
+                    let volume: Float = clip.style.muted ? 0 : Float(clip.style.volume)
+                    if let window = crossIn[clip.id] { Self.equalPower(parameters,level:volume,over:window,rising:true) }
+                    else if let rampIn = fadeIn[clip.id] { parameters.setVolumeRamp(fromStartVolume:0,toEndVolume:volume,timeRange:CMTimeRange(start:clip.start.cmTime,duration:rampIn.cmTime)) }
+                    else { parameters.setVolume(volume,at:clip.start.cmTime) }
+                    if let window = crossOut[clip.id] { Self.equalPower(parameters,level:volume,over:window,rising:false) }
+                    else if let rampOut = fadeOut[clip.id] { parameters.setVolumeRamp(fromStartVolume:volume,toEndVolume:0,timeRange:CMTimeRange(start:(clip.end-rampOut).cmTime,duration:rampOut.cmTime)) }
+                    // The next clip on this track sets the level itself when it begins right here.
+                    let audibleEnd = crossOut[clip.id]?.end ?? clip.end
+                    let next = clips.indices.first { $0 > index && slots[$0] == slots[index] }.map { clips[$0] }
+                    if next.map({ (crossIn[$0.id]?.start ?? $0.start) != audibleEnd }) ?? true { parameters.setVolume(0,at:audibleEnd.cmTime) }
                 }
             }
-            if lane.isVideo { videoIDs.append(track.trackID) } else { mixes.append(parameters) }
+            if lane.isVideo { videoIDs.append(contentsOf:tracks.map(\.trackID)) } else { mixes.append(contentsOf:levels) }
+        }
+        /// Exact frames: a loose tolerance returns an unrelated keyframe.
+        func generator(_ clip: Clip, slack: CMTime = .zero) -> AVAssetImageGenerator? {
+            guard let id = clip.mediaID, let url = urls[id] else { return nil }
+            let generator = AVAssetImageGenerator(asset:assetCache[pictureURL(id,url)] ?? AVURLAsset(url:pictureURL(id,url)))
+            generator.appliesPreferredTrackTransform = false
+            generator.requestedTimeToleranceBefore = slack
+            generator.requestedTimeToleranceAfter = .zero
+            return generator
         }
         var layers: [RenderLayer] = []
         // Bottom to top: each video track draws over the ones numbered below it.
@@ -124,16 +230,19 @@ public actor CompositionBuilder {
                 // Decode the clip's own first frame as a stand-in. HDR sources deliver nothing for
                 // roughly the first three frames of each segment while the decoder primes, and a
                 // still beats both a black flash and aborting the whole render.
-                var fallback: CIImage?
-                if clip.kind == .video, let id = clip.mediaID, let url = urls[id] {
-                    let generator = AVAssetImageGenerator(asset:assetCache[pictureURL(id,url)] ?? AVURLAsset(url:pictureURL(id,url)))
-                    generator.appliesPreferredTrackTransform = false
-                    // Must be the clip's own in-point: a loose tolerance returns an unrelated keyframe.
-                    generator.requestedTimeToleranceBefore = .zero
-                    generator.requestedTimeToleranceAfter = .zero
-                    if let cg = try? await generator.image(at:clip.sourceStart.cmTime).image { fallback = CIImage(cgImage:cg) }
+                var fallback: CIImage?, headImage: CIImage?, tailImage: CIImage?
+                if clip.kind == .video, let exact = generator(clip) {
+                    if let cg = try? await exact.image(at:clip.sourceStart.cmTime).image { fallback = CIImage(cgImage:cg) }
+                    if let at = headHold[clip.id], let cg = try? await exact.image(at:at).image { headImage = CIImage(cgImage:cg) }
+                    if let at = tailHold[clip.id] {
+                        if let cg = try? await exact.image(at:at).image { tailImage = CIImage(cgImage:cg) }
+                        else if let loose = generator(clip,slack:CMTime(seconds:0.5,preferredTimescale:600)), let cg = try? await loose.image(at:at).image { tailImage = CIImage(cgImage:cg) }
+                    }
                 }
-                layers.append(RenderLayer(clip:clip,trackID:layerTracks[clip.id],preferredTransform:transforms[clip.id] ?? .identity,image:image,fallbackImage:fallback))
+                layers.append(RenderLayer(clip:clip,trackID:layerTracks[clip.id],preferredTransform:transforms[clip.id] ?? .identity,image:image,fallbackImage:fallback,
+                                          visibleStart:clip.start-(head[clip.id] ?? .zero),visibleEnd:clip.end+(tail[clip.id] ?? .zero),
+                                          framesStart:frames[clip.id]?.from,framesEnd:frames[clip.id]?.to,headImage:headImage,tailImage:tailImage,
+                                          transitions:sides[clip.id] ?? []))
             }
         }
         let size = CGSize(width:height*16/9,height:height)
@@ -149,6 +258,19 @@ public actor CompositionBuilder {
         video.instructions = [FrameInstruction(duration:CMTimeMaximum(project.duration.cmTime,composition.duration),trackIDs:videoIDs,layers:layers)]
         let audio = AVMutableAudioMix(); audio.inputParameters = mixes
         return RenderBundle(composition:composition.copy() as! AVComposition,videoComposition:video.copy() as! AVVideoComposition,audioMix:audio.copy() as! AVAudioMix,duration:project.duration,size:size,frameRate:project.frameRate)
+    }
+    /// A sine (in) or cosine (out) gain curve across the window in eight straight pieces: the two
+    /// sides of a crossfade keep constant power, where a linear one dips about 3 dB in the middle.
+    private static func equalPower(_ parameters: AVMutableAudioMixInputParameters, level: Float, over window: TransitionWindow, rising: Bool) {
+        let steps: Int64 = 8
+        func at(_ step: Int64) -> MediaTime { window.start+MediaTime(ticks:window.duration.ticks*step/steps) }
+        func gain(_ step: Int64) -> Float {
+            let x = Float(step)/Float(steps)*Float.pi/2
+            return level*(rising ? sin(x) : cos(x))
+        }
+        for step in 0..<steps {
+            parameters.setVolumeRamp(fromStartVolume:gain(step),toEndVolume:gain(step+1),timeRange:CMTimeRange(start:at(step).cmTime,end:at(step+1).cmTime))
+        }
     }
 }
 

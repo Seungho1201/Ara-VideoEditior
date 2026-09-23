@@ -23,10 +23,35 @@ public struct RenderLayer: @unchecked Sendable {
     /// Stand-in for composition times where the decoder has not yet produced a buffer.
     /// HDR sources prime for about three frames at the start of every segment.
     public let fallbackImage: CIImage?
+    /// When the layer is drawn: the clip, widened by the part of a transition across a cut that
+    /// lies outside it.
+    public let visibleStart: MediaTime
+    public let visibleEnd: MediaTime
+    /// Where the track holds real frames for the layer. A transition that reaches past them (the
+    /// source has nothing, or not enough, beyond the clip's edge) holds the first frame there
+    /// (`headImage`) or the last one (`tailImage`), as Premiere and Resolve do.
+    public let framesStart: MediaTime
+    public let framesEnd: MediaTime
+    public let headImage: CIImage?
+    public let tailImage: CIImage?
+    public let transitions: [LayerTransition]
     public init(clip: Clip, trackID: CMPersistentTrackID?, preferredTransform: CGAffineTransform = .identity,
-                image: CIImage? = nil, fallbackImage: CIImage? = nil) {
+                image: CIImage? = nil, fallbackImage: CIImage? = nil,
+                visibleStart: MediaTime? = nil, visibleEnd: MediaTime? = nil,
+                framesStart: MediaTime? = nil, framesEnd: MediaTime? = nil, headImage: CIImage? = nil, tailImage: CIImage? = nil,
+                transitions: [LayerTransition] = []) {
         self.clip = clip; self.trackID = trackID; self.preferredTransform = preferredTransform
         self.image = image; self.fallbackImage = fallbackImage
+        self.visibleStart = visibleStart ?? clip.start; self.visibleEnd = visibleEnd ?? clip.end
+        self.framesStart = framesStart ?? self.visibleStart; self.framesEnd = framesEnd ?? self.visibleEnd
+        self.headImage = headImage; self.tailImage = tailImage
+        self.transitions = transitions
+    }
+    /// The same layer showing a changed clip (style, text) and, for text, its new image.
+    func with(clip: Clip, image newImage: CIImage?) -> RenderLayer {
+        RenderLayer(clip:clip,trackID:trackID,preferredTransform:preferredTransform,image:newImage ?? image,fallbackImage:fallbackImage,
+                    visibleStart:visibleStart,visibleEnd:visibleEnd,framesStart:framesStart,framesEnd:framesEnd,
+                    headImage:headImage,tailImage:tailImage,transitions:transitions)
     }
 }
 
@@ -49,10 +74,7 @@ public final class FrameInstruction: NSObject, AVVideoCompositionInstructionProt
     /// without rebuilding the AVComposition or replacing the player item.
     public func replacingLayer(for clip: Clip, image newImage: CIImage? = nil) -> FrameInstruction {
         let updated = layers.map { layer in
-            layer.clip.id == clip.id
-                ? RenderLayer(clip:clip,trackID:layer.trackID,preferredTransform:layer.preferredTransform,
-                              image:newImage ?? layer.image,fallbackImage:layer.fallbackImage)
-                : layer
+            layer.clip.id == clip.id ? layer.with(clip:clip,image:newImage) : layer
         }
         return FrameInstruction(duration:timeRange.duration,trackIDs:(requiredSourceTrackIDs ?? []).compactMap { ($0 as? NSNumber)?.int32Value },layers:updated)
     }
@@ -80,24 +102,53 @@ public enum FrameRenderer {
                               frame: (CMPersistentTrackID) -> CVPixelBuffer?) throws -> CIImage {
         let bounds = CGRect(origin:.zero,size:size)
         var result = CIImage(color:.black).cropped(to:bounds)
-        for layer in layers where time >= layer.clip.start && time < layer.clip.end {
-            var image: CIImage
-            if let still = layer.image { image = still }
-            else if let id = layer.trackID, let buffer = frame(id) { image = CIImage(cvPixelBuffer:buffer).transformed(by:layer.coreImageOrientation) }
-            // A decoder that has not primed yet must not blank the frame or abort the whole render.
-            else if let fallback = layer.fallbackImage { image = fallback.transformed(by:layer.coreImageOrientation) }
-            else { continue }
-            let s = layer.clip.style
-            image = image.transformed(by:CGAffineTransform(translationX:-image.extent.minX,y:-image.extent.minY))
-            let extent = image.extent
-            guard extent.width > 0, extent.height > 0 else { continue }
-            let geometry = VisualGeometry(sourceSize:extent.size,canvasSize:size,style:s,isText:layer.clip.kind == .text)
-            image = image.applyingFilter("CIColorControls",parameters:[kCIInputBrightnessKey:s.brightness,kCIInputContrastKey:s.contrast,kCIInputSaturationKey:s.saturation])
-            image = image.transformed(by:geometry.renderTransform)
-                .applyingFilter("CIColorMatrix",parameters:["inputAVector":CIVector(x:0,y:0,z:0,w:s.opacity)])
-            result = image.composited(over:result)
+        // One side of a transition across a cut, waiting for the other side (the next layer on its
+        // lane): the two are combined over what the lanes below show, not stacked one on the other.
+        var waiting: (transition: LayerTransition, image: CIImage, lane: Lane)?
+        func flush() {
+            guard let w = waiting else { return }
+            waiting = nil
+            result = TransitionRenderer.composite(w.transition,below:result,outgoing:w.transition.role == .outgoing ? w.image : nil,
+                                                  incoming:w.transition.role == .incoming ? w.image : nil,at:time,canvas:bounds)
         }
+        for layer in layers where time >= layer.visibleStart && time < layer.visibleEnd {
+            guard let image = placedImage(layer,at:time,canvas:bounds,frame:frame) else { continue }
+            let active = layer.transitions.first { $0.contains(time) }
+            if let w = waiting, w.lane != layer.clip.lane || w.transition.id != active?.id { flush() }
+            guard let transition = active else { result = image.composited(over:result); continue }
+            if !transition.paired {
+                result = TransitionRenderer.composite(transition,below:result,outgoing:transition.role == .outgoing ? image : nil,
+                                                      incoming:transition.role == .incoming ? image : nil,at:time,canvas:bounds)
+            } else if let w = waiting {
+                waiting = nil
+                let (a,b) = transition.role == .incoming ? (w.image,image) : (image,w.image)
+                result = TransitionRenderer.composite(transition,below:result,outgoing:a,incoming:b,at:time,canvas:bounds)
+            } else {
+                waiting = (transition,image,layer.clip.lane)
+            }
+        }
+        flush()
         return result.cropped(to:bounds)
+    }
+    /// A layer's picture at `time`, styled and placed on the canvas.
+    private static func placedImage(_ layer: RenderLayer, at time: MediaTime, canvas bounds: CGRect, frame: (CMPersistentTrackID) -> CVPixelBuffer?) -> CIImage? {
+        var image: CIImage
+        if let still = layer.image { image = still }
+        else if let id = layer.trackID, let buffer = frame(id) { image = CIImage(cvPixelBuffer:buffer).transformed(by:layer.coreImageOrientation) }
+        // Outside the frames the track holds for a transition: hold the nearest one.
+        else if time < layer.framesStart, let head = layer.headImage ?? layer.fallbackImage { image = head.transformed(by:layer.coreImageOrientation) }
+        else if time >= layer.framesEnd, let tail = layer.tailImage ?? layer.fallbackImage { image = tail.transformed(by:layer.coreImageOrientation) }
+        // A decoder that has not primed yet must not blank the frame or abort the whole render.
+        else if let fallback = layer.fallbackImage { image = fallback.transformed(by:layer.coreImageOrientation) }
+        else { return nil }
+        let s = layer.clip.style
+        image = image.transformed(by:CGAffineTransform(translationX:-image.extent.minX,y:-image.extent.minY))
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+        let geometry = VisualGeometry(sourceSize:extent.size,canvasSize:bounds.size,style:s,isText:layer.clip.kind == .text)
+        image = image.applyingFilter("CIColorControls",parameters:[kCIInputBrightnessKey:s.brightness,kCIInputContrastKey:s.contrast,kCIInputSaturationKey:s.saturation])
+        return image.transformed(by:geometry.renderTransform)
+            .applyingFilter("CIColorMatrix",parameters:["inputAVector":CIVector(x:0,y:0,z:0,w:s.opacity)])
     }
     public static func textImage(_ style: ClipStyle) throws -> CIImage {
         let font = CTFontCreateWithName("HelveticaNeue-Bold" as CFString,style.fontSize,nil)

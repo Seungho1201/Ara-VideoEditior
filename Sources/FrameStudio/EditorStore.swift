@@ -16,10 +16,17 @@ import FrameMedia
     /// first responder, so the frame-step items must stand down or the caret cannot move.
     @Published var isEditingText = false
     @Published var selectedClipID: UUID? {
-        didSet { if previewTransformID != selectedClipID { previewTransformID = nil } }
+        didSet {
+            if previewTransformID != selectedClipID { previewTransformID = nil }
+            if selectedClipID != nil, selectedTransitionID != nil { selectedTransitionID = nil }
+        }
     }
     @Published var previewTransformID: UUID?
     @Published var selectedGap: TimelineGap?
+    /// A transition picked on the timeline; exclusive with a clip or gap selection.
+    @Published var selectedTransitionID: UUID?
+    enum SidePanel: String, CaseIterable { case inspector = "INSPECTOR", transitions = "TRANSITIONS" }
+    @Published var sidePanel: SidePanel = .inspector
     @Published var selectedMediaID: UUID?
     /// The playhead has its own observable. It moves up to 60 times a second while scrubbing and
     /// 30 while playing; published through the store, every move re-evaluated the whole editor
@@ -148,7 +155,7 @@ import FrameMedia
     @discardableResult func edit(_ name: String, _ operation: (inout Project) throws -> Void) -> Bool {
         commitPendingEdits()
         do {
-            var next = project; try operation(&next); _ = try next.validated()
+            var next = project; try operation(&next); next = try next.validated()   // also settles transitions
             guard next != project else { return true }
             if interactionStart == nil { history.record(project,name:name) }
             // Any timeline change can move the edges a gap selection was measured from.
@@ -271,7 +278,42 @@ import FrameMedia
         let base = interactionStart
         edit("Change speed") { try Editing.setSpeed(id,to:speed,in:&$0,basedOn:base) }
     }
-    func deleteSelection() { guard let id = selectedClipID else { return }; if edit("Delete clip",{ Editing.delete(id,from:&$0) }) { selectedClipID = nil } }
+    func deleteSelection() {
+        if selectedTransitionID != nil { removeSelectedTransition(); return }
+        guard let id = selectedClipID else { return }; if edit("Delete clip",{ Editing.delete(id,from:&$0) }) { selectedClipID = nil }
+    }
+    var selectedTransition: FrameCore.Transition? { selectedTransitionID.flatMap { id in project.transitions.first { $0.id == id } } }
+    func selectTransition(_ id: UUID?) {
+        selectedTransitionID = id
+        if id != nil { selectedClipID = nil; selectedGap = nil; sidePanel = .inspector }
+    }
+    /// Adds (or replaces) a transition on a clip edge and selects it. A new one takes its kind's
+    /// usual length; swapping the kind keeps the length and direction already there.
+    func applyTransition(_ kind: TransitionKind, from: UUID?, to: UUID?) {
+        var id: UUID?
+        if edit(from != nil && to != nil ? "Add transition" : to != nil ? "Add fade in" : "Add fade out", {
+            let existing = project.transitions.first { $0.from == from && $0.to == to }
+            id = try Editing.setTransition(kind,direction:existing?.direction ?? .left,duration:existing?.duration,from:from,to:to,in:&$0)
+        }), let id {
+            selectedTransitionID = id; selectedClipID = nil; selectedGap = nil
+            status = "\(kind.name) added · Delete to remove"
+        }
+    }
+    /// The selected clip's start or end: across the cut when a clip meets it there, else a fade.
+    func transitionEdge(ofSelectedClipAtEnd end: Bool) -> (from: UUID?, to: UUID?)? {
+        guard let clip = selectedClip, clip.lane.isVideo else { return nil }
+        guard let edge = Editing.edge(on:clip.lane,at:end ? clip.end : clip.start,in:project) else { return nil }
+        return end ? (from:clip.id,to:edge.to) : (from:edge.from,to:clip.id)
+    }
+    func updateSelectedTransition(kind: TransitionKind? = nil, direction: TransitionDirection? = nil, duration: MediaTime? = nil) {
+        guard let id = selectedTransitionID else { return }
+        let name = duration != nil ? "Transition length" : direction != nil ? "Transition direction" : "Transition kind"
+        edit(name) { try Editing.updateTransition(id,kind:kind,direction:direction,duration:duration,in:&$0) }
+    }
+    func removeSelectedTransition() {
+        guard let id = selectedTransitionID else { return }
+        if edit("Remove transition",{ Editing.removeTransition(id,from:&$0) }) { selectedTransitionID = nil }
+    }
     func copySelection() {
         guard let id = selectedClipID else { return }
         do {
@@ -298,7 +340,7 @@ import FrameMedia
             }
         } catch { report(error) }
     }
-    func selectGap(_ gap: TimelineGap?) { selectedGap = gap; if gap != nil { selectedClipID = nil } }
+    func selectGap(_ gap: TimelineGap?) { selectedGap = gap; if gap != nil { selectedClipID = nil; selectedTransitionID = nil } }
     func closeSelectedGap() {
         guard let gap = selectedGap else { return }
         // edit() clears selectedGap on success; restore it on failure so the outline stays put.
@@ -620,7 +662,7 @@ import FrameMedia
         player.replaceCurrentItem(with:nil); history = EditHistory(); playhead = .zero
         seekInFlight = nil; chaseTarget = nil; seeking = false
         proxyTask?.cancel(); proxyTask = nil; proxyJob = nil; proxyProgress = nil; proxies.removeAll(); proxyFailures.removeAll()
-        selectedClipID = nil; selectedGap = nil; selectedMediaID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
+        selectedClipID = nil; selectedGap = nil; selectedMediaID = nil; selectedTransitionID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
         // Keep security scopes until app termination: an in-flight cancelled reader may still own a buffer.
     }
     func newProject() {

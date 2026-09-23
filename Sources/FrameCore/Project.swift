@@ -129,9 +129,11 @@ public struct Project: Codable, Hashable, Sendable {
     /// carry neither and get the original two of each.
     public var videoTrackCount = 2
     public var audioTrackCount = 2
+    /// Transitions on clip edges (see Transition). Older documents have none.
+    public var transitions: [Transition] = []
     public static let trackCounts = 2...8
     public init() {}
-    private enum CodingKeys: String, CodingKey { case version, id, name, frameRate, media, clips, videoTrackCount, audioTrackCount }
+    private enum CodingKeys: String, CodingKey { case version, id, name, frameRate, media, clips, videoTrackCount, audioTrackCount, transitions }
     /// Hand-written so the track counts can be absent: synthesized decoding ignores defaults.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy:CodingKeys.self)
@@ -143,6 +145,7 @@ public struct Project: Codable, Hashable, Sendable {
         clips = try c.decode([Clip].self,forKey:.clips)
         videoTrackCount = try c.decodeIfPresent(Int.self,forKey:.videoTrackCount) ?? 2
         audioTrackCount = try c.decodeIfPresent(Int.self,forKey:.audioTrackCount) ?? 2
+        transitions = try c.decodeIfPresent([Transition].self,forKey:.transitions) ?? []
     }
     public var videoLanes: [Lane] { (0..<max(0,videoTrackCount)).map { Lane(.video,$0+1) } }
     public var audioLanes: [Lane] { (0..<max(0,audioTrackCount)).map { Lane(.audio,$0+1) } }
@@ -208,7 +211,11 @@ public struct Project: Codable, Hashable, Sendable {
                   v.mediaID == a.mediaID, v.start == a.start, v.duration == a.duration, v.sourceStart == a.sourceStart,
                   v.speed == a.speed, v.lane.paired == a.lane else { throw EditError("Linked video and audio are out of sync.") }
         }
-        return self
+        // Transitions follow their clips: any left dangling by an edit are dropped or shortened
+        // (a clip holds at most two, so the count is bounded afterwards).
+        let reconciled = reconcilingTransitions()
+        guard reconciled.transitions.count <= clips.count*2 else { throw EditError("Invalid transitions.") }
+        return reconciled
     }
 }
 
@@ -220,7 +227,7 @@ public struct EditError: LocalizedError, Sendable {
 
 public enum ProjectFile {
     public static func encode(_ project: Project) throws -> Data {
-        _ = try project.validated()
+        let project = try project.validated()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(project)
     }

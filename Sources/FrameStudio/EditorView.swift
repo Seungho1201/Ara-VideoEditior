@@ -35,7 +35,7 @@ struct EditorView: View {
                 HSplitView {
                     LibraryPanel(store:store).frame(minWidth:215,idealWidth:265,maxWidth:330)
                     viewer.frame(minWidth:390,maxWidth:.infinity,maxHeight:.infinity)
-                    InspectorPanel(store:store).frame(minWidth:250,idealWidth:280,maxWidth:320)
+                    SidePanel(store:store).frame(minWidth:250,idealWidth:280,maxWidth:320)
                 }.frame(minHeight:280,idealHeight:500)
                 timeline.frame(minHeight:345,idealHeight:345)
             }

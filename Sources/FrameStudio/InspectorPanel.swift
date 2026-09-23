@@ -17,9 +17,9 @@ struct InspectorPanel: View {
     @FocusState private var textFocused: Bool
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
-            HStack { panelTitle("INSPECTOR"); Spacer(); Image(systemName:"slider.horizontal.3").foregroundStyle(Theme.muted) }.padding(16)
-            Divider()
-            if let clip = store.selectedClip {
+            if let transition = store.selectedTransition {
+                transitionInspector(transition)
+            } else if let clip = store.selectedClip {
                 ScrollView {
                     VStack(alignment:.leading,spacing:18) {
                         VStack(alignment:.leading,spacing:6) {
@@ -125,6 +125,61 @@ struct InspectorPanel: View {
                 }.foregroundStyle(Theme.muted).frame(maxWidth:.infinity,maxHeight:.infinity)
             }
         }.background(Theme.panel)
+    }
+    /// A transition picked on the timeline: its kind, its length (fitted to its clips), removal.
+    @ViewBuilder private func transitionInspector(_ transition: FrameCore.Transition) -> some View {
+        let project = store.project
+        let lane = (transition.from ?? transition.to).flatMap(project.clip)?.lane.rawValue ?? "V"
+        let placement = transition.isCut ? "Across a cut" : transition.to != nil ? "Fade in" : "Fade out"
+        var others = project
+        let _ = others.transitions.removeAll { $0.id == transition.id }
+        let longest = max(project.frameRate.frame.seconds,others.longestTransition(from:transition.from,to:transition.to).seconds)
+        ScrollView {
+            VStack(alignment:.leading,spacing:18) {
+                VStack(alignment:.leading,spacing:6) {
+                    Text(transition.kind.name).font(.system(size:13,weight:.semibold))
+                    Text("\(lane) · \(placement)").font(.system(size:10)).foregroundStyle(Theme.accent)
+                }
+                Image(nsImage:TransitionPreviews.image(transition.kind,direction:transition.direction)).resizable().aspectRatio(16/9,contentMode:.fit)
+                    .clipShape(RoundedRectangle(cornerRadius:4)).frame(maxWidth:220)
+                section("TRANSITION") {
+                    HStack {
+                        Text("Kind").foregroundStyle(Theme.muted); Spacer()
+                        Picker("",selection:Binding(get:{store.selectedTransition?.kind ?? transition.kind},set:{ store.updateSelectedTransition(kind:$0) })) {
+                            ForEach(TransitionKind.Category.allCases,id:\.self) { category in
+                                Section(category.rawValue) {
+                                    ForEach(TransitionKind.allCases.filter { $0.category == category }) { Text($0.name).tag($0) }
+                                }
+                            }
+                        }.labelsHidden().controlSize(.small).frame(maxWidth:150)
+                    }
+                    if transition.kind.hasDirection {
+                        HStack {
+                            Text("Direction").foregroundStyle(Theme.muted); Spacer()
+                            Picker("",selection:Binding(get:{store.selectedTransition?.direction ?? transition.direction},set:{ store.updateSelectedTransition(direction:$0) })) {
+                                ForEach(TransitionDirection.allCases) { direction in
+                                    Image(systemName:"arrow.\(direction.rawValue)").tag(direction).accessibilityLabel(direction.rawValue.capitalized)
+                                }
+                            }.pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(maxWidth:150)
+                        }
+                    }
+                    HStack {
+                        Text("Duration").foregroundStyle(Theme.muted); Spacer()
+                        Text(String(format:"%.2f s",(store.selectedTransition?.duration ?? transition.duration).seconds)).font(.system(size:10,design:.monospaced))
+                    }
+                    Slider(value:Binding(get:{store.selectedTransition?.duration.seconds ?? transition.duration.seconds},
+                                         set:{ store.updateSelectedTransition(duration:MediaTime(seconds:$0)) }),
+                           in:project.frameRate.frame.seconds...max(project.frameRate.frame.seconds+0.001,longest),
+                           onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } })
+                        .controlSize(.mini).accessibilityLabel("Transition duration")
+                    Text(!transition.isCut ? "Plays inside the clip; the tracks below show through."
+                         : transition.kind.needsBothPictures ? "Centred on the cut, both clips playing. Where a clip has no footage beyond the cut, its edge frame is held."
+                         : "Centred on the cut: out of the first clip, into the next. Needs no footage beyond the cut.")
+                        .font(.system(size:9)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
+                }
+                Button("Remove transition  ⌫") { store.removeSelectedTransition() }.controlSize(.small)
+            }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
+        }
     }
     private func syncDraft(from clip: Clip, force: Bool) {
         // A new document counts as a new clip even when ids match (Save As keeps them).
