@@ -93,8 +93,10 @@ struct EditorView: View {
         } label: {
             HStack(spacing:4) {
                 Image(systemName:"speedometer")
-                Text(store.canRetimeSelection ? String(format:"%.2fx",store.selectedSpeed) : "Speed")
-                    .font(.system(size:11,weight:.medium,design:.monospaced))
+                // The selected clip's speed; with nothing to retime the gauge stands alone.
+                if store.canRetimeSelection {
+                    Text(String(format:"%.2fx",store.selectedSpeed)).font(.system(size:11,weight:.medium,design:.monospaced))
+                }
             }
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
@@ -151,9 +153,11 @@ struct EditorView: View {
                     if store.isCapturingSnapshot { ProgressView().controlSize(.mini).frame(width:16,height:16) }
                     else { Image(systemName:"camera").frame(width:16,height:16) }
                 }.disabled(!store.canCaptureSnapshot).help("Save current frame as PNG ⇧⌘E").accessibilityLabel("Capture timeline snapshot")
-                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil).help("Delete linked clips")
-                Button { store.addText() } label:{Text("Text")}.help("Add text to V2 at playhead").accessibilityLabel("Add text clip")
                 speedMenu
+                Button { store.addText() } label:{
+                    CaptionsGlyph(lineWidth:1).stroke(style:StrokeStyle(lineWidth:1,lineCap:.round,lineJoin:.round)).frame(width:17,height:12.6)
+                }.help("Add text to V2 at playhead ⇧⌘T").accessibilityLabel("Add text clip")
+                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil).help("Delete linked clips")
                 Spacer(minLength:4)
                 Toggle(isOn:$store.snapping) { Image(systemName:"point.topleft.down.to.point.bottomright.curvepath") }.toggleStyle(.button).help("Snap to clip edges and playhead N")
                 Text("−").foregroundStyle(Theme.muted)
@@ -303,4 +307,37 @@ private struct LibraryDragHandle: NSViewRepresentable {
         beginDraggingSession(with:[item],event:event,source:self)
     }
     func draggingSession(_ session:NSDraggingSession,sourceOperationMaskFor context:NSDraggingContext) -> NSDragOperation { .copy }
+}
+
+/// Closed-captions mark: a rounded frame, open on the right edge, around two C's. Stroked, so it
+/// takes the button's colour and dims with it like the SF Symbols beside it.
+private struct CaptionsGlyph: Shape {
+    var lineWidth: CGFloat
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx:lineWidth/2,dy:lineWidth/2)
+        let w = r.width, h = r.height, corner = h*0.26
+        var p = Path()
+        // Frame, clockwise from just below the opening on the right edge.
+        p.move(to:CGPoint(x:r.maxX,y:r.minY+h*0.78))
+        p.addLine(to:CGPoint(x:r.maxX,y:r.maxY-corner))
+        p.addRelativeArc(center:CGPoint(x:r.maxX-corner,y:r.maxY-corner),radius:corner,startAngle:.degrees(0),delta:.degrees(90))
+        p.addLine(to:CGPoint(x:r.minX+corner,y:r.maxY))
+        p.addRelativeArc(center:CGPoint(x:r.minX+corner,y:r.maxY-corner),radius:corner,startAngle:.degrees(90),delta:.degrees(90))
+        p.addLine(to:CGPoint(x:r.minX,y:r.minY+corner))
+        p.addRelativeArc(center:CGPoint(x:r.minX+corner,y:r.minY+corner),radius:corner,startAngle:.degrees(180),delta:.degrees(90))
+        p.addLine(to:CGPoint(x:r.maxX-corner,y:r.minY))
+        p.addRelativeArc(center:CGPoint(x:r.maxX-corner,y:r.minY+corner),radius:corner,startAngle:.degrees(270),delta:.degrees(90))
+        p.addLine(to:CGPoint(x:r.maxX,y:r.minY+h*0.58))
+        // Two C's: arcs over and under a short straight back, open to the right. The arcs stop
+        // short of horizontal so the opening stays visible at toolbar size.
+        let cw = w*0.23, ch = h*0.5, cr = cw/2, top = r.midY-ch/2, sweep = 145.0
+        for left in [r.minX+w*0.2, r.minX+w*0.56] {
+            let upper = CGPoint(x:left+cr,y:top+cr), lower = CGPoint(x:left+cr,y:top+ch-cr)
+            p.move(to:CGPoint(x:upper.x+cr*cos(-(180-sweep)*Double.pi/180),y:upper.y+cr*sin(-(180-sweep)*Double.pi/180)))
+            p.addRelativeArc(center:upper,radius:cr,startAngle:.degrees(-(180-sweep)),delta:.degrees(-sweep))
+            p.addLine(to:CGPoint(x:left,y:lower.y))
+            p.addRelativeArc(center:lower,radius:cr,startAngle:.degrees(180),delta:.degrees(-sweep))
+        }
+        return p
+    }
 }
