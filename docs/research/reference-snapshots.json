@@ -1,0 +1,117 @@
+{
+  "review_date": "2026-09-21",
+  "repositories": [
+    {
+      "repo": "AcademySoftwareFoundation/OpenTimelineIO",
+      "sha": "8ab0cf963624cfe3daf3c79c937cf603b4ef783b",
+      "pushed_at": "2026-09-20T20:23:20Z",
+      "license": "Apache-2.0",
+      "files": [
+        "README.md",
+        "LICENSE.txt",
+        "src/opentimelineio/timeline.h"
+      ]
+    },
+    {
+      "repo": "MetalPetal/MetalPetal",
+      "sha": "f9b78897bd4214bb097f352a1bde0a4f4a1e2ddb",
+      "pushed_at": "2024-04-10T13:30:17Z",
+      "license": "MIT",
+      "files": [
+        "README.md",
+        "Package.swift",
+        "LICENSE",
+        "Frameworks/MetalPetal/MTIContext.m",
+        "Sources/MetalPetalObjectiveC/MTIContext.m"
+      ]
+    },
+    {
+      "repo": "MetalPetal/VideoIO",
+      "sha": "1623b3d597d8ae987979ce8ac7b1ce0d085d2855",
+      "pushed_at": "2024-04-06T12:23:34Z",
+      "license": "MIT",
+      "files": [
+        "README.md",
+        "Package.swift",
+        "LICENSE",
+        "Sources/VideoIO/VideoComposition.swift"
+      ]
+    },
+    {
+      "repo": "SteliyanH/kadr",
+      "sha": "f7341d17d51d524941f6d4ca99a4b181fb59cbc5",
+      "pushed_at": "2026-09-01T09:10:24Z",
+      "license": "Apache-2.0",
+      "files": [
+        "README.md",
+        "Package.swift",
+        "LICENSE",
+        "Sources/Kadr/Engine/CompositionBuilder.swift",
+        "Sources/Kadr/Engine/Compositor.swift"
+      ]
+    },
+    {
+      "repo": "SteliyanH/kadr-ui",
+      "sha": "e62c5a0423bcfd4b10bb8b556e30ac47c5c4bf20",
+      "pushed_at": "2026-09-01T08:17:44Z",
+      "license": "Apache-2.0",
+      "files": [
+        "README.md",
+        "Package.swift",
+        "LICENSE",
+        "Sources/KadrUI/TimelineView.swift"
+      ]
+    },
+    {
+      "repo": "dmrschmidt/DSWaveformImage",
+      "sha": "bc1b2b1e7fce2eb46150c64045c720782d18595d",
+      "pushed_at": "2026-05-17T09:14:09Z",
+      "license": "MIT",
+      "files": [
+        "README.md",
+        "Package.swift",
+        "LICENSE",
+        "Sources/DSWaveformImage/WaveformAnalyzer.swift",
+        "Tests/DSWaveformImageTests/WaveformAnalyzerTests.swift"
+      ]
+    },
+    {
+      "repo": "orchetect/swift-timecode",
+      "sha": "030953703600abd11921655232420278894ecfad",
+      "pushed_at": "2026-08-15T08:33:59Z",
+      "license": "MIT",
+      "files": [
+        "README.md",
+        "Package.swift",
+        "LICENSE",
+        "Sources/SwiftTimecode/SwiftTimecode.swift",
+        "Sources/SwiftTimecodeAV/AVFoundation Extensions/CMTimeCode.swift"
+      ]
+    },
+    {
+      "repo": "shenghaoc/localcut-studio",
+      "sha": "234db71755a9c963bbbbb472a02737ee287d7796",
+      "pushed_at": "2026-08-04T16:02:39Z",
+      "license": "MIT",
+      "files": [
+        "README.md",
+        "LICENSE",
+        "LocalCut Studio/CompositionBuilder.swift",
+        "LocalCut Studio/EffectCompositor.swift"
+      ]
+    },
+    {
+      "repo": "tuxi/TimelineKit",
+      "sha": "b226e2bd64c16c111a1c6df15f59508e1a7f83f6",
+      "pushed_at": "2026-09-10T11:04:45Z",
+      "license": "MIT",
+      "files": [
+        "README.md",
+        "Package.swift",
+        "LICENSE",
+        "Sources/TimelineKitCore/TimelineDocument.swift",
+        "Sources/TimelineKitRender/Rendering/ColorAdjustmentCompositor.swift"
+      ]
+    }
+  ]
+}

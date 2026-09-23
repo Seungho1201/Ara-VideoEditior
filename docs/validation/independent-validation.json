@@ -1,0 +1,88 @@
+{
+  "streams": {
+    "validation-1080.mp4": {
+      "size": [
+        1920,
+        1080
+      ],
+      "fps": "30",
+      "frames": 195,
+      "duration": "6.500000",
+      "audio_duration": "6.500000",
+      "codecs": "H.264 / AAC",
+      "color": "Rec.709"
+    },
+    "validation-4k.mp4": {
+      "size": [
+        3840,
+        2160
+      ],
+      "fps": "30",
+      "frames": 30,
+      "duration": "1.000000",
+      "audio_duration": "1.000000",
+      "codecs": "H.264 / AAC",
+      "color": "Rec.709"
+    },
+    "validation-audio-only.mp4": {
+      "size": [
+        1920,
+        1080
+      ],
+      "fps": "30",
+      "frames": 30,
+      "duration": "1.000000",
+      "audio_duration": "1.000000",
+      "codecs": "H.264 / AAC",
+      "color": "Rec.709"
+    },
+    "validation-2997.mp4": {
+      "size": [
+        1920,
+        1080
+      ],
+      "fps": "30000/1001",
+      "frames": 31,
+      "duration": "1.034367",
+      "audio_duration": "1.034375",
+      "codecs": "H.264 / AAC",
+      "color": "Rec.709"
+    }
+  },
+  "audio": {
+    "volume_ratio_left_channel": 0.2437987341552065,
+    "requested_volume": 0.25,
+    "gap_rms": 0.0,
+    "beep_onsets": [
+      {
+        "expected_seconds": 0,
+        "actual_seconds": 0.00010416666666666667
+      },
+      {
+        "expected_seconds": 1,
+        "actual_seconds": 1.0001666666666666
+      },
+      {
+        "expected_seconds": 2,
+        "actual_seconds": 2.000354166666667
+      },
+      {
+        "expected_seconds": 4.5,
+        "actual_seconds": 4.500125
+      },
+      {
+        "expected_seconds": 5.5,
+        "actual_seconds": 5.500270833333333
+      }
+    ],
+    "muted_overlay": "pass"
+  },
+  "visuals": {
+    "base_red": "pass",
+    "overlaid_transformed_video": "pass",
+    "text_in_gap": "pass",
+    "still_above_base": "pass",
+    "overlay_fraction": 0.2513888888888889,
+    "text_pixels": 755
+  }
+}

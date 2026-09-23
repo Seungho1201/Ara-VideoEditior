@@ -1,0 +1,38 @@
+Building for debugging...
+[4 / 25] FrameCore
+[9 / 23] FrameMedia
+[14 / 18] FrameStudio-product
+[17 / 21] FrameStudio-product
+[18 / 21] FrameStudio-product
+[21 / 24] FrameStudio-product
+[23 / 24] FrameStudio-product
+Build complete! (2.21초)
+Test Suite 'All tests' started at 2026-09-21 22:10:17.798.
+Test Suite 'FrameCoreTests.xctest' started at 2026-09-21 22:10:17.798.
+Test Suite 'EditingTests' started at 2026-09-21 22:10:17.798.
+Test Case '-[FrameCoreTests.EditingTests testDeleteRemovesOnlyLinkedPair]' started.
+Test Case '-[FrameCoreTests.EditingTests testDeleteRemovesOnlyLinkedPair]' passed (0.001 seconds).
+Test Case '-[FrameCoreTests.EditingTests testFractionalFrameClockHasNoAccumulatedDrift]' started.
+Test Case '-[FrameCoreTests.EditingTests testFractionalFrameClockHasNoAccumulatedDrift]' passed (0.000 seconds).
+Test Case '-[FrameCoreTests.EditingTests testHistoryAndPersistenceRoundTrip]' started.
+Test Case '-[FrameCoreTests.EditingTests testHistoryAndPersistenceRoundTrip]' passed (0.001 seconds).
+Test Case '-[FrameCoreTests.EditingTests testImageDurationAtFractionalRateAndVersionValidation]' started.
+Test Case '-[FrameCoreTests.EditingTests testImageDurationAtFractionalRateAndVersionValidation]' passed (0.000 seconds).
+Test Case '-[FrameCoreTests.EditingTests testLinkedSplitTrimMovePreservesSourceAndSync]' started.
+Test Case '-[FrameCoreTests.EditingTests testLinkedSplitTrimMovePreservesSourceAndSync]' passed (0.000 seconds).
+Test Case '-[FrameCoreTests.EditingTests testMalformedProjectTimesAndPropertiesAreRejected]' started.
+Test Case '-[FrameCoreTests.EditingTests testMalformedProjectTimesAndPropertiesAreRejected]' passed (0.000 seconds).
+Test Case '-[FrameCoreTests.EditingTests testRejectedEditIsAtomic]' started.
+Test Case '-[FrameCoreTests.EditingTests testRejectedEditIsAtomic]' passed (0.000 seconds).
+Test Case '-[FrameCoreTests.EditingTests testSnapIncludesEndAndExcludesLinkedSelf]' started.
+Test Case '-[FrameCoreTests.EditingTests testSnapIncludesEndAndExcludesLinkedSelf]' passed (0.000 seconds).
+Test Suite 'EditingTests' passed at 2026-09-21 22:10:17.801.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'FrameCoreTests.xctest' passed at 2026-09-21 22:10:17.801.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'All tests' passed at 2026-09-21 22:10:17.801.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+◇ Test run started.
+↳ Testing Library Version: 2084
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

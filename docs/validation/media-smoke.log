@@ -1,0 +1,18 @@
+PASS import / analysis / bookmark: base.mp4
+PASS import / analysis / bookmark: overlay.mp4
+PASS import / analysis / bookmark: still.png
+PASS import / analysis / bookmark: tone.wav
+PASS 1080p export completed
+PASS preview/export frame 0.5s, mean normalized difference 0.002614742193173566
+PASS preview/export frame 1.5s, mean normalized difference 7.334785766158315e-05
+PASS preview/export frame 3.5s, mean normalized difference 8.224400871459695e-05
+PASS preview/export frame 4.5s, mean normalized difference 0.00017220406681190995
+PASS preview/export frame 6.25s, mean normalized difference 0.00261437908496732
+PASS missing media fails explicitly
+PASS rejected invalid.mov: Unsupported or protected media: invalid.mov
+PASS rejected hdr.mp4: HDR input is not supported in this SDR Rec.709 version. Convert hdr.mp4 to SDR Rec.709 first.
+PASS 4K image + text + silent AAC export
+PASS audio-only timeline export
+PASS 30000/1001 fps, 31-frame export
+PASS failed export preserves destination and removes working files
+PASS running export cancellation and cleanup
