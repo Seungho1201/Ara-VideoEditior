@@ -75,4 +75,22 @@ final class VisualGeometryTests: XCTestCase {
         XCTAssertEqual(history.redo(before),project)
         XCTAssertEqual(try ProjectFile.decode(ProjectFile.encode(project)),project)
     }
+    func testOutlineHitIsABandAroundTheEdgesEvenWhenRotatedAndOffCanvas() {
+        var style = ClipStyle(); style.rotation = 30; style.x = 0.8; style.scale = 1.2   // pushed well off the right edge
+        let g = VisualGeometry(sourceSize:CGSize(width:400,height:300),canvasSize:CGSize(width:640,height:360),style:style)
+        let c = g.corners
+        let mid = CGPoint(x:(c[0].x+c[1].x)/2,y:(c[0].y+c[1].y)/2)           // middle of the top edge
+        XCTAssertTrue(g.isNearOutline(mid))
+        XCTAssertGreaterThan(mid.x, 0)
+        // Five points straight out from that edge: on the band. Twenty: off it.
+        let dx = c[1].x-c[0].x, dy = c[1].y-c[0].y, n = hypot(dx,dy)
+        let normal = CGPoint(x:-dy/n,y:dx/n)
+        XCTAssertTrue(g.isNearOutline(CGPoint(x:mid.x+normal.x*5,y:mid.y+normal.y*5)))
+        XCTAssertFalse(g.isNearOutline(CGPoint(x:mid.x+normal.x*20,y:mid.y+normal.y*20)))
+        // The centre of the clip is inside it but nowhere near its outline.
+        let centre = CGPoint(x:(c[0].x+c[2].x)/2,y:(c[0].y+c[2].y)/2)
+        XCTAssertTrue(g.contains(centre)); XCTAssertFalse(g.isNearOutline(centre))
+        // Corners belong to the band too.
+        XCTAssertTrue(g.isNearOutline(c[2]))
+    }
 }

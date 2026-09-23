@@ -266,7 +266,7 @@ struct TimelineSurface: NSViewRepresentable {
             else { store.step(event.modifierFlags.contains(.shift) ? 10 : 1) }
         case 49: store.togglePlayback()
         case 51,117: store.deleteSelection()
-        case 53: mode = nil; candidate = nil; original = nil; moved = false; store.selectedGap = nil; needsDisplay = true
+        case 53: mode = nil; candidate = nil; original = nil; moved = false; store.selectedGap = nil; store.previewTransformID = nil; needsDisplay = true
         default: super.keyDown(with:event)
         }
     }

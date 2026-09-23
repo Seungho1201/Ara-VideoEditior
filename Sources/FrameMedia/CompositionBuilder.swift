@@ -17,13 +17,19 @@ public final class RenderBundle: @unchecked Sendable {
     @MainActor public func playerItem() -> AVPlayerItem {
         let item = AVPlayerItem(asset:composition); item.videoComposition = videoComposition; item.audioMix = audioMix
         item.audioTimePitchAlgorithm = .spectral
+        // A seek completes once its composed frame is on screen, not when the timing moves: the
+        // editor chases seeks one at a time while scrubbing and needs to know when a frame landed.
+        item.seekingWaitsForVideoCompositionRendering = true
         return item
     }
 }
 
 public actor CompositionBuilder {
     public init() {}
-    public func build(_ project: Project, urls: [UUID:URL], height: Int = 1080) async throws -> RenderBundle {
+    /// `videoURLs` replaces the picture (never the sound) of a source with a stand-in such as its
+    /// FHD preview proxy. A stand-in must share the source's timing and aspect ratio; one that has
+    /// gone missing (caches can be purged) falls back to the original.
+    public func build(_ project: Project, urls: [UUID:URL], height: Int = 1080, videoURLs: [UUID:URL] = [:]) async throws -> RenderBundle {
         _ = try project.validated()
         guard project.duration > .zero else { throw EditError("Add a clip to the timeline first.") }
         guard height == 1080 || height == 2160 else { throw EditError("Unsupported output resolution.") }
@@ -58,7 +64,11 @@ public actor CompositionBuilder {
         var layerTracks: [UUID:CMPersistentTrackID] = [:]
         var transforms: [UUID:CGAffineTransform] = [:]
         var videoIDs: [CMPersistentTrackID] = [clock.trackID]
-        var assetCache: [UUID:AVURLAsset] = [:]
+        var assetCache: [URL:AVURLAsset] = [:]
+        func pictureURL(_ id: UUID, _ url: URL) -> URL {
+            guard let standIn = videoURLs[id], FileManager.default.isReadableFile(atPath:standIn.path) else { return url }
+            return standIn
+        }
         for lane in Lane.allCases {
             let clips = project.clips.filter { $0.lane == lane && ($0.kind == .video || $0.kind == .audio) }.sorted { $0.start < $1.start }
             guard !clips.isEmpty else { continue }
@@ -67,8 +77,9 @@ public actor CompositionBuilder {
             let parameters = AVMutableAudioMixInputParameters(track:track); parameters.setVolume(0,at:.zero)
             for clip in clips {
                 try Task.checkCancellation()
-                guard let id = clip.mediaID, let url = urls[id] else { throw EditError("Missing media URL.") }
-                let asset = assetCache[id] ?? AVURLAsset(url:url); assetCache[id] = asset
+                guard let id = clip.mediaID, let original = urls[id] else { throw EditError("Missing media URL.") }
+                let url = type == .video ? pictureURL(id,original) : original
+                let asset = assetCache[url] ?? AVURLAsset(url:url); assetCache[url] = asset
                 guard let source = try await asset.loadTracks(withMediaType:type).first else { throw EditError("No \(type.rawValue) stream in \(clip.name).") }
                 let sourceRange = CMTimeRange(start:clip.sourceStart.cmTime,duration:clip.sourceLength.cmTime)
                 let available = try await source.load(.timeRange)
@@ -108,7 +119,7 @@ public actor CompositionBuilder {
                 // still beats both a black flash and aborting the whole render.
                 var fallback: CIImage?
                 if clip.kind == .video, let id = clip.mediaID, let url = urls[id] {
-                    let generator = AVAssetImageGenerator(asset:AVURLAsset(url:url))
+                    let generator = AVAssetImageGenerator(asset:assetCache[pictureURL(id,url)] ?? AVURLAsset(url:pictureURL(id,url)))
                     generator.appliesPreferredTrackTransform = false
                     // Must be the clip's own in-point: a loose tolerance returns an unrelated keyframe.
                     generator.requestedTimeToleranceBefore = .zero

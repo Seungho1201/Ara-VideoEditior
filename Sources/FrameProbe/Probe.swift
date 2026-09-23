@@ -118,6 +118,107 @@ actor ProgressFlag {
         let firstLuma = stride(from:0,to:firstHDR.count,by:4).reduce(0.0) { $0 + Double(firstHDR[$1]) + Double(firstHDR[$1+1]) + Double(firstHDR[$1+2]) } / Double(160*90*3)
         try require(firstLuma > 8,"HDR first frame is not black, mean \(firstLuma)")
         print("PASS HDR import tone-mapped to SDR Rec.709, first frame mean \(Int(firstLuma))")
+        // A rotated (portrait) source must render the way its preferred transform shows it, not upside down.
+        let rotatedURL = fixtures.appendingPathComponent("rotated.mp4")
+        let rotatedMedia = try await library.inspect(rotatedURL)
+        try require(rotatedMedia.width < rotatedMedia.height,"rotated fixture imports as portrait")
+        var rotatedProject = Project(); rotatedProject.media = [rotatedMedia]
+        _ = try Editing.add(mediaID:rotatedMedia.id,lane:.v1,at:.zero,to:&rotatedProject)
+        let rotatedBundle = try await builder.build(rotatedProject,urls:[rotatedMedia.id:rotatedURL])
+        let at = CMTime(seconds:1,preferredTimescale:600)
+        let composed = AVAssetImageGenerator(asset:rotatedBundle.composition); composed.videoComposition = rotatedBundle.videoComposition
+        composed.requestedTimeToleranceBefore = .zero; composed.requestedTimeToleranceAfter = .zero
+        let upright = AVAssetImageGenerator(asset:AVURLAsset(url:rotatedURL)); upright.appliesPreferredTrackTransform = true
+        upright.requestedTimeToleranceBefore = .zero; upright.requestedTimeToleranceAfter = .zero
+        let canvasFrame = try await composed.image(at:at).image, reference = try await upright.image(at:at).image
+        let fit = min(Double(canvasFrame.width)/Double(reference.width),Double(canvasFrame.height)/Double(reference.height))
+        let box = CGRect(x:(Double(canvasFrame.width)-Double(reference.width)*fit)/2,y:(Double(canvasFrame.height)-Double(reference.height)*fit)/2,
+                         width:Double(reference.width)*fit,height:Double(reference.height)*fit).integral
+        let shown = canvasFrame.cropping(to:box)!
+        let turned: CGImage = {
+            let c = CGContext(data:nil,width:reference.width,height:reference.height,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)!
+            c.translateBy(x:CGFloat(reference.width),y:CGFloat(reference.height)); c.rotate(by:.pi)
+            c.draw(reference,in:CGRect(x:0,y:0,width:reference.width,height:reference.height)); return c.makeImage()! }()
+        let asShown = meanDifference(shown,reference), ifFlipped = meanDifference(shown,turned)
+        try require(asShown < 0.02 && asShown < ifFlipped,"rotated source renders upright (difference \(asShown), upside down would be \(ifFlipped))")
+        print("PASS rotated portrait source renders upright (difference \(asShown))")
+        // Sources above FHD are previewed from a 1080p proxy: same timing, colour tags and
+        // orientation, and a preview built from it matches one built from the original.
+        try require(!ProxyMaker.wantsProxy(width:1920,height:1080) && !ProxyMaker.wantsProxy(width:1080,height:1920)
+                    && ProxyMaker.wantsProxy(width:3840,height:2160) && ProxyMaker.wantsProxy(width:2160,height:3840),"only sources above FHD want a proxy")
+        try require(ProxyMaker.proxySize(for:CGSize(width:4096,height:2160)) == CGSize(width:1920,height:1012),"DCI 4K proxies to an even 1920 wide")
+        let fhdURL = fixtures.appendingPathComponent("base.mp4")
+        try require(try await ProxyMaker.make(from:fhdURL) == nil,"a source within FHD gets no proxy")
+        let bigURL = fixtures.appendingPathComponent("hlg4k.mov")
+        let bigMedia = try await library.inspect(bigURL)
+        try? FileManager.default.removeItem(at:ProxyMaker.url(for:bigURL))
+        guard let proxyURL = try await ProxyMaker.make(from:bigURL) else { throw EditError("CHECK FAILED: 4K source made no proxy") }
+        let bigTrack = try await AVURLAsset(url:bigURL).loadTracks(withMediaType:.video).first!
+        let proxyTrack = try await AVURLAsset(url:proxyURL).loadTracks(withMediaType:.video).first!
+        let (bigTransform,bigRange) = try await bigTrack.load(.preferredTransform,.timeRange)
+        let (proxySize,proxyTransform,proxyRange,proxyFormats) = try await proxyTrack.load(.naturalSize,.preferredTransform,.timeRange,.formatDescriptions)
+        try require(proxySize == CGSize(width:1920,height:1080),"proxy is 1920 × 1080, got \(proxySize)")
+        try require(proxyTransform.a == bigTransform.a && proxyTransform.b == bigTransform.b && proxyTransform.c == bigTransform.c && proxyTransform.d == bigTransform.d,"proxy keeps the source orientation")
+        try require(abs(proxyRange.start.seconds-bigRange.start.seconds) < 0.05 && abs(proxyRange.end.seconds-bigRange.end.seconds) < 0.1,"proxy spans the source's time range")
+        let proxyTransfer = proxyFormats.first.flatMap { CMFormatDescriptionGetExtension($0,extensionKey:kCMFormatDescriptionExtension_TransferFunction) as? String }
+        try require(proxyTransfer == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String),"proxy keeps the HLG transfer, got \(proxyTransfer ?? "nil")")
+        // Every picture at exactly the source's timestamp (29.97 fps is off the writer's default
+        // 1/600 grid; rounded, the preview would show the neighbouring frame at many frame times).
+        var sourceTimes = try await decodedTimes(bigURL), proxyTimes = try await decodedTimes(proxyURL)
+        if let first = sourceTimes.first, first > bigRange.start, proxyTimes.first == bigRange.start { proxyTimes.removeFirst() }   // lead-in
+        try require(!sourceTimes.isEmpty && proxyTimes == sourceTimes,"proxy frames carry the source's exact timestamps (\(proxyTimes.count) vs \(sourceTimes.count), first mismatch \(zip(proxyTimes,sourceTimes).first(where: { $0 != $1 }).map { "\($0.0.value)/\($0.0.timescale) vs \($0.1.value)/\($0.1.timescale)" } ?? "none"))")
+        sourceTimes.removeAll()
+        var bigProject = Project(); bigProject.media = [bigMedia]
+        let bigClip = try Editing.add(mediaID:bigMedia.id,lane:.v1,at:.zero,to:&bigProject)
+        if let i = bigProject.clips.firstIndex(where: { $0.id == bigClip }) { bigProject.clips[i].style.x = 0.12; bigProject.clips[i].style.scale = 1.4; bigProject.clips[i].style.rotation = 9 }
+        let fromOriginal = try await builder.build(bigProject,urls:[bigMedia.id:bigURL])
+        let fromProxy = try await builder.build(bigProject,urls:[bigMedia.id:bigURL],videoURLs:[bigMedia.id:proxyURL])
+        var worstProxy = 0.0
+        for seconds in [0.0,0.7,1.4] {
+            func still(_ bundle: RenderBundle) async throws -> CGImage {
+                let generator = AVAssetImageGenerator(asset:bundle.composition); generator.videoComposition = bundle.videoComposition
+                generator.requestedTimeToleranceBefore = .zero; generator.requestedTimeToleranceAfter = .zero
+                return try await generator.image(at:CMTime(seconds:seconds,preferredTimescale:600)).image
+            }
+            worstProxy = max(worstProxy,meanDifference(try await still(fromOriginal),try await still(fromProxy)))
+        }
+        try require(worstProxy < 0.012,"proxy preview matches the original preview (difference \(worstProxy))")
+        // A proxy the system purged from Caches must not break the preview: the original is read instead.
+        let purged = MediaPaths.cache.appendingPathComponent("purged-\(UUID().uuidString).mov")
+        let fallback = try await builder.build(bigProject,urls:[bigMedia.id:bigURL],videoURLs:[bigMedia.id:purged])
+        let fallbackSources = fallback.composition.tracks(withMediaType:.video).flatMap { $0.segments.compactMap(\.sourceURL) }
+        try require(fallbackSources.contains(bigURL) && !fallbackSources.contains(purged),"a missing proxy falls back to the original")
+        print("PASS 4K HLG source previews from a 1080p proxy (parity difference \(worstProxy))")
+        // Phone HEVC often decodes nothing for its first frames, so the first picture arrives after
+        // the track starts. The proxy must still have a picture from the very start.
+        let leadURL = fixtures.appendingPathComponent("lead4k.mp4")
+        let sourceStart = try await firstDecodedTime(leadURL)
+        try require(sourceStart > .zero,"lead4k.mp4 decodes late, as phone footage does (else this check proves nothing), first at \(sourceStart.seconds)")
+        try? FileManager.default.removeItem(at:ProxyMaker.url(for:leadURL))
+        guard let leadProxy = try await ProxyMaker.make(from:leadURL) else { throw EditError("CHECK FAILED: lead4k.mp4 made no proxy") }
+        // What matters is the composed preview: an empty span there gets no source frame and goes black.
+        let leadMedia = try await library.inspect(leadURL)
+        var leadProject = Project(); leadProject.media = [leadMedia]
+        _ = try Editing.add(mediaID:leadMedia.id,lane:.v1,at:.zero,to:&leadProject)
+        let leadBundle = try await builder.build(leadProject,urls:[leadMedia.id:leadURL],videoURLs:[leadMedia.id:leadProxy])
+        let leadGenerator = AVAssetImageGenerator(asset:leadBundle.composition); leadGenerator.videoComposition = leadBundle.videoComposition
+        leadGenerator.requestedTimeToleranceBefore = .zero; leadGenerator.requestedTimeToleranceAfter = .zero
+        let leadFirst = pixels(try await leadGenerator.image(at:.zero).image)
+        let leadLuma = stride(from:0,to:leadFirst.count,by:4).reduce(0.0) { $0 + Double(leadFirst[$1]) + Double(leadFirst[$1+1]) + Double(leadFirst[$1+2]) } / Double(160*90*3)
+        try require(leadLuma > 30,"the preview's first frame from the proxy is a picture, not black (mean \(leadLuma))")
+        print("PASS proxy of a late-starting source has a picture from its first frame")
+        // Sources a plain HEVC proxy cannot stand in for are previewed from the original: colour tags
+        // the writer has no constant for (it would raise an uncatchable exception), an alpha
+        // channel (the proxy would be opaque), and non-square pixels (it would change the shape).
+        for name in ["bt470bg-1440.mp4","alpha-1440.mov","anamorphic-1440.mp4"] {
+            let url = fixtures.appendingPathComponent(name)
+            let media = try await library.inspect(url)
+            try? FileManager.default.removeItem(at:ProxyMaker.url(for:url))
+            try require(ProxyMaker.wantsProxy(width:media.width,height:media.height),"\(name) is larger than FHD")
+            try require(try await ProxyMaker.make(from:url) == nil,"\(name) gets no proxy and is previewed from the original")
+        }
+        print("PASS sources a proxy cannot stand in for (BT.470BG tags, alpha, non-square pixels) keep the original")
+        for made in [proxyURL,leadProxy] { try? FileManager.default.removeItem(at:made) }   // test proxies stay out of the app's cache
         var imageProject = Project(); imageProject.media = [project.media[2]]
         let imageID = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.zero,to:&imageProject)
         try Editing.trim(imageID,leading:false,to:.init(seconds:1),in:&imageProject)
@@ -167,6 +268,26 @@ actor ProgressFlag {
     static func png(_ image:CGImage,to url:URL) throws {
         guard let target = CGImageDestinationCreateWithURL(url as CFURL,"public.png" as CFString,1,nil) else { throw EditError("Cannot write PNG") }
         CGImageDestinationAddImage(target,image,nil); try require(CGImageDestinationFinalize(target),"PNG saved")
+    }
+    /// Presentation times of every decoded picture, in decode-output order.
+    static func decodedTimes(_ url: URL) async throws -> [CMTime] {
+        let asset = AVURLAsset(url:url)
+        guard let track = try await asset.loadTracks(withMediaType:.video).first else { return [] }
+        let reader = try AVAssetReader(asset:asset)
+        let out = AVAssetReaderTrackOutput(track:track,outputSettings:[kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange])
+        out.alwaysCopiesSampleData = false
+        reader.add(out); reader.startReading(); defer { reader.cancelReading() }
+        var times: [CMTime] = []
+        while let sample = out.copyNextSampleBuffer() { if CMSampleBufferGetImageBuffer(sample) != nil { times.append(CMSampleBufferGetPresentationTimeStamp(sample)) } }
+        return times
+    }
+    static func firstDecodedTime(_ url: URL) async throws -> CMTime {
+        let asset = AVURLAsset(url:url)
+        guard let track = try await asset.loadTracks(withMediaType:.video).first else { return .invalid }
+        let reader = try AVAssetReader(asset:asset)
+        let out = AVAssetReaderTrackOutput(track:track,outputSettings:[kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32BGRA])
+        reader.add(out); reader.startReading(); defer { reader.cancelReading() }
+        return out.copyNextSampleBuffer().map(CMSampleBufferGetPresentationTimeStamp) ?? .invalid
     }
     static func pixels(_ image:CGImage) -> [UInt8] {
         var data = [UInt8](repeating:0,count:160*90*4)

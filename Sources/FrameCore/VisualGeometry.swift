@@ -32,6 +32,16 @@ public struct VisualGeometry {
         let source = CGPoint(x:point.x,y:canvasSize.height-point.y).applying(renderTransform.inverted())
         return source.x >= 0 && source.x <= sourceSize.width && source.y >= 0 && source.y <= sourceSize.height
     }
+    /// Within `tolerance` points of one of the four edges (the outline a user can grab).
+    public func isNearOutline(_ p: CGPoint, tolerance: CGFloat = 6) -> Bool {
+        let c = corners
+        for i in 0..<4 {
+            let a = c[i], b = c[(i+1)%4], dx = b.x-a.x, dy = b.y-a.y, length = dx*dx+dy*dy
+            let t = length > 0 ? max(0,min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/length)) : 0
+            if hypot(p.x-(a.x+t*dx),p.y-(a.y+t*dy)) <= tolerance { return true }
+        }
+        return false
+    }
     public func moved(by delta: CGSize) -> ClipStyle {
         var result = style
         result.x = min(2,max(-2,style.x + delta.width/canvasSize.width))

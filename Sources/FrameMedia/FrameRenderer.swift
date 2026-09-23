@@ -7,6 +7,15 @@ import FrameCore
 
 /// Immutable snapshots are shared with AVFoundation's compositor queue.
 public struct RenderLayer: @unchecked Sendable {
+    /// The track's preferred transform, restated for Core Image. A track transform is written for a
+    /// y-down pixel grid; Core Image is y-up. Conjugating by a vertical flip negates b and c, which
+    /// matters exactly for 90° and 270° (portrait phone video): applied as-is those came out upside
+    /// down. 0°, 180° and mirror transforms are unchanged. The translation is dropped because the
+    /// renderer moves every layer back to the origin right after orienting it.
+    public var coreImageOrientation: CGAffineTransform {
+        let t = preferredTransform
+        return CGAffineTransform(a:t.a,b:-t.b,c:-t.c,d:t.d,tx:0,ty:0)
+    }
     public let clip: Clip
     public let trackID: CMPersistentTrackID?
     public let preferredTransform: CGAffineTransform
@@ -34,9 +43,16 @@ public final class FrameInstruction: NSObject, AVVideoCompositionInstructionProt
         self.layers = layers
     }
     /// Reuses decoded sources and track mappings while replacing only the edited layer.
-    public func replacingTransform(of clip: Clip) -> FrameInstruction {
+    public func replacingTransform(of clip: Clip) -> FrameInstruction { replacingLayer(for:clip) }
+    /// Swaps one layer's clip (and, for text, its rendered image) while keeping the track, the
+    /// source transform and the decoder-priming fallback, so a paused preview can re-render
+    /// without rebuilding the AVComposition or replacing the player item.
+    public func replacingLayer(for clip: Clip, image newImage: CIImage? = nil) -> FrameInstruction {
         let updated = layers.map { layer in
-            layer.clip.id == clip.id ? RenderLayer(clip:clip,trackID:layer.trackID,preferredTransform:layer.preferredTransform,image:layer.image) : layer
+            layer.clip.id == clip.id
+                ? RenderLayer(clip:clip,trackID:layer.trackID,preferredTransform:layer.preferredTransform,
+                              image:newImage ?? layer.image,fallbackImage:layer.fallbackImage)
+                : layer
         }
         return FrameInstruction(duration:timeRange.duration,trackIDs:(requiredSourceTrackIDs ?? []).compactMap { ($0 as? NSNumber)?.int32Value },layers:updated)
     }
@@ -67,9 +83,9 @@ public enum FrameRenderer {
         for layer in layers where time >= layer.clip.start && time < layer.clip.end {
             var image: CIImage
             if let still = layer.image { image = still }
-            else if let id = layer.trackID, let buffer = frame(id) { image = CIImage(cvPixelBuffer:buffer).transformed(by:layer.preferredTransform) }
+            else if let id = layer.trackID, let buffer = frame(id) { image = CIImage(cvPixelBuffer:buffer).transformed(by:layer.coreImageOrientation) }
             // A decoder that has not primed yet must not blank the frame or abort the whole render.
-            else if let fallback = layer.fallbackImage { image = fallback.transformed(by:layer.preferredTransform) }
+            else if let fallback = layer.fallbackImage { image = fallback.transformed(by:layer.coreImageOrientation) }
             else { continue }
             let s = layer.clip.style
             image = image.transformed(by:CGAffineTransform(translationX:-image.extent.minX,y:-image.extent.minY))

@@ -57,29 +57,40 @@ import AppKit
             CommandGroup(replacing:.newItem) {
                 Button("New Project") { store.newProject() }.keyboardShortcut("n")
                 Button("Open Project…") { store.chooseOpen() }.keyboardShortcut("o")
-                Button("Save Project") { store.save() }.keyboardShortcut("s")
-                Button("Save Project As…") { store.save(as:true) }.keyboardShortcut("s",modifiers:[.command,.shift])
+                Button("Start Screen") { store.showStartScreen() }.keyboardShortcut("1",modifiers:[.command,.shift])
+                    .disabled(store.showLauncher || store.isExporting || store.isCapturingSnapshot)
                 Divider()
-                Button("Import Media…") { store.chooseImport() }.keyboardShortcut("i")
-                Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut("e").disabled(store.project.clips.isEmpty || store.isExporting)
-                Button("Save Timeline Snapshot…") { store.chooseSnapshot() }.keyboardShortcut("e",modifiers:[.command,.shift]).disabled(!store.canCaptureSnapshot)
+                // Everything below acts on the open project, which is hidden behind the start screen.
+                Group {
+                    Button("Save Project") { store.save() }.keyboardShortcut("s")
+                    Button("Save Project As…") { store.save(as:true) }.keyboardShortcut("s",modifiers:[.command,.shift])
+                    Divider()
+                    Button("Import Media…") { store.chooseImport() }.keyboardShortcut("i")
+                    Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut("e").disabled(store.project.clips.isEmpty || store.isExporting)
+                    Button("Save Timeline Snapshot…") { store.chooseSnapshot() }.keyboardShortcut("e",modifiers:[.command,.shift]).disabled(!store.canCaptureSnapshot)
+                }.disabled(store.showLauncher)
             }
             CommandGroup(replacing:.undoRedo) {
-                Button("Undo \(store.history.undoName)") { store.undo() }.keyboardShortcut("z").disabled(!store.canUndo)
-                Button("Redo \(store.history.redoName)") { store.redo() }.keyboardShortcut("z",modifiers:[.command,.shift]).disabled(!store.canRedo)
+                Button("Undo \(store.undoName)") { store.undo() }.keyboardShortcut("z").disabled(!store.canUndo || store.showLauncher)
+                Button("Redo \(store.history.redoName)") { store.redo() }.keyboardShortcut("z",modifiers:[.command,.shift]).disabled(!store.canRedo || store.showLauncher)
             }
             CommandMenu("Timeline") {
+                // Unmodified keys (Space, arrows, Delete, N) must not reach a project the user cannot see,
+                // and must not steal typing from the start screen's search field.
+                Group {
                 Button("Play / Pause") { store.togglePlayback() }.keyboardShortcut(.space,modifiers:[])
-                Button("Previous Frame") { store.step(-1) }.keyboardShortcut(.leftArrow,modifiers:[])
-                Button("Next Frame") { store.step(1) }.keyboardShortcut(.rightArrow,modifiers:[])
-                Button("Go to Selected Clip Start") { store.goToSelectedClipStart() }.keyboardShortcut(.leftArrow,modifiers:[.option]).disabled(store.selectedClip == nil)
-                Button("Go to Selected Clip End") { store.goToSelectedClipEnd() }.keyboardShortcut(.rightArrow,modifiers:[.option]).disabled(store.selectedClip == nil)
+                // Arrow equivalents win over any focused text view, so they yield while a title is edited.
+                Button("Previous Frame") { store.step(-1) }.keyboardShortcut(.leftArrow,modifiers:[]).disabled(store.isEditingText)
+                Button("Next Frame") { store.step(1) }.keyboardShortcut(.rightArrow,modifiers:[]).disabled(store.isEditingText)
+                Button("Go to Selected Clip Start") { store.goToSelectedClipStart() }.keyboardShortcut(.leftArrow,modifiers:[.option]).disabled(store.selectedClip == nil || store.isEditingText)
+                Button("Go to Selected Clip End") { store.goToSelectedClipEnd() }.keyboardShortcut(.rightArrow,modifiers:[.option]).disabled(store.selectedClip == nil || store.isEditingText)
                 Divider()
                 Button("Split at Playhead") { store.split() }.keyboardShortcut("b").disabled(store.selectedClip == nil)
                 Button("Delete Linked Selection") { store.deleteSelection() }.keyboardShortcut(.delete,modifiers:[]).disabled(store.selectedClip == nil)
                 Button("Close Gap") { store.closeSelectedGap() }.keyboardShortcut(.delete,modifiers:[.command]).disabled(store.selectedGap == nil)
                 Button("Add Text Clip") { store.addText() }.keyboardShortcut("t",modifiers:[.command,.shift])
                 Toggle("Snapping",isOn:$store.snapping).keyboardShortcut("n",modifiers:[])
+                }.disabled(store.showLauncher)
             }
         }
     }

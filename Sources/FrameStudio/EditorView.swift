@@ -16,7 +16,18 @@ import FrameCore
 
 struct EditorView: View {
     @ObservedObject var store: EditorStore
+    @State private var iconHovered = false
     var body: some View {
+        Group {
+            if store.showLauncher { LauncherView(store:store,registry:store.registry) }
+            else { editor }
+        }
+        .background(Theme.background).tint(Theme.accent)
+        .alert("Ara",isPresented:Binding(get:{store.message != nil},set:{if !$0 {store.message = nil}})) { Button("OK",role:.cancel) { store.message = nil } } message: { Text(store.message ?? "") }
+        .sheet(isPresented:$store.showExportSheet) { exportSettings }
+        .sheet(isPresented:Binding(get:{store.isExporting},set:{_ in})) { exportProgress }
+    }
+    private var editor: some View {
         VStack(spacing:0) {
             toolbar
             Divider()
@@ -33,19 +44,32 @@ struct EditorView: View {
                 Circle().fill(store.missing.isEmpty ? Theme.accent : .orange).frame(width:5,height:5)
                 Text(store.status).lineLimit(1)
                 Spacer()
-                Text("LOCAL MEDIA  ·  SDR REC.709").tracking(1.2)
+                if let proxy = store.proxyProgress {
+                    // Sources above FHD get a 1080p stand-in for the preview; export still uses the originals.
+                    ProgressView(value:proxy.fraction).progressViewStyle(.linear).frame(width:70).controlSize(.mini)
+                    Text("FHD preview media · \(proxy.name) \(Int(proxy.fraction*100))%" + (proxy.remaining > 1 ? " · \(proxy.remaining-1) more" : ""))
+                        .lineLimit(1).truncationMode(.middle).frame(maxWidth:300,alignment:.trailing)
+                        .help("Making 1080p preview copies of sources larger than FHD so scrubbing stays smooth. Export always uses the original files.")
+                    Text("·")
+                }
+                Text("PREVIEW FHD  ·  LOCAL MEDIA  ·  SDR REC.709").tracking(1.2)
             }.font(.system(size:10,weight:.medium)).foregroundStyle(Theme.muted).padding(.horizontal,16).frame(height:27)
         }
-        .background(Theme.background).tint(Theme.accent)
-        .alert("Ara",isPresented:Binding(get:{store.message != nil},set:{if !$0 {store.message = nil}})) { Button("OK",role:.cancel) { store.message = nil } } message: { Text(store.message ?? "") }
-        .sheet(isPresented:$store.showExportSheet) { exportSettings }
-        .sheet(isPresented:Binding(get:{store.isExporting},set:{_ in})) { exportProgress }
     }
     private var toolbar: some View {
         HStack(spacing:14) {
-            Image(nsImage:NSApplication.shared.applicationIconImage)
-                .resizable().interpolation(.high).aspectRatio(contentMode:.fit)
-                .frame(width:44,height:44).accessibilityLabel("Ara app icon")
+            // The app icon is the way home: back to the project lobby, keeping this project loaded.
+            Button(action:store.showStartScreen) {
+                Image(nsImage:NSApplication.shared.applicationIconImage)
+                    .resizable().interpolation(.high).aspectRatio(contentMode:.fit)
+                    .frame(width:44,height:44)
+                    .scaleEffect(iconHovered ? 1.06 : 1)
+                    .brightness(iconHovered ? 0.06 : 0)
+                    .animation(.easeOut(duration:0.12),value:iconHovered)
+            }
+            .buttonStyle(.plain).onHover { iconHovered = $0 }
+            .disabled(store.isExporting || store.isCapturingSnapshot)
+            .help("Projects  ⇧⌘1").accessibilityLabel("Back to projects")
             VStack(alignment:.leading,spacing:3) {
                 Text("Ara").font(.system(size:16,weight:.bold)).tracking(1)
                 Text(store.project.name + (store.dirty ? " •" : "")).font(.system(size:12)).foregroundStyle(Theme.muted).lineLimit(1)

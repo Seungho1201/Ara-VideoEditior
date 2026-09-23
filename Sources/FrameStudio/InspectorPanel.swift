@@ -4,6 +4,17 @@ import FrameCore
 
 struct InspectorPanel: View {
     @ObservedObject var store: EditorStore
+    /// The title being typed. The text view binds to this, never to the store: writing the
+    /// store's value back into an NSTextView mid-composition cancels Hangul (and any IME) input.
+    @State private var textDraft = ""
+    @State private var draftClipID: UUID?
+    @State private var textCommit: Task<Void,Never>?
+    /// The last text this panel pushed to the store, to tell its own commit echoing back from a
+    /// real outside change such as ⌘Z while the field still has focus.
+    @State private var lastCommitted: String?
+    /// The document the draft was taken from. A draft never lands in a different document.
+    @State private var draftSession: UUID?
+    @FocusState private var textFocused: Bool
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
             HStack { panelTitle("INSPECTOR"); Spacer(); Image(systemName:"slider.horizontal.3").foregroundStyle(Theme.muted) }.padding(16)
@@ -65,10 +76,25 @@ struct InspectorPanel: View {
                         }
                         if clip.kind == .text {
                             section("TEXT") {
-                                TextEditor(text:Binding(get:{store.selectedClip?.style.text ?? ""},set:{v in store.updateStyle { $0.text = String(v.prefix(2000)) } })).font(.system(size:12)).frame(height:75).scrollContentBackground(.hidden).padding(5).background(Theme.background,in:RoundedRectangle(cornerRadius:4)).accessibilityLabel("Title text")
+                                TextEditor(text:$textDraft).font(.system(size:12)).frame(height:75).scrollContentBackground(.hidden).padding(5).background(Theme.background,in:RoundedRectangle(cornerRadius:4)).accessibilityLabel("Title text")
+                                    .focused($textFocused)
+                                    .onAppear { syncDraft(from:clip,force:true); store.flushPendingEdits = { flushTextCommit() } }
+                                    .onChange(of:clip.id) { _,_ in syncDraft(from:clip,force:true) }
+                                    // Undo/redo or Reset changed the text: follow it even while focused.
+                                    .onChange(of:clip.style.text) { _,now in followOutsideChange(now) }
+                                    .onChange(of:textDraft) { _,draft in scheduleTextCommit(draft) }
+                                    .onChange(of:textFocused) { _,focused in
+                                        store.isEditingText = focused
+                                        if !focused { flushTextCommit(); store.endLiveEdit() }
+                                    }
+                                    .onDisappear { store.isEditingText = false; flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
                                 control("Font size",\.fontSize,range:8...300,suffix:" pt")
                                 ColorPicker("Text colour",selection:Binding(get:{Color(red:clip.style.red,green:clip.style.green,blue:clip.style.blue)},set:{color in
-                                    if let c = NSColor(color).usingColorSpace(.sRGB) { store.updateStyle { $0.red = c.redComponent; $0.green = c.greenComponent; $0.blue = c.blueComponent } }
+                                    guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
+                                    // The picker re-sends its colour after a colour-space round trip; that is not an edit.
+                                    let s = clip.style, tolerance = 0.5/255
+                                    guard abs(c.redComponent-s.red) > tolerance || abs(c.greenComponent-s.green) > tolerance || abs(c.blueComponent-s.blue) > tolerance else { return }
+                                    store.updateStyleLive(clip.id,name:"Text colour") { $0.red = c.redComponent; $0.green = c.greenComponent; $0.blue = c.blueComponent }
                                 }),supportsOpacity:false)
                             }
                         }
@@ -99,6 +125,52 @@ struct InspectorPanel: View {
                 }.foregroundStyle(Theme.muted).frame(maxWidth:.infinity,maxHeight:.infinity)
             }
         }.background(Theme.panel)
+    }
+    private func syncDraft(from clip: Clip, force: Bool) {
+        // A new document counts as a new clip even when ids match (Save As keeps them).
+        if clip.id != draftClipID || draftSession != store.session {
+            flushTextCommit(); store.endLiveEdit()
+            draftClipID = clip.id; draftSession = store.session
+            textDraft = clip.style.text; lastCommitted = clip.style.text; return
+        }
+        if force || !textFocused, textDraft != clip.style.text { textDraft = clip.style.text; lastCommitted = clip.style.text }
+    }
+    private func followOutsideChange(_ now: String) {
+        // Our own debounced commit arriving back is not an outside change; overwriting the field
+        // then would cut off whatever was typed since, including a Hangul syllable mid-composition.
+        guard now != lastCommitted, now != textDraft else { return }
+        textCommit?.cancel(); textCommit = nil
+        textDraft = now; lastCommitted = now
+    }
+    /// Commits a short moment after the last keystroke. The preview follows the typing without
+    /// re-rendering the whole editor, and the text view's own state is never overwritten.
+    private func scheduleTextCommit(_ draft: String) {
+        guard let id = draftClipID else { return }
+        textCommit?.cancel()
+        textCommit = Task { @MainActor in
+            try? await Task.sleep(for:.milliseconds(160))
+            guard !Task.isCancelled else { return }
+            textCommit = nil      // done: a later flush must not commit this draft a second time
+            commitText(draft,to:id)
+        }
+    }
+    private func flushTextCommit() {
+        guard let task = textCommit, let id = draftClipID else { return }
+        task.cancel(); textCommit = nil
+        commitText(textDraft,to:id)
+    }
+    private func commitText(_ draft: String, to id: UUID) {
+        // An IME cancelling a composition can hand Escape to the field as a character. Control
+        // characters are invisible in a title, so drop them; newline and tab stay, and format
+        // characters such as the emoji zero-width joiner are not controls and are kept.
+        let visible = String(String.UnicodeScalarView(draft.unicodeScalars.filter {
+            $0 == "\n" || $0 == "\t" || $0.properties.generalCategory != .control
+        }))
+        let text = String(visible.prefix(2000))
+        guard draftSession == store.session,
+              store.project.clips.first(where: { $0.id == id })?.style.text != text else { return }
+        if id == draftClipID { lastCommitted = text }
+        store.updateStyleLive(id,name:"Edit text",closesWhenIdle:false) { $0.text = text }
     }
     private func section<Content:View>(_ title:String,@ViewBuilder content:()->Content) -> some View {
         VStack(alignment:.leading,spacing:10) { panelTitle(title); content() }.font(.system(size:11))
