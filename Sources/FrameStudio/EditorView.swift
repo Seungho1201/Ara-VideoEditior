@@ -100,6 +100,8 @@ struct EditorView: View {
             }
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        // A borderless menu draws in the accent colour; match the white toolbar icons instead.
+        .tint(.primary)
         .disabled(!store.canRetimeSelection)
         .help("Playback speed of the selected clip")
         .accessibilityLabel("Clip playback speed")
