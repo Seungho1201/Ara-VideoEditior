@@ -85,14 +85,20 @@ public actor CompositionBuilder {
                 let available = try await source.load(.timeRange)
                 let range = CMTimeRangeGetIntersection(sourceRange,otherRange:available)
                 if range.duration > .zero {
-                    // Destination is measured on the retimed timeline, so the source offset shrinks by speed.
-                    let destination = clip.start.cmTime + CMTimeMultiplyByFloat64(range.start-sourceRange.start,multiplier:1/clip.speed)
-                    try track.insertTimeRange(range,of:source,at:destination)
-                    if clip.speed != 1 {
+                    if clip.speed == 1 {
+                        try track.insertTimeRange(range,of:source,at:clip.start.cmTime+(range.start-sourceRange.start))
+                    } else {
+                        // The retimed segment is laid out in the project clock and never past the
+                        // clip's own end. A float multiply (CMTimeMultiplyByFloat64) moves to a 1e9
+                        // timescale and can round a fraction of a nanosecond beyond the clip; the
+                        // composition then outlasts the video instruction, AVFoundation rejects the
+                        // video composition, and preview and export show no picture at all.
+                        let destination = min(clip.start+MediaTime(range.start-sourceRange.start).scaled(by:1/clip.speed),clip.end)
+                        let length = min(MediaTime(range.duration).scaled(by:1/clip.speed),clip.end-destination)
+                        try track.insertTimeRange(range,of:source,at:destination.cmTime)
                         // scaleTimeRange rewrites in place and shifts everything after it. Clips are
                         // processed in start order and nothing later exists yet, so the shift is harmless.
-                        track.scaleTimeRange(CMTimeRange(start:destination,duration:range.duration),
-                                             toDuration:CMTimeMultiplyByFloat64(range.duration,multiplier:1/clip.speed))
+                        track.scaleTimeRange(CMTimeRange(start:destination.cmTime,duration:range.duration),toDuration:length.cmTime)
                     }
                 }
                 if lane.isVideo {
@@ -136,7 +142,10 @@ public actor CompositionBuilder {
         video.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
         video.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
         video.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
-        video.instructions = [FrameInstruction(duration:project.duration.cmTime,trackIDs:videoIDs,layers:layers)]
+        // The instruction must cover every instant of the composition or the whole video
+        // composition is invalid (no picture at all). Tracks are laid out to end by the project
+        // duration; covering the composition's own duration keeps any rounding from mattering.
+        video.instructions = [FrameInstruction(duration:CMTimeMaximum(project.duration.cmTime,composition.duration),trackIDs:videoIDs,layers:layers)]
         let audio = AVMutableAudioMix(); audio.inputParameters = mixes
         return RenderBundle(composition:composition.copy() as! AVComposition,videoComposition:video.copy() as! AVVideoComposition,audioMix:audio.copy() as! AVAudioMix,duration:project.duration,size:size,frameRate:project.frameRate)
     }

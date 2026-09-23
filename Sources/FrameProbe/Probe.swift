@@ -234,6 +234,30 @@ actor ProgressFlag {
         let audioBundle = try await builder.build(audioProject,urls:urls)
         try await exporter.export(audioBundle,to:output.appendingPathComponent("validation-audio-only.mp4")) { _ in }
         print("PASS audio-only timeline export")
+        // A retimed clip must leave a valid video composition wherever it starts. A segment rounded
+        // a fraction of a nanosecond past the timeline end once made AVFoundation reject the whole
+        // video composition: no picture in preview or export.
+        let retimeMedia = project.media[0]
+        var layouts = 0
+        for rate in [FrameRate(60),FrameRate(30000,1001),FrameRate(25)] {
+            for leadFrames in [61,83,97] {
+                for speed in [3.0,2.9,1.7,0.75,0.25,4.0,1.5] {
+                    var retimed = Project(); retimed.frameRate = rate; retimed.media = [retimeMedia]
+                    let lead = try Editing.add(mediaID:retimeMedia.id,lane:.v1,at:.zero,to:&retimed)
+                    try Editing.trim(lead,leading:false,to:MediaTime(ticks:rate.frame.ticks*Int64(leadFrames)),in:&retimed)
+                    let leadEnd = retimed.clips.first(where: { $0.id == lead })!.end
+                    let fast = try Editing.add(mediaID:retimeMedia.id,lane:.v1,at:leadEnd,to:&retimed)
+                    try Editing.setSpeed(fast,to:speed,in:&retimed)
+                    let bundle = try await builder.build(retimed,urls:urls)
+                    let valid = bundle.videoComposition.isValid(for:bundle.composition.tracks,assetDuration:bundle.composition.duration,
+                                                                timeRange:CMTimeRange(start:.zero,duration:bundle.composition.duration),validationDelegate:nil)
+                    try require(valid && bundle.composition.duration == retimed.duration.cmTime,
+                                "retimed clip at \(speed)x after \(leadFrames) frames at \(rate.label) fps leaves a valid composition (valid \(valid), composition \(bundle.composition.duration.value)/\(bundle.composition.duration.timescale), timeline \(retimed.duration.cmTime.value)/\(retimed.duration.cmTime.timescale))")
+                    layouts += 1
+                }
+            }
+        }
+        print("PASS retimed clips leave a valid video composition ending on the timeline end (\(layouts) layouts)")
         var fractional = Project(); fractional.frameRate = .init(30000,1001); fractional.media = [project.media[2]]
         let fractionalID = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.zero,to:&fractional)
         try Editing.trim(fractionalID,leading:false,to:.init(ticks:fractional.frameRate.frame.ticks*31),in:&fractional)
