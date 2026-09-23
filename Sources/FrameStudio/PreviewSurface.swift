@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVKit
+import Combine
 import FrameCore
 
 struct PreviewSurface: NSViewRepresentable {
@@ -14,6 +15,7 @@ struct PreviewSurface: NSViewRepresentable {
     let playerView = AVPlayerView()
     let overlay: PreviewTransformOverlay
     let chrome = TransformChromeView(frame:.zero)
+    private var playheadWatch: AnyCancellable?
     init(store: EditorStore) {
         overlay = PreviewTransformOverlay(store:store)
         super.init(frame:.zero)
@@ -22,6 +24,14 @@ struct PreviewSurface: NSViewRepresentable {
         playerView.controlsStyle = .none; playerView.videoGravity = .resizeAspect; playerView.player = store.player
         playerView.allowsVideoFrameAnalysis = false
         addSubview(playerView); addSubview(overlay)
+        // The playhead no longer re-renders the editor; the transform chrome, which shows the
+        // frame under the playhead and only while it is inside the clip, follows it directly.
+        playheadWatch = store.clock.moved.sink { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.overlay.store?.previewTransformID != nil else { return }
+                self.overlay.refresh()
+            }
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layout() { super.layout(); playerView.frame = bounds; overlay.frame = bounds; overlay.needsDisplay = true; chrome.needsDisplay = true }

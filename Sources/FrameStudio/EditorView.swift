@@ -124,7 +124,7 @@ struct EditorView: View {
                 if store.isBuilding { VStack { Spacer(); HStack(spacing:8) { ProgressView().controlSize(.mini); Text("Updating preview").font(.system(size:11)) }.padding(9).background(.black.opacity(0.7),in:Capsule()).padding(12) } }
             }.aspectRatio(16/9,contentMode:.fit).padding(.horizontal,18).frame(maxWidth:.infinity,maxHeight:.infinity)
             HStack(spacing:8) {
-                Text(store.timecode).font(.system(size:11,weight:.medium,design:.monospaced)).foregroundStyle(Theme.accent).fixedSize()
+                PlayheadTimecode(clock:store.clock,rate:store.project.frameRate)
                 Spacer(minLength:0)
                 HStack(spacing:4) {
                     Button(action:store.goToSelectedClipStart) { Image(systemName:"backward.end.fill").frame(width:26,height:28) }
@@ -309,6 +309,15 @@ private struct LibraryDragHandle: NSViewRepresentable {
         beginDraggingSession(with:[item],event:event,source:self)
     }
     func draggingSession(_ session:NSDraggingSession,sourceOperationMaskFor context:NSDraggingContext) -> NSDragOperation { .copy }
+}
+
+/// The playhead readout: the one SwiftUI view that follows every playhead move.
+private struct PlayheadTimecode: View {
+    @ObservedObject var clock: PlayheadClock
+    let rate: FrameRate
+    var body: some View {
+        Text(rate.timecode(clock.time)).font(.system(size:11,weight:.medium,design:.monospaced)).foregroundStyle(Theme.accent).fixedSize()
+    }
 }
 
 /// Closed-captions mark: a rounded frame, open on the right edge, around two C's. Stroked, so it

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import FrameCore
 
 struct TimelineView: View {
@@ -55,7 +56,8 @@ struct TimelineSurface: NSViewRepresentable {
 }
 
 @MainActor final class TimelineCanvas: NSView, NSUserInterfaceValidations {
-    weak var store: EditorStore?
+    weak var store: EditorStore? { didSet { if store !== oldValue { followPlayhead() } } }
+    private var playheadWatch: AnyCancellable?
     var pixelsPerSecond: Double = 64
     var revealPlayheadRequest = 0
     private let ruler: Double = 28
@@ -76,6 +78,17 @@ struct TimelineSurface: NSViewRepresentable {
         setAccessibilityRole(.group); setAccessibilityLabel("Multitrack timeline. V2 above V1. A1 and A2 linked audio.")
     }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
+    /// A playhead move repaints the strips under its old and new positions, not the timeline.
+    private func followPlayhead() {
+        playheadWatch = store?.clock.moved.sink { [weak self] move in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for time in [move.old,move.new] {
+                    self.setNeedsDisplay(NSRect(x:time.seconds*self.pixelsPerSecond-8,y:0,width:16,height:self.bounds.height))
+                }
+            }
+        }
+    }
     private func rect(_ clip:Clip) -> NSRect {
         let index = Lane.displayOrder.firstIndex(of:clip.lane) ?? 0
         return NSRect(x:clip.start.seconds*pixelsPerSecond,y:ruler+Double(index)*rowHeight+5,width:max(2,clip.duration.seconds*pixelsPerSecond),height:rowHeight-10)
@@ -108,14 +121,14 @@ struct TimelineSurface: NSViewRepresentable {
         for clip in store.project.clips {
             let box = rect(clip)
             guard box.intersects(visible) else { continue }
-            drawClip(clip,box:box,selected:linked.contains(clip.id),ghost:false)
+            drawClip(clip,box:box,selected:linked.contains(clip.id),ghost:false,in:visible)
         }
         if let candidate, moved {
-            drawClip(candidate,box:rect(candidate),selected:true,ghost:true)
+            drawClip(candidate,box:rect(candidate),selected:true,ghost:true,in:visible)
             if let original, let link = original.linkID,
                let audio = store.project.clips.first(where:{$0.linkID == link && $0.id != original.id}) {
                 var linked = audio; linked.start = candidate.start; linked.duration = candidate.duration; linked.lane = candidate.lane.paired
-                drawClip(linked,box:rect(linked),selected:true,ghost:true)
+                drawClip(linked,box:rect(linked),selected:true,ghost:true,in:visible)
             }
             label(candidateValid ? store.project.frameRate.timecode(candidate.start) : "Track occupied / source limit",at:NSPoint(x:max(visible.minX+5,rect(candidate).minX),y:rect(candidate).maxY-16),size:10,color:candidateValid ? .white : .systemRed)
         }
@@ -142,7 +155,29 @@ struct TimelineSurface: NSViewRepresentable {
         }
         if store.project.clips.isEmpty { label("Drag media onto V1 / V2 or A1 / A2",at:NSPoint(x:visible.minX+24,y:ruler+85),size:13,color:NSColor(white:0.45,alpha:1)) }
     }
-    private func drawClip(_ clip:Clip,box:NSRect,selected:Bool,ghost:Bool) {
+    /// A retimed clip's speed, top right: gauge and factor on a dark pill, like the toolbar's
+    /// speed control. A short clip gets the factor alone, then the gauge alone. Returns where it
+    /// was drawn, or nil when not even the gauge fits right of `after` (the clip's visible left).
+    private func speedBadge(_ speed: Double, right: CGFloat, top: CGFloat, after left: CGFloat) -> NSRect? {
+        let text = String(format:"%.2fx",speed) as NSString
+        let attributes: [NSAttributedString.Key:Any] = [.font:NSFont.monospacedDigitSystemFont(ofSize:10,weight:.semibold),.foregroundColor:NSColor.white]
+        let textWidth = ceil(text.size(withAttributes:attributes).width), textHeight = text.size(withAttributes:attributes).height
+        let icon: CGFloat = 11
+        let layouts: [(gauge: Bool, label: Bool, width: CGFloat)] = [(true,true,5+icon+3+textWidth+6),(false,true,6+textWidth+6),(true,false,4+icon+4)]
+        guard let fit = layouts.first(where: { right-$0.width >= left+4 }) else { return nil }
+        let badge = NSRect(x:right-fit.width,y:top,width:fit.width,height:14)
+        NSColor.black.withAlphaComponent(0.45).setFill(); NSBezierPath(roundedRect:badge,xRadius:7,yRadius:7).fill()
+        var x = badge.minX+(fit.gauge ? (fit.label ? 5 : 4) : 6)
+        if fit.gauge, let gauge = NSImage(systemSymbolName:"speedometer",accessibilityDescription:"Speed")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:9,weight:.semibold).applying(.init(paletteColors:[.white]))) {
+            gauge.draw(in:NSRect(x:x,y:badge.minY+1.5,width:icon,height:icon),from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
+            x += icon+3
+        }
+        if fit.label { text.draw(at:NSPoint(x:x,y:badge.minY+(badge.height-textHeight)/2),withAttributes:attributes) }
+        return badge
+    }
+    /// `area` is the part being repainted: thumbnails and waveform are only drawn there.
+    private func drawClip(_ clip:Clip,box:NSRect,selected:Bool,ghost:Bool,in area:NSRect) {
         guard let store else { return }
         let color: NSColor = clip.kind == .audio ? NSColor(red:0.16,green:0.28,blue:0.42,alpha:1) : clip.kind == .text ? NSColor(red:0.39,green:0.29,blue:0.51,alpha:1) : NSColor(red:0.18,green:0.31,blue:0.5,alpha:1)
         NSGraphicsContext.saveGraphicsState()
@@ -150,7 +185,7 @@ struct TimelineSurface: NSViewRepresentable {
         color.withAlphaComponent(ghost ? 0.6 : 1).setFill(); box.fill()
         if !ghost {
             if clip.kind == .audio, let id = clip.mediaID, let peaks = store.waveforms[id], !peaks.isEmpty, let media = store.project.media(for:clip) {
-                let visible = box.intersection(visibleRect)
+                let visible = box.intersection(area)
                 let waveform = NSBezierPath(); let center = box.minY+35
                 for x in stride(from:visible.minX,to:visible.maxX,by:2) {
                     // A retimed clip walks the source at its own rate, or a 2x clip would
@@ -163,13 +198,24 @@ struct TimelineSurface: NSViewRepresentable {
                 Theme.accentNS.withAlphaComponent(0.85).setStroke(); waveform.lineWidth = 1; waveform.stroke()
             } else if let id = clip.mediaID, let image = store.thumbnails[id] {
                 let strip = NSRect(x:box.minX,y:box.minY+20,width:82,height:box.height-20)
-                let first = max(0,Int((visibleRect.minX-box.minX)/82))
-                let last = min(Int(ceil(box.width/82)),Int(ceil((visibleRect.maxX-box.minX)/82)))
+                let first = max(0,Int((area.minX-box.minX)/82))
+                let last = min(Int(ceil(box.width/82)),Int(ceil((area.maxX-box.minX)/82)))
                 if first < last { for tile in first..<last { image.draw(in:strip.offsetBy(dx:Double(tile)*82,dy:0),from:.zero,operation:.sourceOver,fraction:0.6,respectFlipped:true,hints:nil) } }
             }
             NSColor.black.withAlphaComponent(0.25).setFill(); NSRect(x:box.minX,y:box.minY,width:box.width,height:20).fill()
-            let speedTag = clip.speed == 1 ? "" : String(format:"%.2fx ",clip.speed)
-            label((clip.linkID == nil ? "" : "↔ ")+speedTag+(clip.kind == .text ? clip.style.text : clip.name),at:NSPoint(x:max(box.minX+7,visibleRect.minX+4),y:box.minY+4),size:10,color:.white)
+            let titleX = max(box.minX+7,visibleRect.minX+4)
+            var titleEnd = min(box.maxX,visibleRect.maxX)-6
+            // The speed outranks the name on a short clip: the badge takes its corner whenever it
+            // fits, and the title gets what is left, truncated, or nothing when that is a sliver.
+            if clip.speed != 1, let badge = speedBadge(clip.speed,right:min(box.maxX,visibleRect.maxX)-4,top:box.minY+3,after:max(box.minX,visibleRect.minX)) {
+                titleEnd = badge.minX-6
+            }
+            if titleEnd-titleX >= 18 {
+                let title = (clip.linkID == nil ? "" : "↔ ")+(clip.kind == .text ? clip.style.text : clip.name)
+                let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail
+                (title as NSString).draw(with:NSRect(x:titleX,y:box.minY+4,width:titleEnd-titleX,height:14),options:[.usesLineFragmentOrigin,.truncatesLastVisibleLine],
+                                         attributes:[.font:NSFont.monospacedDigitSystemFont(ofSize:10,weight:.medium),.foregroundColor:NSColor.white,.paragraphStyle:style])
+            }
         }
         NSGraphicsContext.restoreGraphicsState()
         (selected ? (ghost && !candidateValid ? NSColor.systemRed : Theme.accentNS) : color.highlight(withLevel:0.2)!).setStroke()

@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 @preconcurrency import AVFoundation
 import UniformTypeIdentifiers
+import Combine
 import FrameCore
 import FrameMedia
 
@@ -20,7 +21,16 @@ import FrameMedia
     @Published var previewTransformID: UUID?
     @Published var selectedGap: TimelineGap?
     @Published var selectedMediaID: UUID?
-    @Published var playhead = MediaTime.zero
+    /// The playhead has its own observable. It moves up to 60 times a second while scrubbing and
+    /// 30 while playing; published through the store, every move re-evaluated the whole editor
+    /// (a selected clip's inspector included) and redrew the entire timeline, and the main thread
+    /// fell behind the preview. Only the timecode, the timeline's playhead strip and the transform
+    /// chrome follow it now.
+    let clock = PlayheadClock()
+    var playhead: MediaTime {
+        get { clock.time }
+        set { if clock.time != newValue { clock.time = newValue } }
+    }
     @Published private(set) var revealPlayheadRequest = 0
     @Published var zoom: Double = 64
     @Published var snapping = true
@@ -730,4 +740,10 @@ import FrameMedia
         }
     }
     func cancelExport() { exportTask?.cancel(); status = "Cancelling export…" }
+}
+
+@MainActor final class PlayheadClock: ObservableObject {
+    @Published fileprivate(set) var time = MediaTime.zero { didSet { moved.send((oldValue,time)) } }
+    /// For AppKit views: sent after each move, with where the playhead was and where it is now.
+    let moved = PassthroughSubject<(old: MediaTime, new: MediaTime),Never>()
 }
