@@ -21,6 +21,8 @@ public struct ClipClipboard: Codable, Equatable, Sendable {
             throw EditError("This clipboard does not contain supported Ara clips.")
         }
         var snapshot = Project(); snapshot.frameRate = frameRate; snapshot.clips = clips; snapshot.media = media
+        // The copy may come from V3 or A5; the snapshot has whatever tracks its clips sit on.
+        for clip in clips { try snapshot.ensureLane(clip.lane) }
         _ = try snapshot.validated()
         guard snapshot.group(for:selectedID).count == clips.count,
               Set(media.map(\.id)) == Set(clips.filter { $0.kind != .text }.compactMap(\.mediaID)) else {
@@ -73,6 +75,8 @@ public extension Editing {
                 if links[link] == nil { links[link] = UUID() }
                 clip.linkID = links[link]
             }
+            // A clip copied from a track this timeline lacks brings the track along.
+            try candidate.ensureLane(clip.lane)
             guard !project.clips.contains(where: { $0.lane == clip.lane && $0.start < clip.end && clip.start < $0.end }) else {
                 throw EditError("Cannot paste: \(clip.lane.rawValue) is occupied here. Move the playhead to an empty range or the end of the timeline.")
             }

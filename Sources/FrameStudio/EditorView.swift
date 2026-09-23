@@ -158,7 +158,7 @@ struct EditorView: View {
                 speedMenu
                 Button { store.addText() } label:{
                     CaptionsGlyph(lineWidth:1).stroke(style:StrokeStyle(lineWidth:1,lineCap:.round,lineJoin:.round)).frame(width:17,height:12.6)
-                }.help("Add text to V2 at playhead ⇧⌘T").accessibilityLabel("Add text clip")
+                }.help("Add a title above the clips at the playhead ⇧⌘T").accessibilityLabel("Add text clip")
                 Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil).help("Delete linked clips")
                 Spacer(minLength:4)
                 Toggle(isOn:$store.snapping) { Image(systemName:"point.topleft.down.to.point.bottomright.curvepath") }.toggleStyle(.button).help("Snap to clip edges and playhead N")
@@ -169,7 +169,7 @@ struct EditorView: View {
             }.font(.system(size:11,weight:.medium)).buttonStyle(.plain).padding(.horizontal,16).frame(height:42).background(Theme.panel)
             Divider()
             TimelineView(store:store)
-            HStack { Text("V2 ABOVE V1"); Spacer(); Text("Drag to move · Edge handles to trim · ⌘B split · Double-click a gap, ⌘⌫ to close it · ⇧ drag disables snap") }.font(.system(size:9,weight:.medium)).foregroundStyle(Theme.muted).padding(.horizontal,16).frame(height:22)
+            HStack { Text("HIGHER V TRACKS DRAW ON TOP"); Spacer(); Text("Drag to move · Edge handles to trim · ⌘B split · Double-click a gap, ⌘⌫ to close it · ⇧ drag disables snap") }.font(.system(size:9,weight:.medium)).foregroundStyle(Theme.muted).padding(.horizontal,16).frame(height:22)
         }
     }
     private var exportSettings: some View {
@@ -216,12 +216,8 @@ struct LibraryPanel: View {
                                 .onTapGesture(count:2) { store.addMedia(media.id) }
                                 .onTapGesture { store.selectedMediaID = media.id }
                                 .contextMenu {
-                                    if media.kind == .audio {
-                                        Button("Append to A1") { store.addMedia(media.id,lane:.a1) }
-                                        Button("Append to A2") { store.addMedia(media.id,lane:.a2) }
-                                    } else {
-                                        Button("Append to V1") { store.addMedia(media.id,lane:.v1) }
-                                        Button("Append to V2") { store.addMedia(media.id,lane:.v2) }
+                                    ForEach(media.kind == .audio ? store.project.audioLanes : store.project.videoLanes) { lane in
+                                        Button("Append to \(lane.rawValue)") { store.addMedia(media.id,lane:lane) }
                                     }
                                     Button("Relink source…") { store.relink(media) }
                                 }

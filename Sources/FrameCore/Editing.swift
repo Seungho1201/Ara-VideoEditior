@@ -3,27 +3,50 @@ import Foundation
 public enum Editing {
     public static func add(mediaID: UUID, lane: Lane, at time: MediaTime, to project: inout Project) throws -> UUID {
         guard let media = project.media.first(where: { $0.id == mediaID }) else { throw EditError("Media was not found.") }
-        guard media.kind == .audio ? !lane.isVideo : lane.isVideo else { throw EditError("Drop video/images on V1 or V2, and audio on A1 or A2.") }
+        guard media.kind == .audio ? !lane.isVideo : lane.isVideo else { throw EditError("Drop video and images on a video track (V), and audio on an audio track (A).") }
         let duration = media.kind == .image ? project.frameRate.quantize(MediaTime(seconds: 5)) : project.frameRate.floor(media.duration)
         guard duration >= project.frameRate.frame else { throw EditError("Media is shorter than one project frame.") }
         let start = max(.zero, project.frameRate.quantize(time))
         let link = media.kind == .video && media.hasAudio ? UUID() : nil
         let clip = Clip(mediaID: media.id, name: media.name, kind: media.kind, lane: lane, start: start, duration: duration, linkID: link)
         var candidate = project
+        guard candidate.hasLane(lane) else { throw EditError("\(lane.rawValue) does not exist. Add a track first.") }
         candidate.clips.append(clip)
-        if let link { candidate.clips.append(Clip(mediaID: media.id, name: media.name, kind: .audio, lane: lane.paired, start: start, duration: duration, linkID: link)) }
+        if let link {
+            try candidate.ensureLane(lane.paired)
+            candidate.clips.append(Clip(mediaID: media.id, name: media.name, kind: .audio, lane: lane.paired, start: start, duration: duration, linkID: link))
+        }
         project = try candidate.validated()
         return clip.id
     }
+    /// A new empty track above the top video track, or below the bottom audio track.
+    @discardableResult public static func addTrack(_ kind: Lane.Kind, to project: inout Project) throws -> Lane {
+        var candidate = project
+        let lane = Lane(kind,(kind == .video ? candidate.videoTrackCount : candidate.audioTrackCount)+1)
+        try candidate.ensureLane(lane)
+        project = try candidate.validated()
+        return lane
+    }
+    /// A three-second title at `time`, on the track just above every video clip it overlaps, so it
+    /// is never drawn underneath one. V2 at the lowest (V1 is the picture). When that track does
+    /// not exist yet it is added, up to the track limit.
     public static func addText(at time: MediaTime, to project: inout Project) throws -> UUID {
-        let clip = Clip(name: "Title", kind: .text, lane: .v2, start: project.frameRate.quantize(max(.zero,time)), duration: project.frameRate.quantize(.init(seconds:3)))
-        var candidate = project; candidate.clips.append(clip); project = try candidate.validated(); return clip.id
+        let start = project.frameRate.quantize(max(.zero,time)), duration = project.frameRate.quantize(.init(seconds:3))
+        let covering = project.clips.filter { $0.lane.isVideo && $0.start < start+duration && start < $0.end }.map(\.lane.number).max() ?? 0
+        let lane = Lane(.video,max(2,covering+1))
+        var candidate = project
+        guard lane.number <= Project.trackCounts.upperBound else { throw EditError("Every video track is in use here. Move the playhead to add a title.") }
+        try candidate.ensureLane(lane)
+        let clip = Clip(name: "Title", kind: .text, lane: lane, start: start, duration: duration)
+        candidate.clips.append(clip); project = try candidate.validated(); return clip.id
     }
     public static func move(_ id: UUID, to time: MediaTime, lane: Lane, in project: inout Project) throws {
         guard let selected = project.clips.first(where: { $0.id == id }), lane.isVideo == selected.lane.isVideo else { throw EditError("Incompatible track.") }
         let ids = Set(project.group(for: id).map(\.id))
         let delta = project.frameRate.quantize(max(.zero,time)) - selected.start
         var candidate = project
+        guard candidate.hasLane(lane) else { throw EditError("\(lane.rawValue) does not exist. Add a track first.") }
+        if ids.count > 1 { try candidate.ensureLane(lane.paired) }
         for i in candidate.clips.indices where ids.contains(candidate.clips[i].id) {
             candidate.clips[i].start = candidate.clips[i].start + delta
             candidate.clips[i].lane = candidate.clips[i].id == id ? lane : lane.paired

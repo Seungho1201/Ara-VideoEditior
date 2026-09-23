@@ -85,7 +85,7 @@ public struct ProjectSummary: Equatable, Sendable {
         duration = project.duration
         let visual = project.clips
             .filter { ($0.kind == .video || $0.kind == .image) && $0.lane.isVideo }
-            .sorted { ($0.start, $0.lane == .v1 ? 0 : 1) < ($1.start, $1.lane == .v1 ? 0 : 1) }
+            .sorted { ($0.start, $0.lane.number) < ($1.start, $1.lane.number) }
         let firstUsed = visual.first.flatMap { project.media(for: $0) }
         posterMediaPath = (firstUsed ?? project.media.first { $0.kind == .video || $0.kind == .image })?.path
     }

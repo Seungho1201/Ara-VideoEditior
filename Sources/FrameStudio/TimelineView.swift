@@ -5,42 +5,97 @@ import FrameCore
 
 struct TimelineView: View {
     @ObservedObject var store: EditorStore
+    /// The canvas's vertical scroll position, so the track names stay beside their rows.
+    @StateObject private var scroll = TimelineScroll()
     var body: some View {
         HStack(spacing:0) {
             VStack(spacing:0) {
-                Text("TRACKS").font(.system(size:8,weight:.bold)).tracking(1).foregroundStyle(Theme.muted).frame(height:28)
-                ForEach(Lane.displayOrder) { lane in
-                    HStack(spacing:7) {
-                        RoundedRectangle(cornerRadius:1).fill(lane.isVideo ? Color.blue.opacity(0.8) : Theme.accent).frame(width:3,height:22)
-                        VStack(alignment:.leading,spacing:4) { Text(lane.rawValue).font(.system(size:11,weight:.semibold)); Text(lane.isVideo ? (lane == .v2 ? "Overlay" : "Picture") : "Audio").font(.system(size:8)).foregroundStyle(Theme.muted) }
-                        Spacer(minLength:0)
-                    }.padding(.leading,12).frame(height:62).overlay(alignment:.bottom){Divider()}
+                Text("TRACKS").font(.system(size:8,weight:.bold)).tracking(1).foregroundStyle(Theme.muted).frame(height:TimelineCanvas.ruler)
+                VStack(spacing:0) {
+                    addTrackButton(.video)
+                    ForEach(store.project.displayLanes) { lane in
+                        HStack(spacing:7) {
+                            RoundedRectangle(cornerRadius:1).fill(lane.isVideo ? Color.blue.opacity(0.8) : Theme.accent).frame(width:3,height:22)
+                            VStack(alignment:.leading,spacing:4) { Text(lane.rawValue).font(.system(size:11,weight:.semibold)); Text(lane.isVideo ? (lane.number == 1 ? "Picture" : "Overlay") : "Audio").font(.system(size:8)).foregroundStyle(Theme.muted) }
+                            Spacer(minLength:0)
+                        }.padding(.leading,12).frame(height:TimelineCanvas.rowHeight).overlay(alignment:.bottom){Divider()}
+                    }
+                    addTrackButton(.audio)
+                    Spacer(minLength:0)
                 }
-                Spacer(minLength:0)
+                .offset(y:-scroll.offset)
+                // minHeight 0: the names are as tall as all the tracks; the panel shows what fits
+                // and scrolls the rest with the canvas, instead of the column growing the panel.
+                .frame(minHeight:0,maxHeight:.infinity,alignment:.top).clipped()
+                // Clipping only hides: without this, a "+" scrolled out of view still takes clicks
+                // on the TRACKS header and the toolbar above it.
+                .contentShape(Rectangle())
             }.frame(width:78).background(Theme.panel)
             Rectangle().fill(.white.opacity(0.08)).frame(width:1)
-            TimelineSurface(store:store)
+            TimelineSurface(store:store,scroll:scroll)
         }.background(Theme.background)
+    }
+    /// "+" above the top video track and below the bottom audio track.
+    private func addTrackButton(_ kind: Lane.Kind) -> some View {
+        let count = kind == .video ? store.project.videoTrackCount : store.project.audioTrackCount
+        let atLimit = count >= Project.trackCounts.upperBound
+        return Button { store.addTrack(kind) } label: {
+            HStack(spacing:5) { Image(systemName:"plus"); Text(kind == .video ? "Video" : "Audio") }
+                .font(.system(size:9,weight:.semibold)).foregroundStyle(Theme.muted)
+                .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.leading).padding(.leading,12).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).frame(height:TimelineCanvas.addBand)
+        .disabled(atLimit || store.isExporting)
+        .help(atLimit ? "A timeline has at most \(Project.trackCounts.upperBound) \(kind == .video ? "video" : "audio") tracks"
+                      : kind == .video ? "Add a video track above V\(count)" : "Add an audio track below A\(count)")
+        .accessibilityLabel(kind == .video ? "Add video track" : "Add audio track")
     }
 }
 
+/// Where the timeline canvas is scrolled to vertically.
+@MainActor final class TimelineScroll: ObservableObject { @Published var offset: CGFloat = 0 }
+
 struct TimelineSurface: NSViewRepresentable {
     @ObservedObject var store: EditorStore
+    let scroll: TimelineScroll
+    @MainActor final class Coordinator { var watch: NSObjectProtocol?; var updating = false }
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context:Context) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.hasHorizontalScroller = true; scroll.hasVerticalScroller = false; scroll.autohidesScrollers = false
-        scroll.drawsBackground = false; scroll.scrollerStyle = .legacy
-        let canvas = TimelineCanvas(); canvas.store = store; scroll.documentView = canvas
-        return scroll
+        let view = NSScrollView()
+        view.hasHorizontalScroller = true; view.hasVerticalScroller = true; view.autohidesScrollers = true
+        view.drawsBackground = false; view.scrollerStyle = .legacy
+        // No rubber band vertically: the name column follows the canvas's settled offset only.
+        view.verticalScrollElasticity = .none
+        let canvas = TimelineCanvas(); canvas.store = store; view.documentView = canvas
+        // Tracks that no longer fit scroll vertically; the name column follows the same offset.
+        view.contentView.postsBoundsChangedNotifications = true
+        let model = scroll, coordinator = context.coordinator
+        coordinator.watch = NotificationCenter.default.addObserver(forName:NSView.boundsDidChangeNotification,object:view.contentView,queue:.main) { [weak clip = view.contentView] _ in
+            MainActor.assumeIsolated {
+                guard let clip else { return }
+                let y = max(0,clip.bounds.origin.y)
+                guard model.offset != y else { return }
+                clip.documentView?.needsDisplay = true      // the pinned ruler moves with the view
+                // Resizing the canvas in updateNSView can move the clip view synchronously; a
+                // SwiftUI model must not be published from inside that update.
+                if coordinator.updating { DispatchQueue.main.async { model.offset = y } } else { model.offset = y }
+            }
+        }
+        return view
+    }
+    static func dismantleNSView(_ view: NSScrollView, coordinator: Coordinator) {
+        if let watch = coordinator.watch { NotificationCenter.default.removeObserver(watch) }
     }
     func updateNSView(_ scroll:NSScrollView,context:Context) {
         guard let canvas = scroll.documentView as? TimelineCanvas else { return }
+        context.coordinator.updating = true; defer { context.coordinator.updating = false }
         let oldZoom = canvas.pixelsPerSecond
         canvas.store = store; canvas.pixelsPerSecond = store.zoom
-        canvas.setFrameSize(NSSize(width:max(scroll.contentSize.width,(max(20,store.project.duration.seconds)+8)*store.zoom),height:max(276,scroll.contentSize.height)))
+        canvas.setFrameSize(NSSize(width:max(scroll.contentSize.width,(max(20,store.project.duration.seconds)+8)*store.zoom),
+                                   height:max(canvas.contentHeight,scroll.contentSize.height)))
         if oldZoom != store.zoom {
             let x = max(0,min(canvas.frame.width-scroll.contentSize.width,store.playhead.seconds*store.zoom-scroll.contentSize.width*0.45))
-            scroll.contentView.scroll(to:NSPoint(x:x,y:0)); scroll.reflectScrolledClipView(scroll.contentView)
+            scroll.contentView.scroll(to:NSPoint(x:x,y:scroll.contentView.bounds.origin.y)); scroll.reflectScrolledClipView(scroll.contentView)
         }
         if canvas.revealPlayheadRequest != store.revealPlayheadRequest {
             canvas.revealPlayheadRequest = store.revealPlayheadRequest
@@ -48,7 +103,7 @@ struct TimelineSurface: NSViewRepresentable {
             let visible = scroll.contentView.bounds
             if x < visible.minX+12 || x > visible.maxX-12 {
                 let offset = max(0,min(canvas.frame.width-visible.width,x-visible.width*0.5))
-                scroll.contentView.scroll(to:NSPoint(x:offset,y:0)); scroll.reflectScrolledClipView(scroll.contentView)
+                scroll.contentView.scroll(to:NSPoint(x:offset,y:visible.origin.y)); scroll.reflectScrolledClipView(scroll.contentView)
             }
         }
         canvas.needsDisplay = true
@@ -60,8 +115,16 @@ struct TimelineSurface: NSViewRepresentable {
     private var playheadWatch: AnyCancellable?
     var pixelsPerSecond: Double = 64
     var revealPlayheadRequest = 0
-    private let ruler: Double = 28
-    private let rowHeight: Double = 62
+    /// Shared with the SwiftUI track-name column so rows line up.
+    static let ruler: Double = 28, addBand: Double = 26, rowHeight: Double = 62
+    private let ruler = TimelineCanvas.ruler, rowHeight = TimelineCanvas.rowHeight, band = TimelineCanvas.addBand
+    /// Top to bottom: V(n) … V1, A1 … A(n).
+    private var lanes: [Lane] { store?.project.displayLanes ?? [] }
+    private func rowTop(_ index: Int) -> Double { ruler+band+Double(index)*rowHeight }
+    /// Ruler, the "+ Video" band, every track, the "+ Audio" band.
+    var contentHeight: Double { ruler+band*2+Double(lanes.count)*rowHeight }
+    /// The ruler stays at the top of the view while the tracks scroll under it.
+    private var rulerTop: Double { visibleRect.minY }
     private enum DragMode { case move, start, end, scrub }
     private var mode: DragMode?
     private var origin = NSPoint.zero
@@ -90,11 +153,18 @@ struct TimelineSurface: NSViewRepresentable {
         }
     }
     private func rect(_ clip:Clip) -> NSRect {
-        let index = Lane.displayOrder.firstIndex(of:clip.lane) ?? 0
-        return NSRect(x:clip.start.seconds*pixelsPerSecond,y:ruler+Double(index)*rowHeight+5,width:max(2,clip.duration.seconds*pixelsPerSecond),height:rowHeight-10)
+        let x = clip.start.seconds*pixelsPerSecond, width = max(2,clip.duration.seconds*pixelsPerSecond)
+        guard let index = lanes.firstIndex(of:clip.lane) else {
+            // A track a move is about to add (linked audio following its video to A3): drawn in the
+            // "+" band where that track will appear, never over an existing row.
+            return NSRect(x:x,y:(clip.lane.isVideo ? ruler : rowTop(lanes.count))+3,width:width,height:band-6)
+        }
+        return NSRect(x:x,y:rowTop(index)+5,width:width,height:rowHeight-10)
     }
     private func lane(at point:NSPoint) -> Lane? {
-        let index = Int(floor((point.y-ruler)/rowHeight)); return Lane.displayOrder.indices.contains(index) ? Lane.displayOrder[index] : nil
+        guard point.y >= rulerTop+ruler else { return nil }
+        let index = Int(floor((point.y-ruler-band)/rowHeight)), lanes = lanes
+        return point.y >= ruler+band && lanes.indices.contains(index) ? lanes[index] : nil
     }
     private func time(at x:Double) -> MediaTime { .init(seconds:max(0,x/pixelsPerSecond)) }
     private func label(_ text:String,at point:NSPoint,size:CGFloat = 10,color:NSColor = .secondaryLabelColor) {
@@ -104,18 +174,22 @@ struct TimelineSurface: NSViewRepresentable {
         guard let store else { return }
         NSColor(red:0.055,green:0.065,blue:0.085,alpha:1).setFill(); dirtyRect.fill()
         let visible = visibleRect.intersection(dirtyRect)
-        for index in 0..<4 {
-            let row = NSRect(x:visible.minX,y:ruler+Double(index)*rowHeight,width:visible.width,height:rowHeight)
+        let lanes = lanes
+        for index in lanes.indices {
+            let row = NSRect(x:visible.minX,y:rowTop(index),width:visible.width,height:rowHeight)
             NSColor(white:index%2 == 0 ? 0.11 : 0.09,alpha:1).setFill(); row.fill()
             NSColor(white:0.19,alpha:1).setStroke(); let line = NSBezierPath(); line.move(to:NSPoint(x:visible.minX,y:row.maxY)); line.line(to:NSPoint(x:visible.maxX,y:row.maxY)); line.stroke()
         }
+        // The "+ Video" and "+ Audio" bands beside the track-name buttons stay empty.
+        NSColor(white:0.07,alpha:1).setFill()
+        NSRect(x:visible.minX,y:ruler,width:visible.width,height:band).fill()
+        NSRect(x:visible.minX,y:rowTop(lanes.count),width:visible.width,height:band).fill()
         let interval: Double = pixelsPerSecond > 100 ? 1 : pixelsPerSecond > 40 ? 2 : pixelsPerSecond > 15 ? 5 : 10
         let first = floor(visible.minX/pixelsPerSecond/interval)*interval
         let last = ceil(visible.maxX/pixelsPerSecond/interval)*interval
         for second in stride(from:first,through:last,by:interval) {
             let x = second*pixelsPerSecond
-            NSColor(white:0.22,alpha:1).setStroke(); let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:20)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 0.5; line.stroke()
-            label(String(format:"%02d:%02d",Int(second)/60,Int(second)%60),at:NSPoint(x:x+5,y:7),size:9)
+            NSColor(white:0.22,alpha:1).setStroke(); let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:ruler)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 0.5; line.stroke()
         }
         let linked = Set(store.selectedClipID.map { store.project.group(for:$0).map(\.id) } ?? [])
         for clip in store.project.clips {
@@ -133,8 +207,8 @@ struct TimelineSurface: NSViewRepresentable {
             label(candidateValid ? store.project.frameRate.timecode(candidate.start) : "Track occupied / source limit",at:NSPoint(x:max(visible.minX+5,rect(candidate).minX),y:rect(candidate).maxY-16),size:10,color:candidateValid ? .white : .systemRed)
         }
         if let gap = store.selectedGap {
-            let row = Lane.displayOrder.firstIndex(of:gap.lane) ?? 0
-            let box = NSRect(x:gap.start.seconds*pixelsPerSecond,y:ruler+Double(row)*rowHeight+5,
+            let row = lanes.firstIndex(of:gap.lane) ?? 0
+            let box = NSRect(x:gap.start.seconds*pixelsPerSecond,y:rowTop(row)+5,
                              width:max(3,gap.duration.seconds*pixelsPerSecond),height:rowHeight-10)
             if box.intersects(visible) {
                 let path = NSBezierPath(roundedRect:box.insetBy(dx:1,dy:1),xRadius:4,yRadius:4)
@@ -147,13 +221,21 @@ struct TimelineSurface: NSViewRepresentable {
             let clip = Clip(mediaID:id,name:media.name,kind:media.kind,lane:lane,start:time,duration:media.duration)
             Theme.accentNS.withAlphaComponent(0.3).setFill(); NSBezierPath(roundedRect:rect(clip),xRadius:4,yRadius:4).fill()
         }
+        if store.project.clips.isEmpty { label("Drag media onto a video (V) or audio (A) track",at:NSPoint(x:visible.minX+24,y:rowTop(0)+57),size:13,color:NSColor(white:0.45,alpha:1)) }
+        // The ruler is pinned to the top of the view; tracks scroll underneath it.
+        let top = rulerTop
+        NSColor(red:0.055,green:0.065,blue:0.085,alpha:1).setFill(); NSRect(x:visible.minX,y:top,width:visible.width,height:ruler).fill()
+        for second in stride(from:first,through:last,by:interval) {
+            let x = second*pixelsPerSecond
+            NSColor(white:0.22,alpha:1).setStroke(); let tick = NSBezierPath(); tick.move(to:NSPoint(x:x,y:top+20)); tick.line(to:NSPoint(x:x,y:top+ruler)); tick.lineWidth = 0.5; tick.stroke()
+            label(String(format:"%02d:%02d",Int(second)/60,Int(second)%60),at:NSPoint(x:x+5,y:top+7),size:9)
+        }
         let x = store.playhead.seconds*pixelsPerSecond
         if x >= visible.minX-10 && x <= visible.maxX+10 {
             let color = Theme.accentNS; color.setStroke(); color.setFill()
-            let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:0)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 1.5; line.stroke()
-            let head = NSBezierPath(); head.move(to:NSPoint(x:x-5,y:0)); head.line(to:NSPoint(x:x+5,y:0)); head.line(to:NSPoint(x:x+5,y:8)); head.line(to:NSPoint(x:x,y:13)); head.line(to:NSPoint(x:x-5,y:8)); head.close(); head.fill()
+            let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:top)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 1.5; line.stroke()
+            let head = NSBezierPath(); head.move(to:NSPoint(x:x-5,y:top)); head.line(to:NSPoint(x:x+5,y:top)); head.line(to:NSPoint(x:x+5,y:top+8)); head.line(to:NSPoint(x:x,y:top+13)); head.line(to:NSPoint(x:x-5,y:top+8)); head.close(); head.fill()
         }
-        if store.project.clips.isEmpty { label("Drag media onto V1 / V2 or A1 / A2",at:NSPoint(x:visible.minX+24,y:ruler+85),size:13,color:NSColor(white:0.45,alpha:1)) }
     }
     /// A retimed clip's speed, top right: gauge and factor on a dark pill, like the toolbar's
     /// speed control. A short clip gets the factor alone, then the gauge alone. Returns where it
@@ -228,7 +310,7 @@ struct TimelineSurface: NSViewRepresentable {
     override func mouseDown(with event:NSEvent) {
         guard let store else { return }
         window?.makeFirstResponder(self); origin = convert(event.locationInWindow,from:nil); moved = false
-        if origin.y < ruler { mode = .scrub; store.pause(); store.seek(time(at:origin.x)); return }
+        if origin.y < rulerTop+ruler { mode = .scrub; store.pause(); store.seek(time(at:origin.x)); return }
         if let clip = store.project.clips.last(where:{rect($0).contains(origin)}) {
             store.selectedClipID = clip.id; store.selectedGap = nil
             original = clip; candidate = clip; candidateValid = true
@@ -247,7 +329,8 @@ struct TimelineSurface: NSViewRepresentable {
     }
     override func mouseDragged(with event:NSEvent) {
         guard let store, let mode else { return }
-        autoscroll(with:event)
+        // Only moving a clip can change track; scrubs and trims keep the tracks where they are.
+        if mode == .move { autoscroll(with:event) } else { autoscrollHorizontally(with:event) }
         let point = convert(event.locationInWindow,from:nil)
         if mode == .scrub { store.seek(time(at:point.x)); return }
         guard let original else { return }
@@ -271,6 +354,14 @@ struct TimelineSurface: NSViewRepresentable {
             candidate = ghost
         }
         needsDisplay = true
+    }
+    private func autoscrollHorizontally(with event:NSEvent) {
+        let point = convert(event.locationInWindow,from:nil), visible = visibleRect
+        let inside = convert(NSPoint(x:point.x,y:min(max(point.y,visible.minY+1),visible.maxY-1)),to:nil)
+        guard let clamped = NSEvent.mouseEvent(with:event.type,location:inside,modifierFlags:event.modifierFlags,timestamp:event.timestamp,
+                                               windowNumber:event.windowNumber,context:nil,eventNumber:event.eventNumber,
+                                               clickCount:event.clickCount,pressure:event.pressure) else { return }
+        autoscroll(with:clamped)
     }
     override func mouseUp(with event:NSEvent) {
         if let store, let original, let candidate, moved, candidateValid {

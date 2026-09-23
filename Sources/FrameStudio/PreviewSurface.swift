@@ -192,7 +192,7 @@ struct PreviewSurface: NSViewRepresentable {
         if event.clickCount == 2 {
             finishDrag(); store.pause()
             let clips = store.project.clips.filter { $0.lane.isVideo && $0.style.opacity > 0 && store.playhead >= $0.start && store.playhead < $0.end }
-                .sorted { $0.lane == .v2 && $1.lane != .v2 }
+                .sorted { $0.lane.number > $1.lane.number }          // the topmost track first
             if let clip = clips.first(where: { geometry(for:$0)?.contains(point) == true }),
                canvas.contains(location) || clip.id == store.previewTransformID {
                 store.selectedClipID = clip.id; store.selectedGap = nil; store.previewTransformID = clip.id

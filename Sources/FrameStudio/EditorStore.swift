@@ -312,6 +312,13 @@ import FrameMedia
         var result: UUID?
         if edit("Add clip", { result = try Editing.add(mediaID:id,lane:target,at:time ?? end,to:&$0) }) { selectedClipID = result; status = "Added \(media.name) to \(target.rawValue)" }
     }
+    /// A new empty track above the top video track, or below the bottom audio track.
+    func addTrack(_ kind: Lane.Kind) {
+        var added: Lane?
+        if edit(kind == .video ? "Add video track" : "Add audio track", { added = try Editing.addTrack(kind,to:&$0) }), let added {
+            status = "Added \(added.rawValue) · ⌘Z to undo"
+        }
+    }
     func addText() {
         var id: UUID?
         if edit("Add text", { id = try Editing.addText(at:playhead,to:&$0) }) { selectedClipID = id }

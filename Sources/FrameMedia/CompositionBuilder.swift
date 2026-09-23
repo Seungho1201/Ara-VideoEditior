@@ -69,7 +69,7 @@ public actor CompositionBuilder {
             guard let standIn = videoURLs[id], FileManager.default.isReadableFile(atPath:standIn.path) else { return url }
             return standIn
         }
-        for lane in Lane.allCases {
+        for lane in project.videoLanes+project.audioLanes {
             let clips = project.clips.filter { $0.lane == lane && ($0.kind == .video || $0.kind == .audio) }.sorted { $0.start < $1.start }
             guard !clips.isEmpty else { continue }
             let type: AVMediaType = lane.isVideo ? .video : .audio
@@ -111,7 +111,8 @@ public actor CompositionBuilder {
             if lane.isVideo { videoIDs.append(track.trackID) } else { mixes.append(parameters) }
         }
         var layers: [RenderLayer] = []
-        for lane in [Lane.v1, .v2] {
+        // Bottom to top: each video track draws over the ones numbered below it.
+        for lane in project.videoLanes {
             for clip in project.clips.filter({ $0.lane == lane }).sorted(by:{ $0.start < $1.start }) {
                 try Task.checkCancellation()
                 var image: CIImage?

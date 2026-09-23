@@ -258,6 +258,35 @@ actor ProgressFlag {
             }
         }
         print("PASS retimed clips leave a valid video composition ending on the timeline end (\(layouts) layouts)")
+        // Tracks beyond V2/A2: a higher video track draws over every lower one, and linked audio
+        // dropped on V4 lands on an A4 the timeline grows for it.
+        var stacked = Project(); stacked.media = [project.media[0],project.media[1],project.media[2]]
+        try Editing.addTrack(.video,to:&stacked)
+        _ = try Editing.add(mediaID:project.media[0].id,lane:.v1,at:.zero,to:&stacked)                // red
+        _ = try Editing.add(mediaID:project.media[1].id,lane:.v2,at:.zero,to:&stacked)                // blue
+        let top = try Editing.add(mediaID:project.media[2].id,lane:Lane(.video,3),at:.zero,to:&stacked) // green
+        try Editing.addTrack(.video,to:&stacked)
+        let fourth = try Editing.add(mediaID:project.media[0].id,lane:Lane(.video,4),at:.init(seconds:2.5),to:&stacked)
+        try require(stacked.audioTrackCount == 4 && stacked.group(for:fourth).contains { $0.lane == Lane(.audio,4) },"linked audio on V4 grows the timeline to A4")
+        func centre(_ project: Project, at seconds: Double) async throws -> [UInt8] {
+            let bundle = try await builder.build(project,urls:urls)
+            let generator = AVAssetImageGenerator(asset:bundle.composition); generator.videoComposition = bundle.videoComposition
+            generator.requestedTimeToleranceBefore = .zero; generator.requestedTimeToleranceAfter = .zero
+            let px = pixels(try await generator.image(at:CMTime(seconds:seconds,preferredTimescale:600)).image)
+            let i = (45*160+80)*4
+            return [px[i],px[i+1],px[i+2]]
+        }
+        let green = try await centre(stacked,at:0.5)
+        try require(green[1] > 150 && green[0] < 60 && green[2] < 180,"V3 draws over V2 and V1, got \(green)")
+        if let i = stacked.clips.firstIndex(where: { $0.id == top }) { stacked.clips[i].style.opacity = 0 }
+        let blue = try await centre(stacked,at:0.5)
+        try require(blue[2] > 150 && blue[0] < 60 && blue[1] < 60,"with V3 hidden, V2 draws over V1, got \(blue)")
+        let stackedBundle = try await builder.build(stacked,urls:urls)
+        let a4 = stackedBundle.composition.tracks(withMediaType:.audio).contains { track in
+            track.segments.contains { !$0.isEmpty && abs($0.timeMapping.target.start.seconds-2.5) < 0.01 }
+        }
+        try require(a4,"A4's audio is in the composition at 2.5 s")
+        print("PASS four video tracks stack in order and A4 audio plays (V3 over V2 over V1)")
         var fractional = Project(); fractional.frameRate = .init(30000,1001); fractional.media = [project.media[2]]
         let fractionalID = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.zero,to:&fractional)
         try Editing.trim(fractionalID,leading:false,to:.init(ticks:fractional.frameRate.frame.ticks*31),in:&fractional)

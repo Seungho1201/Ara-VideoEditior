@@ -1,12 +1,31 @@
 import Foundation
 
 public enum MediaKind: String, Codable, Sendable { case video, audio, image, text }
-public enum Lane: String, Codable, CaseIterable, Sendable, Identifiable {
-    case v1 = "V1", v2 = "V2", a1 = "A1", a2 = "A2"
+/// A timeline track: V1, V2, … (video; a higher number draws above a lower one) or A1, A2, …
+/// (audio). Stored by name ("V3"), exactly as the four fixed tracks of earlier documents were,
+/// so those open unchanged.
+public struct Lane: Hashable, Codable, Sendable, Identifiable {
+    public enum Kind: String, Sendable { case video = "V", audio = "A" }
+    public let kind: Kind
+    public let number: Int
+    public init(_ kind: Kind, _ number: Int) { self.kind = kind; self.number = number }
+    public init?(rawValue: String) {
+        guard let first = rawValue.first, let kind = Kind(rawValue:String(first)),
+              let number = Int(rawValue.dropFirst()), (1...99).contains(number) else { return nil }
+        self.init(kind,number)
+    }
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer(), name = try container.decode(String.self)
+        guard let lane = Lane(rawValue:name) else { throw DecodingError.dataCorruptedError(in:container,debugDescription:"Unknown track \(name).") }
+        self = lane
+    }
+    public func encode(to encoder: any Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(rawValue) }
+    public var rawValue: String { kind.rawValue+String(number) }
     public var id: String { rawValue }
-    public var isVideo: Bool { self == .v1 || self == .v2 }
-    public var paired: Lane { switch self { case .v1: .a1; case .v2: .a2; case .a1: .v1; case .a2: .v2 } }
-    public static let displayOrder: [Lane] = [.v2, .v1, .a1, .a2]
+    public var isVideo: Bool { kind == .video }
+    /// Linked audio lives on the audio track with its video's number, and the other way round.
+    public var paired: Lane { Lane(isVideo ? .audio : .video,number) }
+    public static let v1 = Lane(.video,1), v2 = Lane(.video,2), a1 = Lane(.audio,1), a2 = Lane(.audio,2)
 }
 
 /// A selected empty range on one lane. Not part of the document: selection only.
@@ -106,7 +125,37 @@ public struct Project: Codable, Hashable, Sendable {
     public var frameRate = FrameRate(30)
     public var media: [MediaReference] = []
     public var clips: [Clip] = []
+    /// How many video and audio tracks the timeline has. Documents from before adjustable tracks
+    /// carry neither and get the original two of each.
+    public var videoTrackCount = 2
+    public var audioTrackCount = 2
+    public static let trackCounts = 2...8
     public init() {}
+    private enum CodingKeys: String, CodingKey { case version, id, name, frameRate, media, clips, videoTrackCount, audioTrackCount }
+    /// Hand-written so the track counts can be absent: synthesized decoding ignores defaults.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy:CodingKeys.self)
+        version = try c.decode(Int.self,forKey:.version)
+        id = try c.decode(UUID.self,forKey:.id)
+        name = try c.decode(String.self,forKey:.name)
+        frameRate = try c.decode(FrameRate.self,forKey:.frameRate)
+        media = try c.decode([MediaReference].self,forKey:.media)
+        clips = try c.decode([Clip].self,forKey:.clips)
+        videoTrackCount = try c.decodeIfPresent(Int.self,forKey:.videoTrackCount) ?? 2
+        audioTrackCount = try c.decodeIfPresent(Int.self,forKey:.audioTrackCount) ?? 2
+    }
+    public var videoLanes: [Lane] { (0..<max(0,videoTrackCount)).map { Lane(.video,$0+1) } }
+    public var audioLanes: [Lane] { (0..<max(0,audioTrackCount)).map { Lane(.audio,$0+1) } }
+    /// Top to bottom as the timeline shows them: the highest video track first, then A1 down.
+    public var displayLanes: [Lane] { videoLanes.reversed()+audioLanes }
+    public func hasLane(_ lane: Lane) -> Bool { lane.number >= 1 && lane.number <= (lane.isVideo ? videoTrackCount : audioTrackCount) }
+    /// Adds tracks up to `lane` if it does not exist yet, as when linked audio follows its video
+    /// to V3 and there is no A3. Refuses past the track limit.
+    public mutating func ensureLane(_ lane: Lane) throws {
+        guard !hasLane(lane) else { return }
+        guard lane.number <= Self.trackCounts.upperBound else { throw EditError("A timeline has at most \(Self.trackCounts.upperBound) video and \(Self.trackCounts.upperBound) audio tracks.") }
+        if lane.isVideo { videoTrackCount = lane.number } else { audioTrackCount = lane.number }
+    }
     public var duration: MediaTime { clips.map(\.end).max() ?? .zero }
     public func media(for clip: Clip) -> MediaReference? { media.first { $0.id == clip.mediaID } }
     public func group(for id: UUID) -> [Clip] {
@@ -118,6 +167,7 @@ public struct Project: Codable, Hashable, Sendable {
         guard version == 1 else { throw EditError("This project version is not supported (\(version)).") }
         guard FrameRate.supported.contains(frameRate) else { throw EditError("Unsupported project frame rate.") }
         guard Set(media.map(\.id)).count == media.count, Set(clips.map(\.id)).count == clips.count else { throw EditError("Duplicate identifiers in project.") }
+        guard Self.trackCounts.contains(videoTrackCount), Self.trackCounts.contains(audioTrackCount) else { throw EditError("Invalid track count.") }
         for media in media {
             guard media.duration.ticks >= 0, media.duration.seconds < 7 * 86400,
                   media.width >= 0, media.height >= 0, media.frameRate.isFinite else { throw EditError("Invalid media metadata.") }
@@ -128,7 +178,7 @@ public struct Project: Codable, Hashable, Sendable {
             guard (0..<limit).contains(clip.start.ticks), (0..<limit).contains(clip.sourceStart.ticks),
                   (frameRate.frame.ticks..<limit).contains(clip.duration.ticks),
                   clip.end.seconds < 7 * 86400,
-                  clip.lane.isVideo == (clip.kind != .audio) else { throw EditError("Invalid clip timing or track.") }
+                  clip.lane.isVideo == (clip.kind != .audio), hasLane(clip.lane) else { throw EditError("Invalid clip timing or track.") }
             // Bound speed before any multiplication: sourceLength feeds Int64 arithmetic below.
             guard clip.speed.isFinite, Clip.speedRange.contains(clip.speed) else { throw EditError("Clip speed must be between 25% and 400%.") }
             guard clip.kind == .video || clip.kind == .audio || clip.speed == 1 else { throw EditError("Only video and audio clips can be retimed.") }
@@ -148,7 +198,7 @@ public struct Project: Codable, Hashable, Sendable {
             guard (-2...2).contains(s.x), (-2...2).contains(s.y), (-360...360).contains(s.rotation),
                   [s.red,s.green,s.blue].allSatisfy({ (0...1).contains($0) }) else { throw EditError("Invalid transform or text color.") }
         }
-        for lane in Lane.allCases {
+        for lane in videoLanes+audioLanes {
             let sorted = clips.filter { $0.lane == lane }.sorted { $0.start < $1.start }
             for pair in zip(sorted, sorted.dropFirst()) where pair.0.end > pair.1.start { throw EditError("Clips overlap on \(lane.rawValue). Use another track.") }
         }
