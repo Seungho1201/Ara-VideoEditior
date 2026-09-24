@@ -5,6 +5,8 @@ mkdir -p TestArtifacts/fixtures
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=red:s=640x360:r=30:d=6' -f lavfi -i 'aevalsrc=0.6*sin(2*PI*440*t)*lt(mod(t\,1)\,0.15):s=48000:d=6' -c:v libx264 -pix_fmt yuv420p -color_primaries bt709 -color_trc bt709 -colorspace bt709 -c:a aac -b:a 192k -shortest TestArtifacts/fixtures/base.mp4
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=blue:s=320x180:r=30:d=2' -f lavfi -i 'sine=frequency=880:sample_rate=48000:duration=2' -c:v libx264 -pix_fmt yuv420p -color_primaries bt709 -color_trc bt709 -colorspace bt709 -c:a aac -shortest TestArtifacts/fixtures/overlay.mp4
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=0x00C080:s=640x360' -frames:v 1 TestArtifacts/fixtures/still.png
+# ProRes 4444 with the left half transparent over whatever is below: the compositor must keep alpha.
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=blue:s=320x180:r=30:d=1,format=rgba,geq=r='0':g='0':b='255':a='if(lt(X,W/2),0,255)'" -c:v prores_ks -profile:v 4 -pix_fmt yuva444p10le -alpha_bits 16 TestArtifacts/fixtures/alphahalf.mov
 # Picture shorter than its sound (1 s: red, then blue; 2 s of audio): a transition past the picture's
 # end must hold its last (blue) frame, not fall back to the first (red) one.
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=red:s=320x180:r=30:d=1' -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=2' -vf "drawbox=x=0:y=0:w=iw:h=ih:color=blue:t=fill:enable='gte(t,0.5)'" -c:v libx264 -pix_fmt yuv420p -color_primaries bt709 -color_trc bt709 -colorspace bt709 -c:a aac TestArtifacts/fixtures/shortpicture.mp4

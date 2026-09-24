@@ -207,14 +207,12 @@ public actor CompositionBuilder {
             }
             if lane.isVideo { videoIDs.append(contentsOf:tracks.map(\.trackID)) } else { mixes.append(contentsOf:levels) }
         }
-        /// Exact frames: a loose tolerance returns an unrelated keyframe.
-        func generator(_ clip: Clip, slack: CMTime = .zero) -> AVAssetImageGenerator? {
-            guard let id = clip.mediaID, let url = urls[id] else { return nil }
-            let generator = AVAssetImageGenerator(asset:assetCache[pictureURL(id,url)] ?? AVURLAsset(url:pictureURL(id,url)))
-            generator.appliesPreferredTrackTransform = false
-            generator.requestedTimeToleranceBefore = slack
-            generator.requestedTimeToleranceAfter = .zero
-            return generator
+        // Held frames are decoded natively and converted exactly as the compositor converts the
+        // frames around them, so a held first or last frame matches in colour.
+        func held(_ clip: Clip, at time: CMTime) async -> CIImage? {
+            guard let id = clip.mediaID, let url = urls[id],
+                  let frame = await SourceFrameConverter.heldFrame(of:pictureURL(id,url),at:time) else { return nil }
+            return CIImage(cvPixelBuffer:frame)
         }
         var layers: [RenderLayer] = []
         // Bottom to top: each video track draws over the ones numbered below it.
@@ -231,13 +229,10 @@ public actor CompositionBuilder {
                 // roughly the first three frames of each segment while the decoder primes, and a
                 // still beats both a black flash and aborting the whole render.
                 var fallback: CIImage?, headImage: CIImage?, tailImage: CIImage?
-                if clip.kind == .video, let exact = generator(clip) {
-                    if let cg = try? await exact.image(at:clip.sourceStart.cmTime).image { fallback = CIImage(cgImage:cg) }
-                    if let at = headHold[clip.id], let cg = try? await exact.image(at:at).image { headImage = CIImage(cgImage:cg) }
-                    if let at = tailHold[clip.id] {
-                        if let cg = try? await exact.image(at:at).image { tailImage = CIImage(cgImage:cg) }
-                        else if let loose = generator(clip,slack:CMTime(seconds:0.5,preferredTimescale:600)), let cg = try? await loose.image(at:at).image { tailImage = CIImage(cgImage:cg) }
-                    }
+                if clip.kind == .video {
+                    fallback = await held(clip,at:clip.sourceStart.cmTime)
+                    if let at = headHold[clip.id] { headImage = await held(clip,at:at) }
+                    if let at = tailHold[clip.id] { tailImage = await held(clip,at:at) }
                 }
                 layers.append(RenderLayer(clip:clip,trackID:layerTracks[clip.id],preferredTransform:transforms[clip.id] ?? .identity,image:image,fallbackImage:fallback,
                                           visibleStart:clip.start-(head[clip.id] ?? .zero),visibleEnd:clip.end+(tail[clip.id] ?? .zero),
@@ -249,9 +244,9 @@ public actor CompositionBuilder {
         let video = AVMutableVideoComposition()
         video.customVideoCompositorClass = FrameCompositor.self
         video.renderSize = size; video.frameDuration = project.frameRate.frame.cmTime
-        video.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
-        video.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
-        video.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+        // No colour properties: with them AVFoundation converts HDR sources itself, differently for
+        // the image generator than for playback and export. The compositor converts every source
+        // (SourceFrameConverter) and tags its Rec.709 output.
         // The instruction must cover every instant of the composition or the whole video
         // composition is invalid (no picture at all). Tracks are laid out to end by the project
         // duration; covering the composition's own duration keeps any rounding from mattering.

@@ -31,3 +31,41 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run --arch arm64 
 원본 합성 프레임, 세대별 PNG·재가져온 프레임, 재가져오기 MP4, `roundtrip-result.txt`를 출력 디렉터리에서 확인할 수 있다.
 
 API는 Apple의 [영상 태그에서 색공간 생성](https://developer.apple.com/documentation/corevideo/cvimagebuffercreatecolorspacefromattachments(_:)), [픽셀 버퍼 색공간](https://developer.apple.com/documentation/corevideo/kcvimagebuffercgcolorspacekey), [지정 색공간으로 PNG 렌더링](https://developer.apple.com/documentation/coreimage/cicontext/pngrepresentation(of:format:colorspace:options:)) 문서와 현재 SDK에서 확인했다.
+
+
+## HDR(HLG·PQ) 원본의 스냅샷 색상 수정
+
+2026-09-24, Apple Silicon / macOS 27.
+
+### 증상과 원인
+
+휴대폰 HLG 영상(HEVC Main10, BT.2020, ARIB STD-B67)에서 찍은 스냅샷 PNG가 미리보기보다 R +30, G +20, B +16 정도 밝고 물빠져 보였다. 위 SDR 수정은 그대로 유효하며, 이 문제는 HDR 원본에서만 생긴다.
+
+합성기가 SDR 프레임만 받겠다고 선언하고(supportsHDRSourceFrames = false) 비디오 컴포지션에 Rec.709 색 속성을 지정하면, HDR→SDR 변환은 AVFoundation이 맡는다. 그런데 이 변환이 사용하는 쪽마다 달랐다.
+
+- AVAssetImageGenerator(스냅샷)는 HLG 코드값을 톤매핑하지 않고 Rec.709 태그만 붙여 넘겼다.
+- AVPlayer(미리보기)와 AVAssetReader(내보내기)는 톤매핑했다. 단, 각 트랙이 처음 넘기는 한 프레임은 스냅샷과 같은 미변환 값이었다. 그래서 미리보기를 다시 빌드한 직후 첫 화면과 내보낸 MP4의 첫 프레임은 스냅샷과 같게 보였다.
+
+기존 `snapshot-roundtrip` 검증은 스냅샷 경로끼리만 비교해 이 차이를 잡지 못했다.
+
+### 변경
+
+- 비디오 컴포지션에 색 속성을 지정하지 않는다. 합성기는 HDR·광색역 원본을 원래 색 그대로 받는다(`supportsHDRSourceFrames`·`supportsWideColorSourceFrames` = true).
+- 원본 포맷을 그대로 받는다. HEVC·H.264는 10-bit 4:2:0, ProRes 422는 4:2:2, ProRes 4444는 알파를 포함한 16-bit 4:4:4(y416)다. AVFoundation이 요청 목록에서 원본에 가장 가까운 포맷을 고른다. 목록에 알파 없는 4:4:4(x444)를 넣으면 ProRes 4444도 그 포맷으로 와서 알파가 사라지므로 넣지 않는다. H.264 4:4:4는 여전히 4:2:0으로 온다.
+- 받은 프레임은 `SourceFrameConverter`가 VideoToolbox(VTPixelTransferSession)로 Rec.709 BGRA로 변환한다. 이 변환은 AVFoundation이 재생·내보내기에서 쓰던 HLG→709 변환과 같은 결과를 낸다. 같은 프레임의 평균값이 소수점 둘째 자리까지 같았다. 그래서 기존 미리보기·출력의 색감은 유지된다.
+- 전환의 정지 프레임과 디코더 준비용 대체 프레임도 원본을 AVAssetReader로 디코딩해 같은 변환을 거친다. 이전에는 AVAssetImageGenerator의 별도 변환(ForceSDR)을 거쳐 주변 프레임과 색이 8~36코드 달랐다. 읽기는 해당 시점부터 시작하고, 오픈 GOP의 앞선 프레임처럼 그 시점까지 나오는 프레임이 없을 때만 0.5초 앞에서 다시 읽는다. 읽기는 Swift 스레드 풀이 아닌 전용 큐에서 한다(AVAssetReader가 샘플을 넘기려면 풀에 빈 스레드가 필요해, 풀 안에서 읽으면 동시 빌드가 많을 때 멈출 수 있다). 변환 세션은 정지 프레임마다 새로 만든다. 세션 하나를 겹치는 빌드가 함께 쓰면 VideoToolbox에서 크래시가 나고, 세션이 변환한 버퍼를 해제될 때까지 붙잡아 메모리가 쌓인다.
+
+### 실제 검증
+
+- 사용자 프로젝트(18.4초, 3배속 클립의 마지막 프레임)에서 새 스냅샷, AVPlayer 첫 탐색, AVPlayer 안정 상태, AVAssetReader가 모두 **0.000000**으로 같다. 수정 전에는 미리보기와 스냅샷 PNG의 차이가 **0.0866**(p99 61/255)이었다.
+- 프록시 미리보기와 새 스냅샷 PNG의 차이는 R −0.55, G −0.22, B −0.16이다(프록시 해상도 차이).
+- 새 결과 (124.58, 137.93, 146.15)는 수정 전 미리보기 (123.58, 137.68, 145.14)와 약 1코드 이내다.
+- Probe에 `HDR source converts the same for snapshot and export, first frame included` 검사를 추가했다. hlg4k.mov에서 스냅샷, 내보내기 첫 프레임, 내보내기 이후 프레임을 비교한다. 수정 전 코드는 0.0075로 실패하고, 수정 후는 0.0이다.
+- 기존 smoke·snapshot·스냅샷 왕복(차트, 사용자 HLG 영상)·출력 독립 검사가 모두 통과했다. 미리보기/출력 차이는 오히려 줄었다(0.5초 프레임 0.0026 → 0.00003).
+- 여러 에이전트가 독립 하네스로 수정 전 코드와 비교 검증했다.
+  - SDR 원본 14종(사용자 SDR 영상, 태그 없는 SD, BT.601, P3, BT.470BG, ProRes 422 HQ, 풀레인지, HEVC 8/10-bit, H.264 4:2:2, 세로 회전, 비정사각 픽셀 등): 평균이 채널당 1코드 이내로 같다. 사용자 SDR 영상은 mean|d| 0.44–0.56, p99 2–3이다. 8-bit 4:2:0·4:2:2 원본은 날카로운 채도 경계에서만 크로마 복원 방식이 달라 합성 테스트 패턴에서 p99 13–20이 나온다. 앱 코드 없이 디코더 직접 BGRA와 x420→VideoToolbox 변환을 비교해도 같은 수치이고, 10-bit HEVC SDR은 수정 전후가 비트 단위로 같다.
+  - HDR: HLG·PQ(HDR10 메타데이터 포함, ProRes PQ) 모든 클립과 시점에서 스냅샷 PNG, AVPlayer 첫 탐색·안정 상태, 리더 첫 프레임·이후 프레임이 바이트 단위로 같다. 수정 전 코드는 같은 프레임끼리 17–35코드 달랐다. 새 결과는 수정 전 미리보기와 HLG 1코드 이내, PQ는 밝은 중간톤에서 최대 약 2코드 차이다.
+  - 정지 프레임: 강제로 정지 프레임을 쓴 결과와 같은 시점의 디코딩 프레임이 19종 원본에서 0 차이다. 전환 구간 전체에서 한 프레임 번쩍임은 2.6코드 이하다(수정 전 12–18코드). 오픈 GOP 원본(lead4k)의 디코더 준비 프레임이 검정 대신 올바른 그림이다.
+  - 성능: 재생 55–58fps(수정 전 53–58), 합성 프레임당 VideoToolbox 변환 1.0–2.4ms 추가, 내보내기·스냅샷 속도는 오차 범위다. 빌더 하나로 8–16개 빌드를 동시에 돌려도 크래시·누락·멈춤이 없다. 사용자 프로젝트 빌드는 프록시 약 75ms, 원본 약 300ms다.
+- ProRes 4444 알파 검사(`alphahalf.mov`, 왼쪽 반 투명)를 Probe에 추가했다. 목록에 x444가 있으면 실패한다.
+- 알려진 제한(수정 전부터 있던 동작): x265 오픈 GOP 원본에서 CRA 뒤 프레임을 이미지 생성기가 받지 못하면 스냅샷에 클립 첫 프레임이 쓰인다. 오픈 GOP 클립으로 하드 컷할 때 디코딩 불가한 앞 프레임 몇 장은 재생·내보내기에서 이전 클립 프레임이 남는다.

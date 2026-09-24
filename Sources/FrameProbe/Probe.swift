@@ -189,6 +189,36 @@ actor ProgressFlag {
         let fallbackSources = fallback.composition.tracks(withMediaType:.video).flatMap { $0.segments.compactMap(\.sourceURL) }
         try require(fallbackSources.contains(bigURL) && !fallbackSources.contains(purged),"a missing proxy falls back to the original")
         print("PASS 4K HLG source previews from a 1080p proxy (parity difference \(worstProxy))")
+        // Snapshots (the image generator) and export and preview (readers and players) must convert
+        // an HDR source the same way. Left to AVFoundation they did not: the generator handed the
+        // compositor HLG untone-mapped, and so did the first frame of every reader and player.
+        var splitProject = Project(); splitProject.media = [bigMedia]
+        _ = try Editing.add(mediaID:bigMedia.id,lane:.v1,at:.zero,to:&splitProject)
+        let splitBundle = try await builder.build(splitProject,urls:[bigMedia.id:bigURL])
+        let splitAt = splitProject.frameRate.quantize(MediaTime(seconds:0.8))
+        let splitGenerator = AVAssetImageGenerator(asset:splitBundle.composition); splitGenerator.videoComposition = splitBundle.videoComposition
+        splitGenerator.requestedTimeToleranceBefore = .zero; splitGenerator.requestedTimeToleranceAfter = .zero
+        let snapshotFrame = try await splitGenerator.image(at:splitAt.cmTime).image
+        let exportFirst = try await Task.detached { try composedFrame(splitBundle,at:splitAt,readingFrom:splitAt) }.value
+        let exportLater = try await Task.detached { try composedFrame(splitBundle,at:splitAt,readingFrom:MediaTime.zero) }.value
+        let hdrSplit = max(meanDifference(snapshotFrame,exportFirst),meanDifference(snapshotFrame,exportLater))
+        try require(hdrSplit < 0.002,"HDR snapshot, export first frame and later export frames agree (difference \(hdrSplit))")
+        print("PASS HDR source converts the same for snapshot and export, first frame included (difference \(hdrSplit))")
+        // A ProRes 4444 overlay keeps its alpha (alphahalf.mov: left half transparent, right half
+        // blue) over red base.mp4: the source formats the compositor asks for must include one
+        // with alpha that AVFoundation actually picks for it.
+        let alphaURL = fixtures.appendingPathComponent("alphahalf.mov"), alphaMedia = try await library.inspect(alphaURL)
+        var alphaProject = Project(); alphaProject.media = [project.media[0],alphaMedia]
+        _ = try Editing.add(mediaID:project.media[0].id,lane:.v1,at:.zero,to:&alphaProject)
+        _ = try Editing.add(mediaID:alphaMedia.id,lane:.v2,at:.zero,to:&alphaProject)
+        let alphaBundle = try await builder.build(alphaProject,urls:[project.media[0].id:urls[project.media[0].id]!,alphaMedia.id:alphaURL])
+        let alphaGenerator = AVAssetImageGenerator(asset:alphaBundle.composition); alphaGenerator.videoComposition = alphaBundle.videoComposition
+        alphaGenerator.requestedTimeToleranceBefore = .zero; alphaGenerator.requestedTimeToleranceAfter = .zero
+        let alphaFrame = pixels(try await alphaGenerator.image(at:CMTime(seconds:0.5,preferredTimescale:600)).image)
+        let clearSide = Array(alphaFrame[(45*160+30)*4..<(45*160+30)*4+3]), opaqueSide = Array(alphaFrame[(45*160+130)*4..<(45*160+130)*4+3])
+        try require(clearSide[0] > 200 && clearSide[2] < 60 && opaqueSide[2] > 200 && opaqueSide[0] < 60,
+                    "ProRes 4444 alpha: transparent half shows red below, opaque half blue; got \(clearSide) / \(opaqueSide)")
+        print("PASS ProRes 4444 alpha is kept over the track below")
         // Phone HEVC often decodes nothing for its first frames, so the first picture arrives after
         // the track starts. The proxy must still have a picture from the very start.
         let leadURL = fixtures.appendingPathComponent("lead4k.mp4")
@@ -479,6 +509,27 @@ actor ProgressFlag {
         let out = AVAssetReaderTrackOutput(track:track,outputSettings:[kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32BGRA])
         reader.add(out); reader.startReading(); defer { reader.cancelReading() }
         return out.copyNextSampleBuffer().map(CMSampleBufferGetPresentationTimeStamp) ?? .invalid
+    }
+    /// The frame shown at `time` as the exporter reads it (a reader through the video composition),
+    /// reading from `start`: at `time` itself it is the reader's first frame.
+    static func composedFrame(_ bundle: RenderBundle, at time: MediaTime, readingFrom start: MediaTime) throws -> CGImage {
+        let reader = try AVAssetReader(asset:bundle.composition)
+        let output = AVAssetReaderVideoCompositionOutput(videoTracks:bundle.composition.tracks(withMediaType:.video),
+                                                         videoSettings:[kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32BGRA,kCVPixelBufferIOSurfacePropertiesKey as String:[:] as [String:String]])
+        output.videoComposition = bundle.videoComposition; output.alwaysCopiesSampleData = false
+        reader.add(output)
+        reader.timeRange = CMTimeRange(start:start.cmTime,end:(time+bundle.frameRate.frame).cmTime)
+        guard reader.startReading() else { throw reader.error ?? EditError("Cannot read the composition.") }
+        defer { reader.cancelReading() }
+        var shown: CVPixelBuffer?
+        while let sample = output.copyNextSampleBuffer() {
+            guard let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+            if CMSampleBufferGetPresentationTimeStamp(sample) <= time.cmTime { shown = buffer } else { break }
+        }
+        guard let shown, let image = FrameRenderer.makeContext().createCGImage(CIImage(cvPixelBuffer:shown),from:CGRect(x:0,y:0,width:CVPixelBufferGetWidth(shown),height:CVPixelBufferGetHeight(shown))) else {
+            throw EditError("CHECK FAILED: no composed frame at \(time.seconds) s")
+        }
+        return image
     }
     static func pixels(_ image:CGImage) -> [UInt8] {
         var data = [UInt8](repeating:0,count:160*90*4)

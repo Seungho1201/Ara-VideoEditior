@@ -166,11 +166,14 @@ public enum FrameRenderer {
 }
 
 public final class FrameCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
-    public let sourcePixelBufferAttributes: [String:any Sendable]? = [kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32BGRA,kCVPixelBufferMetalCompatibilityKey as String:true]
+    /// Sources arrive in their own colour and layout (HDR and wide colour included) and are
+    /// converted by one SourceFrameConverter, whichever of preview, snapshot or export asks.
+    public let sourcePixelBufferAttributes: [String:any Sendable]? = [kCVPixelBufferPixelFormatTypeKey as String:SourceFrameConverter.sourceFormats,kCVPixelBufferMetalCompatibilityKey as String:true]
     public let requiredPixelBufferAttributesForRenderContext: [String:any Sendable] = [kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32BGRA,kCVPixelBufferMetalCompatibilityKey as String:true]
-    public let supportsWideColorSourceFrames = false
-    public let supportsHDRSourceFrames = false
+    public let supportsWideColorSourceFrames = true
+    public let supportsHDRSourceFrames = true
     private let context = FrameRenderer.makeContext()
+    private let converter = SourceFrameConverter()             // used only on `queue`
     private let queue = DispatchQueue(label:"com.framestudio.compositor",qos:.userInitiated)
     private let lock = NSLock()
     private var generation: UInt = 0
@@ -183,7 +186,8 @@ public final class FrameCompositor: NSObject, AVVideoCompositing, @unchecked Sen
                 do {
                     guard let instruction = request.videoCompositionInstruction as? FrameInstruction,
                           let output = request.renderContext.newPixelBuffer() else { throw EditError("Cannot allocate a video frame.") }
-                    let image = try FrameRenderer.render(layers:instruction.layers,at:MediaTime(request.compositionTime),size:request.renderContext.size,frame:{ request.sourceFrame(byTrackID:$0) })
+                    let image = try FrameRenderer.render(layers:instruction.layers,at:MediaTime(request.compositionTime),size:request.renderContext.size,
+                                                         frame:{ request.sourceFrame(byTrackID:$0).flatMap { converter.rec709($0) } })
                     context.render(image,to:output,bounds:CGRect(origin:.zero,size:request.renderContext.size),colorSpace:FrameRenderer.outputColorSpace)
                     CVBufferSetAttachment(output,kCVImageBufferCGColorSpaceKey,FrameRenderer.outputColorSpace,.shouldPropagate)
                     CVBufferSetAttachment(output,kCVImageBufferColorPrimariesKey,kCVImageBufferColorPrimaries_ITU_R_709_2,.shouldPropagate)
