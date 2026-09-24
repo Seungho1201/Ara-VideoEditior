@@ -88,9 +88,9 @@ struct TimelineSurface: NSViewRepresentable {
         coordinator.watch = NotificationCenter.default.addObserver(forName:NSView.boundsDidChangeNotification,object:view.contentView,queue:.main) { [weak clip = view.contentView] _ in
             MainActor.assumeIsolated {
                 guard let clip else { return }
+                (clip.documentView as? TimelineCanvas)?.scrolled(to:clip.bounds.origin)
                 let y = max(0,clip.bounds.origin.y)
                 guard model.offset != y else { return }
-                clip.documentView?.needsDisplay = true      // the pinned ruler moves with the view
                 // Resizing the canvas in updateNSView can move the clip view synchronously; a
                 // SwiftUI model must not be published from inside that update.
                 if coordinator.updating { DispatchQueue.main.async { model.offset = y } } else { model.offset = y }
@@ -158,6 +158,25 @@ struct TimelineSurface: NSViewRepresentable {
         setAccessibilityRole(.group); setAccessibilityLabel("Multitrack timeline. V2 above V1. A1 and A2 linked audio.")
     }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
+    private var lastScroll = NSPoint.zero
+    /// A scroll shifts the pixels already drawn and repaints only the strip it uncovers. Clip
+    /// names and speed badges stay in view while their clip is part-way off screen, so they move
+    /// with the visible edge: across a horizontal scroll the title bands are repainted too, or
+    /// the shifted copies would pile up. A vertical scroll repaints everything (the ruler is
+    /// pinned to the top).
+    func scrolled(to origin: NSPoint) {
+        defer { lastScroll = origin }
+        if origin.y != lastScroll.y { needsDisplay = true; return }
+        guard origin.x != lastScroll.x, let store else { return }
+        let visible = visibleRect
+        if store.project.clips.isEmpty { needsDisplay = true; return }        // the centred hint
+        var bands = Set<Double>()
+        for clip in store.project.clips {
+            let box = rect(clip)
+            if box.intersects(visible) { bands.insert(box.minY) }
+        }
+        for top in bands { setNeedsDisplay(NSRect(x:visible.minX,y:top,width:visible.width,height:20)) }
+    }
     /// A playhead move repaints the strips under its old and new positions, not the timeline.
     private func followPlayhead() {
         playheadWatch = store?.clock.moved.sink { [weak self] move in
