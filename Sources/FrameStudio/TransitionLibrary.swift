@@ -48,7 +48,7 @@ struct TransitionLibrary: View {
                             .pickerStyle(.segmented).labelsHidden().controlSize(.small)
                     }
                 } else {
-                    Text("Drag a transition onto a cut between two clips, or onto a clip's start or end for a fade. Or select a clip and click one.")
+                    Text("Drag a transition onto a cut or a clip's edge. On a clip, the nearest edge is used. Or select a clip and click one.")
                         .font(.system(size:11)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
                 }
                 ForEach(TransitionKind.Category.allCases,id:\.self) { category in
@@ -59,7 +59,9 @@ struct TransitionLibrary: View {
                                 Button { apply(kind) } label: { tile(kind) }
                                     .buttonStyle(.plain)
                                     .onHover { inside in if inside { hovered = kind } else if hovered == kind { hovered = nil } }
-                                    .onDrag { NSItemProvider(object:TransitionDrag.payload(kind) as NSString) }
+                                    // AppKit owns the entire mouse sequence, just as it does for
+                                    // media cards. A SwiftUI Button's press must not consume the drag.
+                                    .overlay { TransitionDragHandle(kind:kind,apply:{ apply(kind) }).accessibilityHidden(true) }
                                     .help(store.selectedClip == nil ? "Drag onto the timeline" : "Click to add to the selected clip's \(atEnd ? "end" : "start") · or drag onto the timeline")
                                     .accessibilityLabel("\(kind.name) transition")
                             }
@@ -101,12 +103,57 @@ struct TransitionLibrary: View {
 
 /// What a transition carries while it is dragged onto the timeline.
 enum TransitionDrag {
+    static let pasteboardType = NSPasteboard.PasteboardType("com.framestudio.transition-kind")
     static let prefix = "ara.transition:"
     static func payload(_ kind: TransitionKind) -> String { prefix+kind.rawValue }
     static func kind(from text: String) -> TransitionKind? {
         guard text.hasPrefix(prefix) else { return nil }
         return TransitionKind(rawValue:String(text.dropFirst(prefix.count)))
     }
+    static func kind(from pasteboard: NSPasteboard) -> TransitionKind? {
+        if let value = pasteboard.string(forType:pasteboardType) { return TransitionKind(rawValue:value) }
+        return pasteboard.string(forType:.string).flatMap { kind(from:$0) }
+    }
+}
+
+private struct TransitionDragHandle: NSViewRepresentable {
+    let kind: TransitionKind
+    let apply: () -> Void
+    func makeNSView(context: Context) -> TransitionDragView { TransitionDragView() }
+    func updateNSView(_ view: TransitionDragView, context: Context) {
+        view.kind = kind; view.apply = apply
+    }
+}
+
+@MainActor private final class TransitionDragView: NSView, NSDraggingSource {
+    var kind: TransitionKind = .crossDissolve
+    var apply: (() -> Void)?
+    private var origin = NSPoint.zero
+    private var didDrag = false
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        origin = convert(event.locationInWindow,from:nil); didDrag = false
+    }
+    override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow,from:nil)
+        guard !didDrag, hypot(point.x-origin.x,point.y-origin.y) > 4 else { return }
+        didDrag = true
+        // Eager native data is readable by TimelineCanvas throughout the drag, including
+        // its first draggingEntered call. Keep the text representation for compatibility.
+        let pasteboard = NSPasteboardItem()
+        pasteboard.setString(kind.rawValue,forType:TransitionDrag.pasteboardType)
+        pasteboard.setString(TransitionDrag.payload(kind),forType:.string)
+        let item = NSDraggingItem(pasteboardWriter:pasteboard)
+        item.setDraggingFrame(NSRect(x:point.x-64,y:point.y-36,width:128,height:72),contents:TransitionPreviews.image(kind))
+        beginDraggingSession(with:[item],event:event,source:self)
+    }
+    override func mouseUp(with event: NSEvent) {
+        // Cancelling a drag (including Escape) must never turn it into a click-to-apply.
+        guard !didDrag, bounds.contains(convert(event.locationInWindow,from:nil)) else { return }
+        apply?()
+    }
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
 }
 
 /// Stills of each transition part-way through, and short loops of it for hovering, drawn by the

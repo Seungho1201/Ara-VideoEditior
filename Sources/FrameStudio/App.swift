@@ -40,6 +40,9 @@ import AppKit
             EditorView(store:store)
                 .frame(minWidth:1060,minHeight:760)
                 .preferredColorScheme(.dark)
+                // Keep the native title and window controls over the editor's panel colour.
+                .containerBackground(Theme.panel,for:.window)
+                .toolbarBackgroundVisibility(.hidden,for:.windowToolbar)
                 .onAppear {
                     delegate.attach(store)
                     if let window = NSApplication.shared.windows.first { window.delegate = delegate; window.title = "Ara" }
@@ -55,10 +58,10 @@ import AppKit
         .restorationBehavior(.disabled)
         .commands {
             CommandGroup(replacing:.newItem) {
-                Button("New Project") { store.newProject() }.keyboardShortcut("n")
-                Button("Open Project…") { store.chooseOpen() }.keyboardShortcut("o")
+                Button("New Project") { store.newProject() }.keyboardShortcut("n").disabled(store.showNewProjectSheet)
+                Button("Open Project…") { store.chooseOpen() }.keyboardShortcut("o").disabled(store.showNewProjectSheet)
                 Button("Start Screen") { store.showStartScreen() }.keyboardShortcut("1",modifiers:[.command,.shift])
-                    .disabled(store.showLauncher || store.isExporting || store.isCapturingSnapshot)
+                    .disabled(store.showLauncher || store.showNewProjectSheet || store.isExporting || store.isCapturingSnapshot)
                 Divider()
                 // Everything below acts on the open project, which is hidden behind the start screen.
                 Group {
@@ -66,13 +69,13 @@ import AppKit
                     Button("Save Project As…") { store.save(as:true) }.keyboardShortcut("s",modifiers:[.command,.shift])
                     Divider()
                     Button("Import Media…") { store.chooseImport() }.keyboardShortcut("i")
-                    Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut("e").disabled(store.project.clips.isEmpty || store.isExporting)
+                    Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut("e").disabled(store.isExporting || store.isCapturingSnapshot)
                     Button("Save Timeline Snapshot…") { store.chooseSnapshot() }.keyboardShortcut("e",modifiers:[.command,.shift]).disabled(!store.canCaptureSnapshot)
-                }.disabled(store.showLauncher)
+                }.disabled(store.showLauncher || store.showNewProjectSheet)
             }
             CommandGroup(replacing:.undoRedo) {
-                Button("Undo \(store.undoName)") { store.undo() }.keyboardShortcut("z").disabled(!store.canUndo || store.showLauncher)
-                Button("Redo \(store.history.redoName)") { store.redo() }.keyboardShortcut("z",modifiers:[.command,.shift]).disabled(!store.canRedo || store.showLauncher)
+                Button("Undo \(store.undoName)") { store.undo() }.keyboardShortcut("z").disabled(!store.canUndo || store.showLauncher || store.showNewProjectSheet)
+                Button("Redo \(store.history.redoName)") { store.redo() }.keyboardShortcut("z",modifiers:[.command,.shift]).disabled(!store.canRedo || store.showLauncher || store.showNewProjectSheet)
             }
             CommandMenu("Timeline") {
                 // Unmodified keys (Space, arrows, Delete, N) must not reach a project the user cannot see,
@@ -90,7 +93,8 @@ import AppKit
                 Button("Close Gap") { store.closeSelectedGap() }.keyboardShortcut(.delete,modifiers:[.command]).disabled(store.selectedGap == nil)
                 Button("Add Text Clip") { store.addText() }.keyboardShortcut("t",modifiers:[.command,.shift])
                 Toggle("Snapping",isOn:$store.snapping).keyboardShortcut("n",modifiers:[])
-                }.disabled(store.showLauncher)
+                Toggle("Trackpad Haptics",isOn:$store.scrubHaptics)
+                }.disabled(store.showLauncher || store.showNewProjectSheet)
             }
         }
     }

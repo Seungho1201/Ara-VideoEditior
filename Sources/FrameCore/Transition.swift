@@ -189,6 +189,19 @@ public extension Project {
 }
 
 public extension Editing {
+    /// The nearest visual clip edge within the caller's hit tolerance. The view converts its
+    /// pointer and point-sized tolerance to media time, so zoom and scroll do not change cuts.
+    /// Equal distances choose the earlier edge, independent of the clips' storage order.
+    static func nearestTransitionEdge(on lane: Lane, to time: MediaTime, within tolerance: MediaTime, in project: Project) -> (time: MediaTime, from: UUID?, to: UUID?)? {
+        guard lane.isVideo, tolerance >= .zero else { return nil }
+        let edges = project.clips.filter { $0.lane == lane }.flatMap { [$0.start,$0.end] }
+        guard let nearest = edges.min(by: {
+            let a = abs(($0-time).ticks), b = abs(($1-time).ticks)
+            return a == b ? $0 < $1 : a < b
+        }), abs((nearest-time).ticks) <= tolerance.ticks,
+        let edge = edge(on:lane,at:nearest,in:project) else { return nil }
+        return (nearest,edge.from,edge.to)
+    }
     /// The clip edge at `time` on `lane`: the cut between two abutting clips, or one clip's start
     /// or end. Nil when no clip begins or ends there.
     static func edge(on lane: Lane, at time: MediaTime, in project: Project) -> (from: UUID?, to: UUID?)? {
@@ -233,6 +246,21 @@ public extension Editing {
             candidate.transitions[index].duration = max(candidate.frameRate.frame, min(candidate.frameRate.quantize(duration), others.longestTransition(from: t.from, to: t.to)))
         }
         project = try candidate.validated()
+    }
+    /// Resizes a transition from its visible edge, without moving its cut or either clip.
+    /// A cut moves both edges equally; odd lengths keep the extra frame after the cut.
+    /// Fade-ins keep their start, fade-outs their end. During a drag, callers use the original
+    /// project for every sample so returning from a clamped limit restores the original length.
+    static func resizeTransition(_ id: UUID, leading: Bool, to time: MediaTime, in project: inout Project) throws {
+        guard let transition = project.transitions.first(where: { $0.id == id }),
+              let window = project.window(of:transition) else { throw EditError("This transition is no longer available.") }
+        guard transition.isCut || (leading ? transition.to == nil : transition.from == nil) else {
+            throw EditError("This edge is anchored to the clip. Drag the other edge to change the fade length.")
+        }
+        let edge = leading ? window.start : window.end
+        let delta = project.frameRate.quantize(time)-edge
+        let change = delta.scaled(by:(leading ? -1 : 1)*(transition.isCut ? 2 : 1))
+        try updateTransition(id,duration:transition.duration+change,in:&project)
     }
     static func removeTransition(_ id: UUID, from project: inout Project) {
         project.transitions.removeAll { $0.id == id }

@@ -68,7 +68,7 @@ public struct ClipStyle: Codable, Hashable, Sendable {
     public var volume: Double = 1
     public var muted = false
     public var text = "Your story starts here"
-    /// Font size in a 1080-line canvas, scales proportionally for 4K.
+    /// Font size relative to a 1080-pixel short edge, scales proportionally for 4K.
     public var fontSize: Double = 72
     public var red: Double = 1
     public var green: Double = 1
@@ -119,10 +119,13 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
 }
 
 public struct Project: Codable, Hashable, Sendable {
-    public var version = 1
+    public var version = 2
     public var id = UUID()
     public var name = "Untitled"
     public var frameRate = FrameRate(30)
+    public var aspectRatio = VideoAspectRatio.landscape
+    /// Output preset's short edge; preview rendering can remain at 1080 for responsiveness.
+    public var outputResolution = 1080
     public var media: [MediaReference] = []
     public var clips: [Clip] = []
     /// How many video and audio tracks the timeline has. Documents from before adjustable tracks
@@ -133,14 +136,20 @@ public struct Project: Codable, Hashable, Sendable {
     public var transitions: [Transition] = []
     public static let trackCounts = 2...8
     public init() {}
-    private enum CodingKeys: String, CodingKey { case version, id, name, frameRate, media, clips, videoTrackCount, audioTrackCount, transitions }
+    private enum CodingKeys: String, CodingKey { case version, id, name, frameRate, aspectRatio, outputResolution, media, clips, videoTrackCount, audioTrackCount, transitions }
     /// Hand-written so the track counts can be absent: synthesized decoding ignores defaults.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy:CodingKeys.self)
         version = try c.decode(Int.self,forKey:.version)
+        guard (1...2).contains(version) else { throw EditError("This project version is not supported (\(version)).") }
+        // Version 1 was always 16:9. Upgrade in memory; saving uses version 2 so older apps
+        // cannot silently open a portrait project as landscape.
+        aspectRatio = version == 1 ? .landscape : try c.decode(VideoAspectRatio.self,forKey:.aspectRatio)
+        version = 2
         id = try c.decode(UUID.self,forKey:.id)
         name = try c.decode(String.self,forKey:.name)
         frameRate = try c.decode(FrameRate.self,forKey:.frameRate)
+        outputResolution = try c.decodeIfPresent(Int.self,forKey:.outputResolution) ?? 1080
         media = try c.decode([MediaReference].self,forKey:.media)
         clips = try c.decode([Clip].self,forKey:.clips)
         videoTrackCount = try c.decodeIfPresent(Int.self,forKey:.videoTrackCount) ?? 2
@@ -167,8 +176,9 @@ public struct Project: Codable, Hashable, Sendable {
         return clips.filter { $0.linkID == link }
     }
     public func validated() throws -> Project {
-        guard version == 1 else { throw EditError("This project version is not supported (\(version)).") }
+        guard version == 2 else { throw EditError("This project version is not supported (\(version)).") }
         guard FrameRate.supported.contains(frameRate) else { throw EditError("Unsupported project frame rate.") }
+        guard [1080,2160].contains(outputResolution) else { throw EditError("Choose Full HD or 4K output quality.") }
         guard Set(media.map(\.id)).count == media.count, Set(clips.map(\.id)).count == clips.count else { throw EditError("Duplicate identifiers in project.") }
         guard Self.trackCounts.contains(videoTrackCount), Self.trackCounts.contains(audioTrackCount) else { throw EditError("Invalid track count.") }
         for media in media {

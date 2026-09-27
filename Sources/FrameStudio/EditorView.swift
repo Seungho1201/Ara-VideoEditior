@@ -22,9 +22,10 @@ struct EditorView: View {
             if store.showLauncher { LauncherView(store:store,registry:store.registry) }
             else { editor }
         }
-        .background(Theme.background).tint(Theme.accent)
+        .background(Theme.background,ignoresSafeAreaEdges:[]).tint(Theme.accent)
         .alert("Ara",isPresented:Binding(get:{store.message != nil},set:{if !$0 {store.message = nil}})) { Button("OK",role:.cancel) { store.message = nil } } message: { Text(store.message ?? "") }
-        .sheet(isPresented:$store.showExportSheet) { exportSettings }
+        .sheet(isPresented:$store.showExportSheet) { ExportSettingsView(store:store) }
+        .sheet(isPresented:$store.showNewProjectSheet) { NewProjectView(store:store) }
         .sheet(isPresented:Binding(get:{store.isExporting},set:{_ in})) { exportProgress }
     }
     private var editor: some View {
@@ -33,27 +34,16 @@ struct EditorView: View {
             Divider()
             VSplitView {
                 HSplitView {
-                    LibraryPanel(store:store).frame(minWidth:215,idealWidth:265,maxWidth:330)
+                    // Both side panels must be able to grow, so the viewer can shrink
+                    // to its fitted picture plus the horizontal margins below.
+                    LibraryPanel(store:store).frame(minWidth:340,idealWidth:496,maxWidth:.infinity)
+                        .background(EditorSplitSizing(axis:.columns))
                     viewer.frame(minWidth:390,maxWidth:.infinity,maxHeight:.infinity)
-                    SidePanel(store:store).frame(minWidth:250,idealWidth:280,maxWidth:320)
+                    SidePanel(store:store).frame(minWidth:250,idealWidth:328.5,maxWidth:.infinity)
                 }.frame(minHeight:280,idealHeight:500)
+                    .background(EditorSplitSizing(axis:.rows))
                 timeline.frame(minHeight:345,idealHeight:345)
             }
-            Divider()
-            HStack(spacing:8) {
-                Circle().fill(store.missing.isEmpty ? Theme.accent : .orange).frame(width:5,height:5)
-                Text(store.status).lineLimit(1)
-                Spacer()
-                if let proxy = store.proxyProgress {
-                    // Sources above FHD get a 1080p stand-in for the preview; export still uses the originals.
-                    ProgressView(value:proxy.fraction).progressViewStyle(.linear).frame(width:70).controlSize(.mini)
-                    Text("FHD preview media · \(proxy.name) \(Int(proxy.fraction*100))%" + (proxy.remaining > 1 ? " · \(proxy.remaining-1) more" : ""))
-                        .lineLimit(1).truncationMode(.middle).frame(maxWidth:300,alignment:.trailing)
-                        .help("Making 1080p preview copies of sources larger than FHD so scrubbing stays smooth. Export always uses the original files.")
-                    Text("·")
-                }
-                Text("PREVIEW FHD  ·  LOCAL MEDIA  ·  SDR REC.709").tracking(1.2)
-            }.font(.system(size:10,weight:.medium)).foregroundStyle(Theme.muted).padding(.horizontal,16).frame(height:27)
         }
     }
     private var toolbar: some View {
@@ -73,6 +63,7 @@ struct EditorView: View {
             VStack(alignment:.leading,spacing:3) {
                 Text("Ara").font(.system(size:16,weight:.bold)).tracking(1)
                 Text(store.project.name + (store.dirty ? " •" : "")).font(.system(size:12)).foregroundStyle(Theme.muted).lineLimit(1)
+                    .help(store.status)
             }
             Spacer(minLength:10)
             toolbarButton("New",icon:"doc.badge.plus",action:store.newProject)
@@ -81,7 +72,7 @@ struct EditorView: View {
             Rectangle().fill(.white.opacity(0.1)).frame(width:1,height:24)
             toolbarButton("Import",icon:"plus",action:store.chooseImport)
             Button { store.showExportSheet = true } label: { Label("Export",systemImage:"arrow.up.right").font(.system(size:12,weight:.semibold)).padding(.horizontal,13).padding(.vertical,8) }
-                .buttonStyle(.plain).background(Theme.accent,in:RoundedRectangle(cornerRadius:6)).foregroundStyle(Theme.background).disabled(store.project.clips.isEmpty || store.isExporting)
+                .buttonStyle(.plain).background(Theme.accent,in:RoundedRectangle(cornerRadius:6)).foregroundStyle(Theme.background).disabled(store.isExporting || store.isCapturingSnapshot)
         }.padding(.horizontal,18).frame(height:64).background(Theme.panel)
     }
     /// Presets only. The inspector keeps the continuous slider for in-between values.
@@ -111,7 +102,7 @@ struct EditorView: View {
     }
     private var viewer: some View {
         VStack(spacing:0) {
-            HStack { panelTitle("PROGRAM"); Spacer(); Text("1920 × 1080").font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted) }.padding(14)
+            HStack { panelTitle("PROGRAM"); Spacer(); Text(store.project.aspectRatio.dimensions()).font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted) }.padding(14)
             ZStack {
                 Color.black
                 if store.project.clips.isEmpty || !store.missing.isEmpty {
@@ -122,7 +113,7 @@ struct EditorView: View {
                     }.foregroundStyle(.white.opacity(0.8))
                 } else { PreviewSurface(store:store) }
                 if store.isBuilding { VStack { Spacer(); HStack(spacing:8) { ProgressView().controlSize(.mini); Text("Updating preview").font(.system(size:11)) }.padding(9).background(.black.opacity(0.7),in:Capsule()).padding(12) } }
-            }.aspectRatio(16/9,contentMode:.fit).padding(.horizontal,18).frame(maxWidth:.infinity,maxHeight:.infinity)
+            }.aspectRatio(store.project.aspectRatio.value,contentMode:.fit).padding(.horizontal,50).frame(maxWidth:.infinity,maxHeight:.infinity)
             HStack(spacing:8) {
                 PlayheadTimecode(clock:store.clock,rate:store.project.frameRate)
                 Spacer(minLength:0)
@@ -161,25 +152,14 @@ struct EditorView: View {
                 }.help("Add a title above the clips at the playhead ⇧⌘T").accessibilityLabel("Add text clip")
                 Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil).help("Delete linked clips")
                 Spacer(minLength:4)
-                Toggle(isOn:$store.snapping) { Image(systemName:"point.topleft.down.to.point.bottomright.curvepath") }.toggleStyle(.button).help("Snap to clip edges and playhead N")
+                Toggle(isOn:$store.snapping) { Image(systemName:"magnifyingglass") }.toggleStyle(.button).help("Snap to clip edges and playhead N").accessibilityLabel("Snapping")
                 Text("−").foregroundStyle(Theme.muted)
                 Slider(value:$store.zoom,in:8...220).frame(width:115).help("Timeline zoom")
                 Text("+").foregroundStyle(Theme.muted)
-                Text("\(store.project.frameRate.label) fps NDF").font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted)
             }.font(.system(size:11,weight:.medium)).buttonStyle(.plain).padding(.horizontal,16).frame(height:42).background(Theme.panel)
             Divider()
             TimelineView(store:store)
-            HStack { Text("HIGHER V TRACKS DRAW ON TOP"); Spacer(); Text("Drag to move · Edge handles to trim · ⌘B split · Double-click a gap, ⌘⌫ to close it · ⇧ drag disables snap") }.font(.system(size:9,weight:.medium)).foregroundStyle(Theme.muted).padding(.horizontal,16).frame(height:22)
         }
-    }
-    private var exportSettings: some View {
-        VStack(alignment:.leading,spacing:20) {
-            Text("Export movie").font(.title2.weight(.semibold))
-            Text("H.264 video · AAC stereo audio · SDR Rec.709").foregroundStyle(Theme.muted)
-            Picker("Resolution",selection:$store.exportHeight) { Text("1080p · 1920 × 1080").tag(1080); Text("4K · 3840 × 2160").tag(2160) }
-            Text("\(store.project.frameRate.label) fps · \(store.project.frameRate.timecode(store.project.duration)) · Current timeline snapshot").font(.system(size:12,design:.monospaced))
-            HStack { Button("Cancel") { store.showExportSheet = false }; Spacer(); Button("Choose destination…") { store.showExportSheet = false; DispatchQueue.main.asyncAfter(deadline:.now()+0.2) { store.chooseExport() } }.buttonStyle(.borderedProminent) }
-        }.padding(28).frame(width:470).background(Theme.panel)
     }
     private var exportProgress: some View {
         VStack(alignment:.leading,spacing:18) {
@@ -197,9 +177,26 @@ struct EditorView: View {
 struct LibraryPanel: View {
     @ObservedObject var store: EditorStore
     @State private var targeted = false
+    private let columns = [GridItem(.flexible(minimum:0),spacing:10),GridItem(.flexible(minimum:0),spacing:10)]
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
-            HStack { panelTitle("MEDIA"); Spacer(); Text("\(store.project.media.count)").foregroundStyle(Theme.muted); Button { store.chooseImport() } label:{Image(systemName:"plus")}.buttonStyle(.plain) }.font(.system(size:11)).padding(16)
+            HStack {
+                panelTitle("MEDIA")
+                Spacer()
+                if let proxy = store.proxyProgress {
+                    HStack(spacing:6) {
+                        ProgressView(value:proxy.fraction).progressViewStyle(.linear).frame(width:46).controlSize(.mini)
+                        Text("Preview \(Int(proxy.fraction*100))%").monospacedDigit()
+                    }
+                    .font(.system(size:10)).foregroundStyle(Theme.muted)
+                    .help("Preparing preview · \(proxy.name)" + (proxy.remaining > 1 ? " · \(proxy.remaining-1) more" : ""))
+                    .accessibilityElement(children:.ignore)
+                    .accessibilityLabel("Preparing preview for \(proxy.name)")
+                    .accessibilityValue("\(Int(proxy.fraction*100)) percent")
+                }
+                Text("\(store.project.media.count)").foregroundStyle(Theme.muted)
+                Button { store.chooseImport() } label:{Image(systemName:"plus")}.buttonStyle(.plain)
+            }.font(.system(size:11)).padding(16)
             Divider()
             if store.project.media.isEmpty {
                 VStack(spacing:14) {
@@ -210,9 +207,9 @@ struct LibraryPanel: View {
                 }.frame(maxWidth:.infinity,maxHeight:.infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing:8) {
+                    LazyVGrid(columns:columns,alignment:.leading,spacing:10) {
                         ForEach(store.project.media) { media in
-                            mediaRow(media)
+                            mediaCard(media)
                                 .onTapGesture(count:2) { store.addMedia(media.id) }
                                 .onTapGesture { store.selectedMediaID = media.id }
                                 .contextMenu {
@@ -226,11 +223,6 @@ struct LibraryPanel: View {
                 }
             }
             if store.isImporting { HStack { ProgressView().controlSize(.small); Text("Reading media…").font(.system(size:11)) }.padding(12) }
-            Divider()
-            VStack(alignment:.leading,spacing:8) {
-                HStack { Text("Project rate"); Spacer(); Picker("Project rate",selection:Binding(get:{store.project.frameRate},set:store.setRate)) { ForEach(FrameRate.supported) { Text($0.label).tag($0) } }.labelsHidden().frame(width:95).disabled(!store.project.clips.isEmpty) }.font(.system(size:11))
-                Text("Set before adding clips · Non-drop timecode").font(.system(size:9)).foregroundStyle(Theme.muted)
-            }.padding(12)
         }.background(targeted ? Theme.accent.opacity(0.12) : Theme.panel)
             .onDrop(of:[UTType.fileURL],isTargeted:$targeted) { providers in
                 Task { @MainActor in
@@ -246,7 +238,7 @@ struct LibraryPanel: View {
                 return true
             }
     }
-    private func mediaRow(_ media: MediaReference) -> some View {
+    private func mediaCard(_ media: MediaReference) -> some View {
         VStack(alignment:.leading,spacing:7) {
             ZStack {
                 RoundedRectangle(cornerRadius:4).fill(.black.opacity(0.35))
@@ -254,19 +246,19 @@ struct LibraryPanel: View {
                 else if media.kind == .audio { Image(systemName:"waveform").font(.system(size:30,weight:.light)).foregroundStyle(Theme.accent) }
                 else { Image(systemName:"film").foregroundStyle(Theme.muted) }
                 VStack { Spacer(); HStack { Text(media.kind.rawValue.uppercased()).font(.system(size:8,weight:.bold)).tracking(1); Spacer(); Text(media.kind == .image ? "STILL" : store.project.frameRate.timecode(media.duration)).font(.system(size:9,design:.monospaced)) }.padding(5).background(.black.opacity(0.7)) }
-            }.frame(height:103).clipShape(RoundedRectangle(cornerRadius:4))
+            }.aspectRatio(16.0/9,contentMode:.fit).clipShape(RoundedRectangle(cornerRadius:4))
                 .overlay { LibraryDragHandle(id:media.id,thumbnail:store.thumbnails[media.id],select:{store.selectedMediaID = media.id},append:{store.addMedia(media.id)}) }
-            Text(media.name).font(.system(size:11,weight:.medium)).lineLimit(1)
+            Text(media.name).font(.system(size:11,weight:.medium)).lineLimit(1).truncationMode(.middle).help(media.name)
             HStack {
                 Text(media.kind == .audio ? "Audio · Source waveform" : "\(media.width) × \(media.height)" )
                 Spacer()
                 if media.frameRate > 0 { Text(String(format:"%.2f fps",media.frameRate)) }
-            }.font(.system(size:9)).foregroundStyle(Theme.muted)
+            }.font(.system(size:9)).foregroundStyle(Theme.muted).lineLimit(1)
             HStack {
                 if store.missing.contains(media.id) { Label("Missing",systemImage:"exclamationmark.triangle").foregroundStyle(.orange); Spacer(); Button("Relink…") { store.relink(media) } }
-                else { Text("Double-click to append").foregroundStyle(Theme.muted); Spacer(); Button { store.addMedia(media.id) } label:{Image(systemName:"plus.circle")}.buttonStyle(.plain).help("Append to timeline") }
+                else { Text("Double-click to append").foregroundStyle(Theme.muted).lineLimit(1); Spacer(); Button { store.addMedia(media.id) } label:{Image(systemName:"plus.circle")}.buttonStyle(.plain).help("Append to timeline") }
             }.font(.system(size:10))
-        }.padding(8).background(store.selectedMediaID == media.id ? Theme.accent.opacity(0.1) : Theme.raised.opacity(0.5),in:RoundedRectangle(cornerRadius:7))
+        }.frame(maxWidth:.infinity,alignment:.leading).padding(8).background(store.selectedMediaID == media.id ? Theme.accent.opacity(0.1) : Theme.raised.opacity(0.5),in:RoundedRectangle(cornerRadius:7))
             .overlay(RoundedRectangle(cornerRadius:7).stroke(store.selectedMediaID == media.id ? Theme.accent.opacity(0.8) : .clear,lineWidth:1))
     }
 }

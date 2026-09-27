@@ -41,6 +41,9 @@ import FrameMedia
     @Published private(set) var revealPlayheadRequest = 0
     @Published var zoom: Double = 64
     @Published var snapping = true
+    @Published var scrubHaptics = UserDefaults.standard.object(forKey:"timeline.scrubHaptics") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(scrubHaptics,forKey:"timeline.scrubHaptics") }
+    }
     @Published var isPlaying = false
     @Published var isBuilding = false
     @Published var isImporting = false
@@ -48,14 +51,15 @@ import FrameMedia
     @Published private(set) var isCapturingSnapshot = false
     @Published var exportProgress: Double = 0
     @Published var showExportSheet = false
-    @Published var exportHeight = 1080
+    @Published var showNewProjectSheet = false
+    var exportHeight: Int { project.outputResolution }
     @Published var message: String?
     @Published var status = "Import media to start editing"
     @Published var thumbnails: [UUID:NSImage] = [:]
     @Published var waveforms: [UUID:[Float]] = [:]
     @Published var missing: Set<UUID> = []
     @Published private(set) var documentURL: URL?
-    private var saved = Project()
+    private var saved: Project?
     private(set) var history = EditHistory()
     private var interactionStart: Project?
     /// An open run of render-only style edits (typing a title, dragging the colour well) that
@@ -289,7 +293,9 @@ import FrameMedia
     }
     /// Adds (or replaces) a transition on a clip edge and selects it. A new one takes its kind's
     /// usual length; swapping the kind keeps the length and direction already there.
-    func applyTransition(_ kind: TransitionKind, from: UUID?, to: UUID?) {
+    @discardableResult func applyTransition(_ kind: TransitionKind, from: UUID?, to: UUID?) -> Bool {
+        guard !isExporting else { return false }
+        endInteraction()
         var id: UUID?
         if edit(from != nil && to != nil ? "Add transition" : to != nil ? "Add fade in" : "Add fade out", {
             let existing = project.transitions.first { $0.from == from && $0.to == to }
@@ -297,7 +303,9 @@ import FrameMedia
         }), let id {
             selectedTransitionID = id; selectedClipID = nil; selectedGap = nil
             status = "\(kind.name) added · Delete to remove"
+            return true
         }
+        return false
     }
     /// The selected clip's start or end: across the cut when a clip meets it there, else a fade.
     func transitionEdge(ofSelectedClipAtEnd end: Bool) -> (from: UUID?, to: UUID?)? {
@@ -309,6 +317,14 @@ import FrameMedia
         guard let id = selectedTransitionID else { return }
         let name = duration != nil ? "Transition length" : direction != nil ? "Transition direction" : "Transition kind"
         edit(name) { try Editing.updateTransition(id,kind:kind,direction:direction,duration:duration,in:&$0) }
+    }
+    /// Timeline edge drags preview locally, then commit their final length as one undo step.
+    func setTransitionDuration(_ id: UUID, to duration: MediaTime) {
+        guard !isExporting, project.transitions.contains(where: { $0.id == id }) else { return }
+        if edit("Transition length",{ try Editing.updateTransition(id,duration:duration,in:&$0) }),
+           let transition = project.transitions.first(where: { $0.id == id }) {
+            status = "\(transition.kind.name) · \(String(format:"%.2f s",transition.duration.seconds))"
+        }
     }
     func removeSelectedTransition() {
         guard let id = selectedTransitionID else { return }
@@ -346,13 +362,15 @@ import FrameMedia
         // edit() clears selectedGap on success; restore it on failure so the outline stays put.
         if !edit("Close gap",{ try Editing.closeGap(gap,in:&$0) }) { selectedGap = gap }
     }
-    func addMedia(_ id: UUID, lane: Lane? = nil, at time: MediaTime? = nil) {
-        guard let media = project.media.first(where: { $0.id == id }) else { return }
-        guard !missing.contains(id) else { message = "Relink this source in the library before adding it."; return }
+    @discardableResult func addMedia(_ id: UUID, lane: Lane? = nil, at time: MediaTime? = nil) -> Bool {
+        guard !isExporting, let media = project.media.first(where: { $0.id == id }) else { return false }
+        guard !missing.contains(id) else { message = "Relink this source in the library before adding it."; return false }
         let target = lane ?? (media.kind == .audio ? .a1 : .v1)
         let end = project.clips.filter { $0.lane == target || (media.hasAudio && $0.lane == target.paired) }.map(\.end).max() ?? .zero
         var result: UUID?
-        if edit("Add clip", { result = try Editing.add(mediaID:id,lane:target,at:time ?? end,to:&$0) }) { selectedClipID = result; status = "Added \(media.name) to \(target.rawValue)" }
+        guard edit("Add clip", { result = try Editing.add(mediaID:id,lane:target,at:time ?? end,to:&$0) }) else { return false }
+        selectedClipID = result; status = "Added \(media.name) to \(target.rawValue)"
+        return true
     }
     /// A new empty track above the top video track, or below the bottom audio track.
     func addTrack(_ kind: Lane.Kind) {
@@ -373,9 +391,13 @@ import FrameMedia
     }
     func move(_ id: UUID, to time: MediaTime, lane: Lane) { edit("Move clip") { try Editing.move(id,to:time,lane:lane,in:&$0) } }
     func trim(_ id: UUID, leading: Bool, to time: MediaTime) { edit("Trim clip") { try Editing.trim(id,leading:leading,to:time,in:&$0) } }
-    func setRate(_ rate: FrameRate) {
-        guard project.clips.isEmpty else { return }
-        edit("Project frame rate") { $0.frameRate = rate }
+    func setVideoSettings(aspectRatio: VideoAspectRatio, frameRate: FrameRate, resolution: Int? = nil) throws {
+        commitPendingEdits(); endInteraction()
+        var next = project
+        try Editing.setVideoSettings(aspectRatio:aspectRatio,frameRate:frameRate,resolution:resolution,in:&next)
+        guard next != project else { return }
+        pause(); previewTransformID = nil
+        edit("Timeline settings") { $0 = next }
     }
     /// Frame-exact seeks, chased rather than stacked (Apple QA1820). At most one is in flight;
     /// when it lands, the next goes to wherever the playhead has moved since. Cancelling and
@@ -441,7 +463,7 @@ import FrameMedia
         revision += 1; let token = revision
         rebuildTask?.cancel(); let resume = isPlaying || resumeAfterBuild; pause()
         resumeAfterBuild = resume                // after pause(), which clears it
-        playhead = min(playhead,project.duration)
+        playhead = project.frameRate.quantize(min(playhead,project.duration))
         guard !project.clips.isEmpty else { player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false; return }
         guard missing.isEmpty else {
             player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false
@@ -618,8 +640,8 @@ import FrameMedia
               let i = project.media.firstIndex(where:{$0.id == mediaID && $0.path == path}) else { return }
         let before = project.media[i]
         project.media[i].bookmark = bookmark
-        if saved.id == projectID, let savedIndex = saved.media.firstIndex(where:{$0 == before}) {
-            saved.media[savedIndex].bookmark = bookmark
+        if saved?.id == projectID, let savedIndex = saved?.media.firstIndex(where:{$0 == before}) {
+            saved?.media[savedIndex].bookmark = bookmark
         }
     }
     func relink(_ media: MediaReference) {
@@ -655,6 +677,7 @@ import FrameMedia
         // would otherwise write the old document into the new one's undo history.
         liveEditEnd?.cancel(); liveEditEnd = nil; liveEditStart = nil; interactionStart = nil; proxySwapDeferred = false
         session = UUID()
+        showNewProjectSheet = false
         previewTransformID = nil
         pause(); revision += 1; rebuildTask?.cancel(); importTask?.cancel(); isBuilding = false; isImporting = false
         snapshotTask?.cancel(); snapshotTask = nil; snapshotID = nil; isCapturingSnapshot = false
@@ -666,10 +689,25 @@ import FrameMedia
         // Keep security scopes until app termination: an in-flight cancelled reader may still own a buffer.
     }
     func newProject() {
+        guard !isExporting, !isCapturingSnapshot, !showExportSheet else { return }
+        pause(); showNewProjectSheet = true
+    }
+    /// The setup sheet owns a draft. Only an accepted, valid setup can replace open work.
+    @discardableResult func createProject(name: String, aspectRatio: VideoAspectRatio, frameRate: FrameRate, resolution: Int) throws -> Bool {
+        let name = name.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !name.isEmpty else { throw EditError("Enter a project name.") }
+        guard name.count <= 120, !name.unicodeScalars.contains(where:{ CharacterSet.controlCharacters.contains($0) }) else {
+            throw EditError("Use a project name of up to 120 characters, without line breaks.")
+        }
+        var next = Project(); next.name = name; next.aspectRatio = aspectRatio
+        next.frameRate = frameRate; next.outputResolution = resolution
+        next = try next.validated()
         commitPendingEdits()
-        guard !isExporting, confirmDiscard() else { return }
-        resetSession(); project = Project(); saved = project; documentURL = nil; status = "New project · Choose a frame rate, then import media"
-        showLauncher = false
+        guard !isExporting, !isCapturingSnapshot, confirmDiscard() else { return false }
+        resetSession(); project = next; saved = nil; documentURL = nil
+        status = "New project · \(next.aspectRatio.dimensions(resolution:next.outputResolution)) · \(next.frameRate.label) fps"
+        showNewProjectSheet = false; showLauncher = false
+        return true
     }
     @discardableResult func save(as: Bool = false) -> Bool {
         commitPendingEdits()
@@ -697,24 +735,13 @@ import FrameMedia
         pause(); selectedGap = nil; showLauncher = true; registry.refresh()
     }
     /// True when there is something worth returning to from the start screen.
-    var hasOpenWork: Bool { documentURL != nil || !project.clips.isEmpty || !project.media.isEmpty }
+    var hasOpenWork: Bool { dirty || documentURL != nil || !project.clips.isEmpty || !project.media.isEmpty }
     func resumeEditing() { if hasOpenWork { showLauncher = false } }
     func openFromLauncher(_ path: String) {
         let url = URL(fileURLWithPath: path)
         if let current = documentURL, ProjectHistory.normalized(current.path) == ProjectHistory.normalized(path) { showLauncher = false; return }
         openProject(url)
         if showLauncher { registry.refresh() }   // failed: the card re-reads and shows why
-    }
-    /// Collects every .framestudio inside the chosen folders (or the chosen files) into the list.
-    /// The user picks the folder, so no protected location is ever read without consent.
-    func addProjectsFromFolder() {
-        let panel = NSOpenPanel(); panel.title = "Add projects"
-        panel.message = "Choose folders or project files. Ara lists every .framestudio project it finds."
-        panel.prompt = "Add Projects"
-        panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [UTType(exportedAs:"com.framestudio.project",conformingTo:.json)]
-        guard panel.runModal() == .OK else { return }
-        addProjects(panel.urls)
     }
     func addProjects(_ urls: [URL]) {
         Task {
@@ -746,7 +773,7 @@ import FrameMedia
         let snapshot = project, mediaURLs = urls
         let timecode = snapshot.frameRate.timecode(time)
         let panel = NSSavePanel(); panel.title = "Save timeline snapshot"; panel.allowedContentTypes = [.png]
-        panel.message = "Current composed frame · \(timecode) · 1920 × 1080 PNG"
+        panel.message = "Current composed frame · \(timecode) · \(snapshot.aspectRatio.dimensions()) PNG"
         panel.nameFieldStringValue = snapshot.name+"-"+timecode.replacingOccurrences(of:":",with:"-")+".png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard !mediaURLs.values.contains(where: { $0.standardizedFileURL.resolvingSymlinksInPath() == url.standardizedFileURL.resolvingSymlinksInPath() }) else {
@@ -761,7 +788,7 @@ import FrameMedia
                 try await snapshotExporter.export(bundle,at:time,to:url)
                 guard snapshotID == token else { return }
                 isCapturingSnapshot = false; snapshotTask = nil; snapshotID = nil
-                status = "Snapshot saved · \(url.lastPathComponent) · 1920 × 1080"
+                status = "Snapshot saved · \(url.lastPathComponent) · \(snapshot.aspectRatio.dimensions())"
             } catch {
                 guard snapshotID == token else { return }
                 isCapturingSnapshot = false; snapshotTask = nil; snapshotID = nil
@@ -769,7 +796,7 @@ import FrameMedia
             }
         }
     }
-    func chooseExport() {
+    func chooseExport(aspectRatio: VideoAspectRatio, frameRate: FrameRate, height: Int) {
         commitPendingEdits()
         guard !project.clips.isEmpty, !isExporting else { return }
         let panel = NSSavePanel(); panel.title = "Export H.264 / AAC MP4"; panel.allowedContentTypes = [.mpeg4Movie]
@@ -778,7 +805,10 @@ import FrameMedia
         guard !urls.values.contains(where: { $0.standardizedFileURL.resolvingSymlinksInPath() == url.standardizedFileURL.resolvingSymlinksInPath() }) else {
             message = "Choose a different output filename. Export cannot replace source media."; return
         }
-        let snapshot = project, mediaURLs = urls, height = exportHeight
+        // Canceling the destination panel leaves the project and export preset untouched.
+        do { try setVideoSettings(aspectRatio:aspectRatio,frameRate:frameRate,resolution:height) }
+        catch { report(error); return }
+        let snapshot = project, mediaURLs = urls
         pause(); isExporting = true; exportProgress = 0; status = "Preparing export…"
         exportTask = Task { [self] in
             do {

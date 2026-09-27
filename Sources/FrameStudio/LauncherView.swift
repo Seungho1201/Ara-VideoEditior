@@ -56,9 +56,9 @@ struct LauncherView: View {
             Text("Local video editing on your Mac").font(.system(size:12)).foregroundStyle(Theme.muted).padding(.top,4)
             VStack(spacing:10) {
                 // ⌘N and ⌘O come from the File menu, which stays live on this screen.
-                launchButton("New Project",detail:"Start an empty timeline  ⌘N",icon:"plus.rectangle.on.rectangle",prominent:true) { store.newProject() }
+                launchButton("New Project",detail:"Set up a new timeline  ⌘N",icon:"plus.rectangle.on.rectangle",prominent:true) { store.newProject() }
                 launchButton("Open…",detail:"Choose a .framestudio file  ⌘O",icon:"doc") { store.chooseOpen() }
-                launchButton("Add Projects…",detail:"Collect projects from a folder",icon:"folder.badge.plus") { store.addProjectsFromFolder() }
+                launchButton("Add Project…",detail:"Name, quality, aspect ratio and fps",icon:"folder.badge.plus") { store.newProject() }
                 if store.hasOpenWork {
                     launchButton("Back to \(store.project.name)",detail:store.dirty ? "Unsaved changes" : "Continue editing",icon:"arrow.uturn.backward") { store.resumeEditing() }
                         .keyboardShortcut(.escape,modifiers:[])

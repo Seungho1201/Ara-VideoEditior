@@ -19,11 +19,12 @@ actor ProgressFlag {
             let source = args[2] == "--chart" ? try snapshotColorChart(output:output) : URL(fileURLWithPath:args[2])
             try await snapshotRoundTrip(source:source,output:output); return
         }
-        guard args.count >= 4, ["smoke","snapshot"].contains(args[1]) else {
-            print("Usage: FrameProbe <smoke|snapshot> <fixture-directory> <output-directory>\n       FrameProbe snapshot-roundtrip <media-file|--chart> <output-directory>"); return
+        guard args.count >= 4, ["smoke","snapshot","video-settings"].contains(args[1]) else {
+            print("Usage: FrameProbe <smoke|snapshot|video-settings> <fixture-directory> <output-directory>\n       FrameProbe snapshot-roundtrip <media-file|--chart> <output-directory>"); return
         }
         let fixtures = URL(fileURLWithPath:args[2],isDirectory:true), output = URL(fileURLWithPath:args[3],isDirectory:true)
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        if args[1] == "video-settings" { try await videoSettingsSmoke(fixtures:fixtures,output:output); return }
         if args[1] == "snapshot" { try await snapshotSmoke(fixtures:fixtures,output:output); return }
         let library = MediaLibrary(), builder = CompositionBuilder(), exporter = MovieExporter()
         var project = Project(); project.name = "Frame Studio Validation"

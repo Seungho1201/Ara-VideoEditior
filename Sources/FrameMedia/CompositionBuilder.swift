@@ -29,6 +29,7 @@ public actor CompositionBuilder {
     /// `videoURLs` replaces the picture (never the sound) of a source with a stand-in such as its
     /// FHD preview proxy. A stand-in must share the source's timing and aspect ratio; one that has
     /// gone missing (caches can be purged) falls back to the original.
+    /// `height` is the 1080/2160 resolution preset (the short canvas edge for any aspect ratio).
     public func build(_ project: Project, urls: [UUID:URL], height: Int = 1080, videoURLs: [UUID:URL] = [:]) async throws -> RenderBundle {
         let project = try project.validated()             // transitions reconciled with their clips
         guard project.duration > .zero else { throw EditError("Add a clip to the timeline first.") }
@@ -240,7 +241,7 @@ public actor CompositionBuilder {
                                           transitions:sides[clip.id] ?? []))
             }
         }
-        let size = CGSize(width:height*16/9,height:height)
+        let size = project.aspectRatio.size(resolution:height)
         let video = AVMutableVideoComposition()
         video.customVideoCompositorClass = FrameCompositor.self
         video.renderSize = size; video.frameDuration = project.frameRate.frame.cmTime

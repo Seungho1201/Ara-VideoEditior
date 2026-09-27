@@ -85,7 +85,8 @@ struct PreviewSurface: NSViewRepresentable {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     private var canvas: CGRect {
-        let width = min(bounds.width,bounds.height*16/9), height = min(bounds.height,bounds.width*9/16)
+        let ratio = store?.project.aspectRatio.value ?? 16.0/9
+        let width = min(bounds.width,bounds.height*ratio), height = min(bounds.height,bounds.width/ratio)
         return CGRect(x:(bounds.width-width)/2,y:(bounds.height-height)/2,width:width,height:height)
     }
     private func geometry(for clip: Clip) -> VisualGeometry? {
@@ -241,6 +242,9 @@ struct PreviewSurface: NSViewRepresentable {
     }
     override func resignFirstResponder() -> Bool { finishDrag(); return super.resignFirstResponder() }
     override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.intersection([.command,.shift,.option,.control]).isEmpty {
+            if event.keyCode == 45 { if !event.isARepeat { store?.snapping.toggle() }; return }
+        }
         if event.keyCode == 53 {
             if let drag { store?.updatePreviewTransform(drag.id,style:drag.geometry.style) }
             if let zoomOrigin { store?.updatePreviewTransform(zoomOrigin.id,style:zoomOrigin.style) }

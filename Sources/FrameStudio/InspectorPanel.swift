@@ -172,6 +172,9 @@ struct InspectorPanel: View {
                            in:project.frameRate.frame.seconds...max(project.frameRate.frame.seconds+0.001,longest),
                            onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } })
                         .controlSize(.mini).accessibilityLabel("Transition duration")
+                        .help(transition.isCut ? "Drag either edge of the transition on the timeline to resize around the cut."
+                              : transition.to != nil ? "Drag the transition's right edge on the timeline; its start stays anchored."
+                              : "Drag the transition's left edge on the timeline; its end stays anchored.")
                     Text(!transition.isCut ? "Plays inside the clip; the tracks below show through."
                          : transition.kind.needsBothPictures ? "Centred on the cut, both clips playing. Where a clip has no footage beyond the cut, its edge frame is held."
                          : "Centred on the cut: out of the first clip, into the next. Needs no footage beyond the cut.")

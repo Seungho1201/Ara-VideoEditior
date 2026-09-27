@@ -13,7 +13,7 @@ public struct VisualGeometry {
         self.sourceSize = sourceSize; self.canvasSize = canvasSize; self.style = style; self.isText = isText
     }
     public var renderTransform: CGAffineTransform {
-        let fit = isText ? canvasSize.height / 1080 : min(canvasSize.width/sourceSize.width,canvasSize.height/sourceSize.height)
+        let fit = isText ? min(canvasSize.width,canvasSize.height) / 1080 : min(canvasSize.width/sourceSize.width,canvasSize.height/sourceSize.height)
         let factor = fit * style.scale
         return CGAffineTransform(translationX:-sourceSize.width/2,y:-sourceSize.height/2)
             .concatenating(CGAffineTransform(scaleX:factor,y:factor))

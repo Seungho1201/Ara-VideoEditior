@@ -3,8 +3,8 @@ import XCTest
 
 final class TransitionTests: XCTestCase {
     /// Two 4 s clips meeting at 4 s on V1 (each with linked audio), 30 fps.
-    private func cutProject() throws -> (Project,UUID,UUID) {
-        var p = Project()
+    private func cutProject(rate: FrameRate = .init(30)) throws -> (Project,UUID,UUID) {
+        var p = Project(); p.frameRate = rate
         let media = MediaReference(name:"Source",path:"/fixture.mov",kind:.video,duration:.init(seconds:20),hasAudio:true)
         p.media = [media]
         let a = try Editing.add(mediaID:media.id,lane:.v1,at:.zero,to:&p)
@@ -28,6 +28,99 @@ final class TransitionTests: XCTestCase {
         XCTAssertEqual(p.frameRate.quantize(odd.start),odd.start)
     }
 
+    func testEitherCutHandleResizesAroundTheSameCutWithoutChangingClips() throws {
+        var (base,a,b) = try cutProject()
+        let id = try Editing.setTransition(.push,direction:.right,duration:.init(seconds:1),from:a,to:b,in:&base)
+        for leading in [true,false] {
+            var p = base
+            try Editing.resizeTransition(id,leading:leading,to:.init(seconds:leading ? 2.8 : 5.2),in:&p)
+            let t = try XCTUnwrap(p.transitions.first), w = try XCTUnwrap(p.window(of:t))
+            XCTAssertEqual(t.duration,.init(seconds:2.4))
+            XCTAssertEqual(w.start,.init(seconds:2.8)); XCTAssertEqual(w.end,.init(seconds:5.2))
+            XCTAssertEqual(t.id,id); XCTAssertEqual(t.kind,.push); XCTAssertEqual(t.direction,.right)
+            XCTAssertEqual(p.clips,base.clips); XCTAssertEqual(p.duration,base.duration)
+        }
+    }
+
+    func testOddFrameHandleResizesDoNotJumpAtAnyProjectFrameRate() throws {
+        for rate in FrameRate.supported {
+            var (base,a,b) = try cutProject(rate:rate)
+            let id = try Editing.setTransition(.crossDissolve,duration:MediaTime(ticks:rate.frame.ticks*25),from:a,to:b,in:&base)
+            let window = try XCTUnwrap(base.window(of:base.transitions[0]))
+            for leading in [true,false] {
+                let edge = leading ? window.start : window.end
+                var still = base
+                try Editing.resizeTransition(id,leading:leading,to:edge,in:&still)
+                XCTAssertEqual(still,base,rate.label)
+                var expanded = base
+                try Editing.resizeTransition(id,leading:leading,to:edge+MediaTime(ticks:rate.frame.ticks*(leading ? -1 : 1)),in:&expanded)
+                XCTAssertEqual(expanded.transitions[0].duration.ticks,rate.frame.ticks*27)
+                let w = try XCTUnwrap(expanded.window(of:expanded.transitions[0]))
+                XCTAssertEqual(w.before.ticks,rate.frame.ticks*13)
+                XCTAssertEqual(w.after.ticks,rate.frame.ticks*14)
+                XCTAssertEqual(expanded.clips,base.clips)
+            }
+        }
+    }
+
+    func testFadeHandlesKeepTheirClipAnchorsFixed() throws {
+        var (p,a,b) = try cutProject()
+        let first = try Editing.setTransition(.dipToBlack,from:nil,to:a,in:&p)
+        let last = try Editing.setTransition(.dipToBlack,from:b,to:nil,in:&p)
+        let clips = p.clips
+        try Editing.resizeTransition(first,leading:false,to:.init(seconds:2),in:&p)
+        try Editing.resizeTransition(last,leading:true,to:.init(seconds:6.5),in:&p)
+        let fadeIn = try XCTUnwrap(p.transition(into:a)), fadeOut = try XCTUnwrap(p.transition(outOf:b))
+        XCTAssertEqual(p.window(of:fadeIn)?.start,.zero)
+        XCTAssertEqual(fadeIn.duration,.init(seconds:2))
+        XCTAssertEqual(p.window(of:fadeOut)?.end,.init(seconds:8))
+        XCTAssertEqual(fadeOut.duration,.init(seconds:1.5))
+        XCTAssertEqual(p.clips,clips)
+        let before = p
+        XCTAssertThrowsError(try Editing.resizeTransition(first,leading:true,to:.init(seconds:1),in:&p))
+        XCTAssertThrowsError(try Editing.resizeTransition(last,leading:false,to:.init(seconds:9),in:&p))
+        XCTAssertThrowsError(try Editing.resizeTransition(UUID(),leading:true,to:.zero,in:&p))
+        XCTAssertEqual(p,before)
+    }
+
+    func testHandleResizeClampsAtOneFrameMaximumAndNeighbouringTransitions() throws {
+        var (base,a,b) = try cutProject()
+        let id = try Editing.setTransition(.crossDissolve,from:a,to:b,in:&base)
+        for leading in [true,false] {
+            var p = base
+            try Editing.resizeTransition(id,leading:leading,to:.init(seconds:leading ? -10 : 20),in:&p)
+            XCTAssertEqual(p.transitions[0].duration,Transition.longest)
+            p = base
+            try Editing.resizeTransition(id,leading:leading,to:.init(seconds:leading ? 10 : -10),in:&p)
+            XCTAssertEqual(p.transitions[0].duration,p.frameRate.frame)
+            XCTAssertEqual(p.clips,base.clips)
+        }
+        let fade = try Editing.setTransition(.dipToWhite,duration:.init(seconds:2.5),from:nil,to:a,in:&base)
+        var p = base
+        try Editing.resizeTransition(id,leading:false,to:.init(seconds:20),in:&p)
+        XCTAssertEqual(p.transition(outOf:a)?.duration,.init(seconds:3))
+        XCTAssertEqual(p.transitions.first { $0.id == fade },base.transitions.first { $0.id == fade })
+        XCTAssertEqual(p.clips,base.clips)
+    }
+
+    func testResizeSamplesUseTheirOriginalProjectAndCommitAsOneHistoryStep() throws {
+        var (base,a,b) = try cutProject()
+        let id = try Editing.setTransition(.crossDissolve,from:a,to:b,in:&base)
+        // A long drag crosses both limits and returns to its start; it must not ratchet.
+        var candidate = base
+        for second in [10.0,-2,3.6,3.5] {
+            candidate = base
+            try Editing.resizeTransition(id,leading:true,to:.init(seconds:second),in:&candidate)
+        }
+        XCTAssertEqual(candidate,base)
+        try Editing.resizeTransition(id,leading:true,to:.init(seconds:3),in:&candidate)
+        var history = EditHistory(); history.record(base,name:"Transition length")
+        let undone = try XCTUnwrap(history.undo(candidate))
+        XCTAssertEqual(undone,base); XCTAssertFalse(history.canUndo)
+        XCTAssertEqual(history.redo(undone),candidate)
+        XCTAssertEqual(try ProjectFile.decode(ProjectFile.encode(candidate)),candidate)
+    }
+
     func testOneSidedTransitionsFadeInsideTheClip() throws {
         var (p,a,b) = try cutProject()
         try Editing.setTransition(.dipToBlack,duration:.init(seconds:1),from:nil,to:a,in:&p)   // fade in at 0
@@ -38,6 +131,56 @@ final class TransitionTests: XCTestCase {
         XCTAssertEqual(Editing.edge(on:.v1,at:.init(seconds:4),in:p)?.to,b)
         XCTAssertNil(Editing.edge(on:.v1,at:.init(seconds:2),in:p))
         XCTAssertNil(Editing.edge(on:.a1,at:.init(seconds:4),in:p))                             // no transitions on audio
+    }
+
+    func testDropFindsTheCutAndFreeEdgesAtDifferentZooms() throws {
+        let (p,a,b) = try cutProject()
+        for zoom in [8.0,64,220] {
+            let reach = MediaTime(seconds:24/zoom)
+            for delta in [-10.0,10] {
+                let cut = try XCTUnwrap(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:4+delta/zoom),within:reach,in:p))
+                XCTAssertEqual(cut.time,.init(seconds:4))
+                XCTAssertEqual(cut.from,a); XCTAssertEqual(cut.to,b)
+            }
+            let start = try XCTUnwrap(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:10/zoom),within:reach,in:p))
+            XCTAssertEqual(start.time,.zero); XCTAssertNil(start.from); XCTAssertEqual(start.to,a)
+            let end = try XCTUnwrap(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:8+23/zoom),within:reach,in:p))
+            XCTAssertEqual(end.time,.init(seconds:8)); XCTAssertEqual(end.from,b); XCTAssertNil(end.to)
+            XCTAssertNil(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:8+25/zoom),within:reach,in:p))
+        }
+    }
+
+    func testDropNeverTargetsAudioEmptyTracksOrBridgesAGap() throws {
+        var (p,a,b) = try cutProject()
+        for lane in [Lane.a1,.a2,.v2] {
+            XCTAssertNil(Editing.nearestTransitionEdge(on:lane,to:.init(seconds:4),within:.init(seconds:1),in:p))
+        }
+        XCTAssertNil(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:2),within:.init(seconds:0.3),in:p))
+        try Editing.move(b,to:.init(seconds:10),lane:.v1,in:&p)
+        let edge = try XCTUnwrap(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:4.1),within:.init(seconds:0.3),in:p))
+        XCTAssertEqual(edge.from,a); XCTAssertNil(edge.to)
+        XCTAssertNil(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:7),within:.init(seconds:0.3),in:p))
+        // A card over the centre of a clip chooses its earlier edge consistently.
+        p.clips.reverse()
+        let tied = try XCTUnwrap(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:2),within:.init(seconds:4),in:p))
+        XCTAssertEqual(tied.time,.zero); XCTAssertEqual(tied.to,a)
+    }
+
+    func testEveryDroppedKindPreservesClipTimingAndSupportsUndoAndSave() throws {
+        let (base,_,_) = try cutProject()
+        let edge = try XCTUnwrap(Editing.nearestTransitionEdge(on:.v1,to:.init(seconds:3.9),within:.init(seconds:0.4),in:base))
+        for kind in TransitionKind.allCases {
+            var p = base, history = EditHistory()
+            history.record(p,name:"Add transition")
+            try Editing.setTransition(kind,from:edge.from,to:edge.to,in:&p)
+            XCTAssertEqual(p.clips,base.clips,kind.rawValue)
+            XCTAssertEqual(p.duration,base.duration)
+            XCTAssertEqual(p.transitions.first?.kind,kind)
+            let undone = try XCTUnwrap(history.undo(p))
+            XCTAssertEqual(undone,base)
+            XCTAssertEqual(history.redo(undone),p)
+            XCTAssertEqual(try ProjectFile.decode(ProjectFile.encode(p)),p)
+        }
     }
 
     func testLengthsFitTheClipsAndNeverOverlap() throws {

@@ -13,7 +13,8 @@ let package = Package(
         .target(name: "FrameMedia", dependencies: ["FrameCore"]),
         .executableTarget(name: "FrameStudio", dependencies: ["FrameCore", "FrameMedia"]),
         .executableTarget(name: "FrameProbe", dependencies: ["FrameCore", "FrameMedia"]),
-        .testTarget(name: "FrameCoreTests", dependencies: ["FrameCore"])
+        .testTarget(name: "FrameCoreTests", dependencies: ["FrameCore"]),
+        .testTarget(name: "FrameStudioTests", dependencies: ["FrameStudio"])
     ],
     swiftLanguageModes: [.v6]
 )

@@ -5,7 +5,7 @@ import FrameCore
 
 /// FHD stand-ins for video larger than 1920 × 1080, used only by the preview.
 ///
-/// The composed preview is already 1920 × 1080, but a 4K source is still decoded at 4K, and a
+/// The composed preview is already HD at the project aspect ratio, but a 4K source still decodes at 4K, and a
 /// frame-exact seek into long-GOP HEVC decodes every frame back to the previous keyframe (about a
 /// second on phone footage). A proxy is the same picture at FHD with a keyframe every fifth of a
 /// second and no frame reordering, so scrubbing costs a few 1080p frames instead of dozens of 4K
