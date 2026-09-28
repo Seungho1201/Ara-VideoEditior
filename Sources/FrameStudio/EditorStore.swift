@@ -27,6 +27,11 @@ import FrameMedia
             else if selectedClipIDs.count == 1 { selectedClipIDs = [] }
         }
     }
+    /// The timeline toolbar's rectangle select: the next drag across the tracks selects the clips
+    /// it covers, without Shift, and then it switches itself off. Esc switches it off too.
+    @Published var dragSelectArmed = false {
+        didSet { if dragSelectArmed, !oldValue { status = "Drag across the timeline to select clips · Esc to cancel" } }
+    }
     /// Every selected clip: the one above, or several picked with Shift on the timeline. Each
     /// stands for its linked group.
     @Published private(set) var selectedClipIDs: Set<UUID> = []
@@ -459,7 +464,7 @@ import FrameMedia
             let payload = try ClipClipboard.decode(data)
             endInteraction(); pause()
             let oldMedia = project.media
-            var inserted: (anchor: UUID, clips: [UUID])?
+            var inserted: (anchor: UUID, clips: [UUID], raised: Int)?
             let several = payload.version == 2
             if edit(several ? "Paste clips" : "Paste clip",{ inserted = try Editing.pasteAll(payload,at:playhead,into:&$0) }), let inserted {
                 // Several pasted clips stay selected together, ready to move or copy again.
@@ -467,7 +472,9 @@ import FrameMedia
                 selectedGap = nil
                 if project.media != oldMedia { restoreAccess(); rebuild() }
                 revealPlayheadRequest += 1
-                status = "Pasted clip at \(timecode) · ⌘Z to undo"
+                let lane = project.clip(inserted.anchor)?.lane.rawValue ?? ""
+                status = inserted.raised > 0 ? "Pasted on \(lane) at \(timecode): the track below was in use here · ⌘Z to undo"
+                                             : "Pasted clip at \(timecode) · ⌘Z to undo"
             }
         } catch { report(error) }
     }
@@ -875,7 +882,7 @@ import FrameMedia
         player.replaceCurrentItem(with:nil); history = EditHistory(); playhead = .zero
         seekInFlight = nil; chaseTarget = nil; seeking = false
         proxyTask?.cancel(); proxyTask = nil; proxyJob = nil; proxyProgress = nil; proxies.removeAll(); proxyFailures.removeAll()
-        selectClips([]); selectedGap = nil; selectedMediaID = nil; selectedTransitionID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
+        selectClips([]); dragSelectArmed = false; selectedGap = nil; selectedMediaID = nil; selectedTransitionID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
         // Keep security scopes until app termination: an in-flight cancelled reader may still own a buffer.
     }
     func newProject() {

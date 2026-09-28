@@ -150,7 +150,15 @@ struct EditorView: View {
                 Button { store.addText() } label:{
                     CaptionsGlyph(lineWidth:1).stroke(style:StrokeStyle(lineWidth:1,lineCap:.round,lineJoin:.round)).frame(width:17,height:12.6)
                 }.help("Add a title above the clips at the playhead ⇧⌘T").accessibilityLabel("Add text clip")
-                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil).help("Delete linked clips")
+                // Rectangle select, once: the next drag across the tracks selects what it covers.
+                Button { store.dragSelectArmed.toggle() } label:{
+                    DragSelectGlyph().frame(width:15,height:15)
+                        .padding(3).background(store.dragSelectArmed ? Theme.accent.opacity(0.22) : .clear,in:RoundedRectangle(cornerRadius:4))
+                        .foregroundStyle(store.dragSelectArmed ? Theme.accent : Color.primary)
+                }.padding(-3).disabled(store.project.clips.isEmpty)
+                 .help(store.dragSelectArmed ? "Drag across the timeline to select clips · Esc to cancel" : "Select clips with a rectangle: the next drag across the timeline, no Shift needed")
+                 .accessibilityLabel("Rectangle select").accessibilityAddTraits(store.dragSelectArmed ? .isSelected : [])
+                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil && !store.hasMultipleSelection).help("Delete selected clips")
                 Spacer(minLength:4)
                 Toggle(isOn:$store.snapping) { Image(systemName:"magnifyingglass") }.toggleStyle(.button).help("Snap to clip edges and playhead N").accessibilityLabel("Snapping")
                 Text("−").foregroundStyle(Theme.muted)
@@ -311,6 +319,30 @@ private struct PlayheadTimecode: View {
 
 /// Closed-captions mark: a rounded frame, open on the right edge, around two C's. Stroked, so it
 /// takes the button's colour and dims with it like the SF Symbols beside it.
+/// A square with an arrow out to a dashed square: select by dragging a rectangle.
+private struct DragSelectGlyph: View {
+    var body: some View {
+        Canvas { context, size in
+            let line: CGFloat = 1.2, side = size.width*0.58
+            let solid = CGRect(x:line/2,y:size.height-side-line/2,width:side,height:side)
+            let dashed = CGRect(x:size.width-side-line/2,y:line/2,width:side,height:side)
+            // The dashed square shows only where the solid one does not cover it.
+            context.drawLayer { layer in
+                var outside = Path(CGRect(origin:.zero,size:size)); outside.addRect(solid)
+                layer.clip(to:outside,style:FillStyle(eoFill:true))
+                layer.stroke(Path(dashed),with:.foreground,style:StrokeStyle(lineWidth:line,dash:[1.6,1.3]))
+            }
+            context.stroke(Path(solid),with:.foreground,lineWidth:line)
+            // The arrow, from inside the solid square up to the dashed one.
+            let from = CGPoint(x:solid.minX+side*0.42,y:solid.maxY-side*0.42), to = CGPoint(x:dashed.maxX-side*0.3,y:dashed.minY+side*0.3)
+            var arrow = Path(); arrow.move(to:from); arrow.addLine(to:to)
+            let head = side*0.34
+            arrow.move(to:CGPoint(x:to.x-head,y:to.y)); arrow.addLine(to:to); arrow.addLine(to:CGPoint(x:to.x,y:to.y+head))
+            context.stroke(arrow,with:.foreground,style:StrokeStyle(lineWidth:line,lineCap:.round,lineJoin:.round))
+        }
+    }
+}
+
 private struct CaptionsGlyph: Shape {
     var lineWidth: CGFloat
     func path(in rect: CGRect) -> Path {

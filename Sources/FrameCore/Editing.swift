@@ -196,10 +196,16 @@ public enum Editing {
     }
     public static func snapped(_ time: MediaTime, duration: MediaTime = .zero, excluding id: UUID? = nil,
                                playhead: MediaTime, threshold: MediaTime, project: Project) -> MediaTime {
+        project.frameRate.quantize(snapTarget(time,duration:duration,excluding:id,playhead:playhead,threshold:threshold,project:project) ?? time)
+    }
+    /// What `snapped` lands on: a clip edge, the playhead or the start (the position that puts
+    /// the dragged span's start or end on it), or nil when nothing is within `threshold`.
+    public static func snapTarget(_ time: MediaTime, duration: MediaTime = .zero, excluding id: UUID? = nil,
+                                  playhead: MediaTime, threshold: MediaTime, project: Project) -> MediaTime? {
         let excluded = Set(id.map { project.group(for: $0).map(\.id) } ?? [])
         let edges = [.zero,playhead] + project.clips.filter { !excluded.contains($0.id) }.flatMap { [$0.start,$0.end] }
         let candidates = edges.flatMap { [$0, $0 - duration] }.filter { $0 >= .zero && abs($0.ticks-time.ticks) <= threshold.ticks }
-        return project.frameRate.quantize(candidates.min { abs($0.ticks-time.ticks) < abs($1.ticks-time.ticks) } ?? time)
+        return candidates.min { abs($0.ticks-time.ticks) < abs($1.ticks-time.ticks) }
     }
 }
 

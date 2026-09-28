@@ -180,4 +180,53 @@ final class TimelineSelectionTests: XCTestCase {
         XCTAssertTrue(TimelineCanvas.isCommand(event("ㅁ",keyCode:0),"a",keyCode:0))
         XCTAssertTrue(TimelineCanvas.isCommand(event("ㅌ",keyCode:7),"x",keyCode:7))
     }
+
+    @MainActor func testTheToolbarRectangleSelectWorksOnceWithoutShift() throws {
+        try withTimeline { store, canvas, id in
+            store.selectClips([id["C"]!])
+            store.dragSelectArmed = true
+            // A plain drag that starts on A (which would move it) draws a rectangle over A and B.
+            let before = store.project
+            canvas.mouseDown(with:mouse(.leftMouseDown,1.5,v1,on:canvas))
+            canvas.mouseDragged(with:mouse(.leftMouseDragged,3.5,v2-20,on:canvas))
+            canvas.mouseUp(with:mouse(.leftMouseUp,3.5,v2-20,on:canvas))
+            XCTAssertEqual(store.selectionForEditing,[id["A"]!,id["B"]!],"the new rectangle replaces the old selection")
+            XCTAssertEqual(store.project,before,"nothing moved")
+            XCTAssertFalse(store.dragSelectArmed,"one drag, then it is off")
+            // The next plain drag is an ordinary one again: it moves the selected clips.
+            canvas.mouseDown(with:mouse(.leftMouseDown,2,v1,on:canvas))
+            canvas.mouseDragged(with:mouse(.leftMouseDragged,2.5,v1,on:canvas))
+            canvas.mouseUp(with:mouse(.leftMouseUp,2.5,v1,on:canvas))
+            XCTAssertEqual(store.undoName,"Move clips")
+            // Esc switches it off without touching the selection.
+            let selection = store.selectionForEditing
+            store.dragSelectArmed = true
+            canvas.keyDown(with:key(53,"\u{1b}",on:canvas))
+            XCTAssertFalse(store.dragSelectArmed); XCTAssertEqual(store.selectionForEditing,selection)
+            // With Shift as well, the rectangle adds to what is selected.
+            store.selectClips([id["C"]!]); store.dragSelectArmed = true
+            canvas.mouseDown(with:mouse(.leftMouseDown,4.5,v2,.shift,on:canvas))
+            canvas.mouseDragged(with:mouse(.leftMouseDragged,3.9,v2,.shift,on:canvas))
+            canvas.mouseUp(with:mouse(.leftMouseUp,3.9,v2,.shift,on:canvas))
+            XCTAssertEqual(store.selectionForEditing,[id["B"]!,id["C"]!])
+        }
+    }
+
+    @MainActor func testPastingOverATitleGoesOnANewTrackInsteadOfFailing() throws {
+        try withTimeline { store, canvas, id in
+            store.selectClips([id["B"]!])                       // the title on V2, 2–4 s
+            XCTAssertTrue(store.copySelection())
+            store.seek(.init(seconds:2.5))
+            store.message = nil
+            store.pasteClips()
+            XCTAssertNil(store.message,"no 'occupied' alert")
+            let pasted = try XCTUnwrap(store.selectedClip)
+            XCTAssertEqual(pasted.start.seconds,2.5,accuracy:1e-9,"at the playhead")
+            XCTAssertEqual(pasted.lane,Lane(.video,3),"on a new track above the one in use")
+            XCTAssertEqual(store.project.videoTrackCount,3)
+            // Again: V2 and V3 are both in use there now, so V4.
+            store.pasteClips()
+            XCTAssertEqual(store.selectedClip?.lane,Lane(.video,4))
+        }
+    }
 }

@@ -39,10 +39,16 @@ final class MultipleSelectionTests: XCTestCase {
         XCTAssertTrue(Set(copies.map(\.id)).isDisjoint(with:original.map(\.id)))
         XCTAssertEqual(Set(copies.compactMap(\.linkID)).count,2)
         XCTAssertTrue(Set(copies.compactMap(\.linkID)).isDisjoint(with:original.compactMap(\.linkID)))
-        // Where any of them would land on a busy spot, nothing is pasted.
-        let busy = project
-        XCTAssertThrowsError(try Editing.pasteAll(payload,at:.init(seconds:5),into:&project))
-        XCTAssertEqual(project,busy)
+        // Where any of them would land on a clip, they all go up together to free tracks,
+        // keeping their layout and each video's audio on the same number.
+        let again = try Editing.pasteAll(payload,at:.init(seconds:21),into:&project)
+        XCTAssertEqual(again.raised,2,"V1/A1 and V2 are in use from 21 s: up two, to V3–V4 and A3")
+        let raised = project.clips.filter { again.clips.contains($0.id) }
+        XCTAssertEqual(layout(raised.map { var c = $0; c.lane = Lane(c.lane.kind,c.lane.number-2); return c },from:.init(seconds:21)),
+                       layout(original,from:.init(seconds:1)))
+        for clip in raised where clip.linkID != nil {
+            XCTAssertEqual(Set(project.group(for:clip.id).map(\.lane.number)).count,1,"a video and its audio stay on one number")
+        }
     }
 
     func testOneClipStillCopiesAsVersionOneAndBrokenGroupsAreRefused() throws {
@@ -96,5 +102,102 @@ final class MultipleSelectionTests: XCTestCase {
         let payload = try ClipClipboard(copying:ids,from:project)
         XCTAssertThrowsError(try payload.encoded(),"more than paste would take")
         XCTAssertNoThrow(try ClipClipboard(copying:Array(ids.prefix(5)),from:project).encoded())
+    }
+
+    /// Titles A 0–3 s and B 3–6 s meeting on V1: A fades in (dip to black, 0.5 s), dissolves
+    /// into B (1 s), and B fades out (push, 0.5 s).
+    private func transitionFixture() throws -> (Project, a: UUID, b: UUID) {
+        var project = Project(); project.frameRate = .init(30)
+        let a = Clip(name:"A",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:3))
+        let b = Clip(name:"B",kind:.text,lane:.v1,start:.init(seconds:3),duration:.init(seconds:3))
+        project.clips = [a,b]
+        try Editing.setTransition(.dipToBlack,duration:.init(seconds:0.5),from:nil,to:a.id,in:&project)
+        try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:a.id,to:b.id,in:&project)
+        try Editing.setTransition(.push,direction:.up,duration:.init(seconds:0.5),from:b.id,to:nil,in:&project)
+        return (project,a.id,b.id)
+    }
+    private func summary(_ project: Project, _ ids: [UUID]) -> [String] {
+        project.transitions.filter { t in [t.from,t.to].contains { $0.map(ids.contains) == true } }.map { t in
+            let from = t.from.flatMap { id in ids.firstIndex(of:id) }.map(String.init) ?? "-"
+            let to = t.to.flatMap { id in ids.firstIndex(of:id) }.map(String.init) ?? "-"
+            return "\(from)>\(to) \(t.kind.rawValue) \(t.direction.rawValue) \(t.duration.ticks)"
+        }.sorted()
+    }
+
+    func testCopiedClipsBringTheirTransitions() throws {
+        var (project,a,b) = try transitionFixture()
+        let before = project.transitions
+        let payload = try ClipClipboard.decode(ClipClipboard(copying:[a,b],from:project).encoded())
+        XCTAssertEqual(payload.transitions.count,3)
+        let pasted = try Editing.pasteAll(payload,at:.init(seconds:10),into:&project)
+        let copies = pasted.clips.sorted { project.clip($0)!.start < project.clip($1)!.start }
+        XCTAssertEqual(summary(project,copies),summary(project,[a,b]),"fade in, dissolve between them, fade out")
+        XCTAssertEqual(project.transitions.count,6)
+        XCTAssertTrue(Set(project.transitions.map(\.id)).isSuperset(of:before.map(\.id)),"the originals are untouched")
+        XCTAssertEqual(Set(project.transitions.map(\.id)).count,6,"fresh identities")
+    }
+
+    func testATransitionToAClipLeftBehindBecomesAFade() throws {
+        var (project,a,b) = try transitionFixture()
+        // A alone: its fade in, and its dissolve into B as a fade out of the same kind.
+        let onlyA = try ClipClipboard(copying:a,from:project)
+        XCTAssertEqual(onlyA.version,1)
+        let copyA = try Editing.paste(onlyA,at:.init(seconds:10),into:&project)
+        // The dissolve's part inside A (half of its 1 s) becomes the fade out.
+        XCTAssertEqual(summary(project,[copyA]),["->0 dipToBlack left 300000","0>- crossDissolve left 300000"].sorted())
+        // B alone: the dissolve from A becomes its fade in; its own fade out comes as it is.
+        let copyB = try Editing.paste(ClipClipboard(copying:b,from:project),at:.init(seconds:20),into:&project)
+        XCTAssertEqual(summary(project,[copyB]),["->0 crossDissolve left 300000","0>- push up 300000"].sorted())
+    }
+
+    func testAConvertedCutNeverShortensTheClipsOwnFade() throws {
+        // A 0–2 s with a 1 s fade in, and a 2 s dissolve into B that takes A's other second.
+        var project = Project(); project.frameRate = .init(30)
+        let a = Clip(name:"A",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:2))
+        let b = Clip(name:"B",kind:.text,lane:.v1,start:.init(seconds:2),duration:.init(seconds:2))
+        project.clips = [a,b]
+        try Editing.setTransition(.dipToBlack,duration:.init(seconds:1),from:nil,to:a.id,in:&project)
+        try Editing.setTransition(.crossDissolve,duration:.init(seconds:2),from:a.id,to:b.id,in:&project)
+        let copy = try Editing.paste(ClipClipboard(copying:a.id,from:project),at:.init(seconds:10),into:&project)
+        XCTAssertEqual(summary(project,[copy]),["->0 dipToBlack left 600000","0>- crossDissolve left 600000"].sorted(),"the fade in stays 1 s")
+        // A cut that no longer plays (its other clip deleted without validating) is not copied.
+        var stale = project
+        Editing.delete(b.id,from:&stale)
+        XCTAssertEqual(try ClipClipboard(copying:a.id,from:stale).transitions.map(\.kind),[.dipToBlack])
+    }
+
+    func testADamagedTransitionLengthIsRefusedNotACrash() throws {
+        let (project,a,_) = try transitionFixture()
+        for ticks: Int64 in [.max,.min,-1] {
+            var json = try JSONSerialization.jsonObject(with:JSONEncoder().encode(ClipClipboard(copying:a,from:project))) as! [String:Any]
+            var transitions = json["transitions"] as! [[String:Any]]
+            transitions[0]["duration"] = ["ticks":NSNumber(value:ticks)]
+            json["transitions"] = transitions
+            XCTAssertThrowsError(try ClipClipboard.decode(JSONSerialization.data(withJSONObject:json)),"\(ticks)")
+        }
+        // A project file with one is fitted to the longest transition, at every frame rate.
+        for rate in [FrameRate(24),FrameRate(30),FrameRate(60),FrameRate(30000,1001)] {
+            var damaged = Project(); damaged.frameRate = rate
+            let clip = Clip(name:"T",kind:.text,lane:.v1,start:.zero,duration:.init(ticks:rate.frame.ticks*300))
+            damaged.clips = [clip]
+            damaged.transitions = [Transition(kind:.crossDissolve,duration:.init(ticks:.max),from:nil,to:clip.id)]
+            XCTAssertLessThanOrEqual(try damaged.validated().transitions.first?.duration ?? .zero,Transition.longest)
+        }
+    }
+
+    func testOlderClipboardsWithoutTransitionsStillPasteAndStrayOnesAreRefused() throws {
+        var (project,a,_) = try transitionFixture()
+        var json = try JSONSerialization.jsonObject(with:JSONEncoder().encode(ClipClipboard(copying:a,from:project))) as! [String:Any]
+        json.removeValue(forKey:"transitions")                     // what an older Ara writes
+        let older = try ClipClipboard.decode(JSONSerialization.data(withJSONObject:json))
+        XCTAssertTrue(older.transitions.isEmpty)
+        let copy = try Editing.paste(older,at:.init(seconds:10),into:&project)
+        XCTAssertTrue(summary(project,[copy]).isEmpty)
+        // A transition naming a clip that is not in the copy is not accepted.
+        var stray = try JSONSerialization.jsonObject(with:JSONEncoder().encode(ClipClipboard(copying:a,from:project))) as! [String:Any]
+        var transitions = stray["transitions"] as! [[String:Any]]
+        transitions[0]["to"] = UUID().uuidString; transitions[0]["from"] = UUID().uuidString
+        stray["transitions"] = transitions
+        XCTAssertThrowsError(try ClipClipboard.decode(JSONSerialization.data(withJSONObject:stray)))
     }
 }

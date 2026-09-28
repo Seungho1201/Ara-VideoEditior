@@ -154,7 +154,10 @@ public extension Project {
             if let to = transition.to, seenIn.contains(to) { continue }
             if seenIDs.contains(transition.id) { transition.id = UUID() }
             seenIDs.insert(transition.id)
-            transition.duration = max(frame,min(frameRate.quantize(transition.duration),Transition.longest))
+            // Clamped before rounding to frames: a damaged length (a crafted file or clipboard)
+            // must not overflow on the way.
+            let raw = MediaTime(ticks:min(max(transition.duration.ticks,0),Transition.longest.ticks))
+            transition.duration = max(frame,min(frameRate.quantize(raw),Transition.longest))
             kept.append(transition)
             if let from = transition.from { seenOut.insert(from) }
             if let to = transition.to { seenIn.insert(to) }

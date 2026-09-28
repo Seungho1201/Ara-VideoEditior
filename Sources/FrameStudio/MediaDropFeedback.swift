@@ -33,3 +33,22 @@ struct MediaDropFeedback {
         return .generic
     }
 }
+
+/// Something dragged catching a place: a clip or its edge snapping onto an edge, the playhead or
+/// the start, or a transition from the library onto the clip edge it would go on. One alignment
+/// tick as it lands there; nothing while it stays or moves freely, and the same place again only
+/// after 0.18 s, so jitter across the edge is not felt as a buzz.
+struct CatchFeedback<Target: Equatable> {
+    private var current: Target?
+    private var last: Target?
+    private var lastAt = -Double.infinity
+
+    mutating func cue(for target: Target?, at timestamp: TimeInterval, enabled: Bool) -> Bool {
+        defer { current = target }
+        guard enabled, let target, target != current else { return false }
+        guard target != last || timestamp-lastAt >= 0.18 else { return false }
+        last = target; lastAt = timestamp
+        return true
+    }
+}
+typealias SnapFeedback = CatchFeedback<MediaTime>

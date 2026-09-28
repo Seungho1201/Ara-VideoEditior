@@ -36,6 +36,10 @@ public extension Project {
 /// gesture. The UI chooses how to render these cues (including a hardware haptic, if enabled).
 public struct ScrubFeedbackCadence: Sendable {
     public enum Cue: Equatable, Sendable { case frame, clipEnd }
+    /// The shortest time between two frame pulses while skimming. macOS offers no haptic
+    /// strength, so the skim is made gentler by pulsing 30 % less often than the original
+    /// 0.08 s (at most about 8.7 pulses a second instead of 12.5). A clip-end cue is not throttled.
+    public static let frameInterval: TimeInterval = 0.08/0.7
     private var previous: ScrubPosition?
     private var lastCueAt = -Double.infinity
     private var lastEnd: MediaTime?
@@ -51,7 +55,7 @@ public struct ScrubFeedbackCadence: Sendable {
             lastEnd = end; lastEndAt = timestamp; lastCueAt = timestamp
             return .clipEnd
         }
-        guard position.time != previous?.time, timestamp-lastCueAt >= 0.08 else { return nil }
+        guard position.time != previous?.time, timestamp-lastCueAt >= Self.frameInterval else { return nil }
         lastCueAt = timestamp
         return .frame
     }

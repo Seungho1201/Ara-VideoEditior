@@ -361,6 +361,7 @@ struct PreviewSurface: NSViewRepresentable {
             if event.keyCode == 45 { if !event.isARepeat { store?.snapping.toggle() }; return }
         }
         if event.keyCode == 53 {
+            if store?.dragSelectArmed == true { store?.dragSelectArmed = false }
             if let drag { store?.updatePreviewTransform(drag.id,style:drag.geometry.style) }
             if let zoomOrigin { store?.updatePreviewTransform(zoomOrigin.id,style:zoomOrigin.style) }
             finishDrag(); store?.previewTransformID = nil; refresh()

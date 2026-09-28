@@ -102,17 +102,33 @@ final class ClipboardTests: XCTestCase {
         XCTAssertEqual(destination.media[0],relinked)
     }
 
-    func testOccupiedLinkedAudioRejectsEntirePasteAndMediaInsertion() throws {
+    func testOccupiedLinkedAudioMovesTheWholePasteUpATrack() throws {
         let (source,id) = try fixture()
         let payload = try ClipClipboard(copying:id,from:source)
         var destination = Project()
         let audio = MediaReference(name:"Occupied",path:"/audio.wav",kind:.audio,duration:.init(seconds:10))
         destination.media = [audio]
         _ = try Editing.add(mediaID:audio.id,lane:.a2,at:.zero,to:&destination)
+        // Copied from V2/A2; A2 is in use here, so the pair goes to V3/A3, a track added for each.
+        let copy = try Editing.pasteAll(payload,at:.zero,into:&destination)
+        XCTAssertEqual(copy.raised,1)
+        XCTAssertEqual(Set(destination.group(for:copy.anchor).map(\.lane)),[Lane(.video,3),Lane(.audio,3)])
+        XCTAssertEqual(destination.videoTrackCount,3); XCTAssertEqual(destination.audioTrackCount,3)
+    }
+
+    func testAPasteWithNoFreeTrackChangesNothing() throws {
+        let (source,id) = try fixture()
+        let payload = try ClipClipboard(copying:id,from:source)
+        var destination = Project()
+        let audio = MediaReference(name:"Occupied",path:"/audio.wav",kind:.audio,duration:.init(seconds:10))
+        destination.media = [audio]
+        for number in 2...Project.trackCounts.upperBound {
+            try destination.ensureLane(Lane(.audio,number))
+            _ = try Editing.add(mediaID:audio.id,lane:Lane(.audio,number),at:.zero,to:&destination)
+        }
         let before = destination
         XCTAssertThrowsError(try Editing.paste(payload,at:.zero,into:&destination))
-        XCTAssertEqual(destination,before)
-        XCTAssertEqual(destination.clips.count,1)
+        XCTAssertEqual(destination,before,"no clip, track or media added")
     }
 
     func testEveryFrameRateQuantizesPasteAndHistoryPersists() throws {
