@@ -160,6 +160,8 @@ struct TimelineSurface: NSViewRepresentable {
     private var mediaDropFeedback = MediaDropFeedback()
     private var mediaDragSequence: Int?
     /// Kept at the AppKit boundary so input tests can capture cues without vibrating hardware.
+    /// The live hardware button state, kept at the AppKit boundary so input tests can pin it.
+    var pressedMouseButtons: () -> Int = { NSEvent.pressedMouseButtons }
     var performHaptic: (NSHapticFeedbackManager.FeedbackPattern) -> Void = { pattern in
         NSHapticFeedbackManager.defaultPerformer.perform(pattern,performanceTime:.now)
     }
@@ -218,6 +220,11 @@ struct TimelineSurface: NSViewRepresentable {
     }
     private func scrub(at point: NSPoint, with event: NSEvent) {
         guard let store, !store.project.clips.isEmpty, !store.isExporting, !store.showExportSheet else { resetScrubbing(); return }
+        // Playback started during the gesture (Space with the button still down, or a release
+        // that arrives late, as with three-finger drag): the playhead belongs to playback now.
+        // Following the pointer, or seeking to where it was released, would throw it back.
+        // mouseDown pauses first, so a press on the ruler during playback still scrubs.
+        if store.isPlaying { if mode == .scrub { mode = nil }; resetScrubbing(); return }
         if scrubSession != store.session { scrubFeedback = ScrubFeedbackCadence(); scrubSession = store.session }
         let position = store.project.scrubPosition(at:time(at:point.x),snapping:store.snapping && !event.modifierFlags.contains(.shift))
         setScrubEnd(position.snappedEnd)
@@ -232,7 +239,7 @@ struct TimelineSurface: NSViewRepresentable {
     override func mouseMoved(with event: NSEvent) {
         // A menu or window change can swallow mouseUp. A subsequent button-free
         // move ends that interrupted gesture; never commit its stale drag candidate.
-        if event.type == .mouseMoved, NSEvent.pressedMouseButtons == 0,
+        if event.type == .mouseMoved, pressedMouseButtons() == 0,
            mode != nil || transitionResize != nil || dropped != nil || transitionDrop != nil {
             mode = nil; original = nil; candidate = nil; transitionResize = nil; moved = false
             candidateValid = true

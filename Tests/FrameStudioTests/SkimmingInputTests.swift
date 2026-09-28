@@ -24,6 +24,7 @@ final class SkimmingInputTests: XCTestCase {
         window.isReleasedWhenClosed = false
         let canvas = TimelineCanvas(frame:NSRect(x:0,y:0,width:800,height:400))
         canvas.store = store; canvas.pixelsPerSecond = 60
+        canvas.pressedMouseButtons = { 0 }          // not the real mouse: someone may be using it
         window.contentView = canvas
         defer {
             window.contentView = nil; window.close()
@@ -114,6 +115,30 @@ final class SkimmingInputTests: XCTestCase {
             XCTAssertEqual(store.project,before)
             // A late mouseUp must not commit the old, interrupted drag candidate.
             canvas.mouseUp(with:event(.leftMouseUp,x:240,on:canvas))
+            XCTAssertEqual(store.project,before)
+        }
+    }
+
+    @MainActor func testPlaybackStartedMidScrubIgnoresTheRestOfTheGesture() {
+        withTimeline { store, canvas, _ in
+            let before = store.project
+            canvas.mouseDown(with:event(.leftMouseDown,x:60,on:canvas))
+            canvas.mouseDragged(with:event(.leftMouseDragged,x:120,on:canvas))
+            XCTAssertEqual(store.playhead,.init(seconds:2))
+            // Space while the button is still down; playback then moves the playhead on.
+            store.isPlaying = true
+            store.seek(.init(seconds:2.5))
+            // More drag samples and a late release (three-finger drag lifts late) must not
+            // throw the playhead back to the pointer.
+            canvas.mouseDragged(with:event(.leftMouseDragged,x:126,on:canvas))
+            XCTAssertEqual(store.playhead,.init(seconds:2.5))
+            canvas.mouseUp(with:event(.leftMouseUp,x:126,on:canvas))
+            XCTAssertEqual(store.playhead,.init(seconds:2.5))
+            // Paused again, a new press on the ruler scrubs as usual.
+            store.isPlaying = false
+            canvas.mouseDown(with:event(.leftMouseDown,x:240,on:canvas))
+            canvas.mouseUp(with:event(.leftMouseUp,x:240,on:canvas))
+            XCTAssertEqual(store.playhead,.init(seconds:4))
             XCTAssertEqual(store.project,before)
         }
     }
