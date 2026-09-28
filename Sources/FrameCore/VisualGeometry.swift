@@ -42,6 +42,40 @@ public struct VisualGeometry {
         }
         return false
     }
+    /// The rotation handle: a knob `offset` points past the middle of the clip's top edge, in the
+    /// clip's own up direction (it turns with the clip), and the edge point its stem starts from.
+    /// With `area` (viewer space), a knob that would fall outside it — a full-frame clip turned
+    /// upside down puts it over the controls below the viewer — goes past the bottom edge instead,
+    /// or failing that, just inside the top edge.
+    public func rotationHandle(offset: CGFloat = 26, within area: CGRect? = nil, margin: CGFloat = 12) -> (edge: CGPoint, knob: CGPoint) {
+        let c = corners, angle = style.rotation * .pi/180                 // clockwise on screen, y down
+        let up = CGPoint(x:sin(angle),y:-cos(angle))
+        let top = CGPoint(x:(c[0].x+c[1].x)/2,y:(c[0].y+c[1].y)/2), bottom = CGPoint(x:(c[2].x+c[3].x)/2,y:(c[2].y+c[3].y)/2)
+        let choices = [(top,CGPoint(x:top.x+up.x*offset,y:top.y+up.y*offset)),
+                       (bottom,CGPoint(x:bottom.x-up.x*offset,y:bottom.y-up.y*offset)),
+                       (top,CGPoint(x:top.x-up.x*offset,y:top.y-up.y*offset))]
+        guard let area else { return choices[0] }
+        let inside = area.insetBy(dx:margin,dy:margin)
+        return choices.first { inside.contains($0.1) } ?? choices[2]
+    }
+    /// Turned about its centre by the angle the pointer has swept around it since `start`, kept
+    /// in −180…180. With `step` (degrees) the angle goes in steps; otherwise, within `magnet`
+    /// degrees of a right angle it settles on it. Nil with the pointer (or the start) on the
+    /// centre, where there is no angle to read: the caller keeps what it has.
+    public func rotated(from start: CGPoint, to point: CGPoint, step: Double? = nil, magnet: Double = 0) -> ClipStyle? {
+        let c = center
+        guard hypot(point.x-c.x,point.y-c.y) > 2, hypot(start.x-c.x,start.y-c.y) > 2 else { return nil }
+        var swept = (atan2(point.y-c.y,point.x-c.x)-atan2(start.y-c.y,start.x-c.x))*180 / .pi
+        if swept > 180 { swept -= 360 } else if swept < -180 { swept += 360 }
+        var angle = style.rotation+swept
+        if let step, step > 0 { angle = (angle/step).rounded()*step }
+        else if magnet > 0, abs(angle-(angle/90).rounded()*90) <= magnet { angle = (angle/90).rounded()*90 }
+        else { angle = (angle*100).rounded()/100 }                        // hundredths: no -24.000000000000036
+        angle = angle.truncatingRemainder(dividingBy:360)
+        if angle > 180 { angle -= 360 } else if angle <= -180 { angle += 360 }
+        var result = style; result.rotation = angle
+        return result
+    }
     public func moved(by delta: CGSize) -> ClipStyle {
         var result = style
         result.x = min(2,max(-2,style.x + delta.width/canvasSize.width))

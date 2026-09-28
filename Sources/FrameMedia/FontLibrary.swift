@@ -42,6 +42,7 @@ public enum FontLibrary {
         public let name: String
         public let displayName: String
         public var id: String { name }
+        public init(name: String, displayName: String) { self.name = name; self.displayName = displayName }
     }
     public struct ImportResult: Sendable {
         public let added: [Face]
@@ -207,6 +208,20 @@ public enum FontLibrary {
             let display = CTFontDescriptorCopyLocalizedAttribute(descriptor,kCTFontFamilyNameAttribute,nil) as? String ?? name
             return Family(name:name,displayName:display)
         }.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    }
+    /// The face a font menu shows a family's name in: its regular face. Nil when the name would
+    /// not read in it: symbol and emoji fonts (Webdings, Zapf Dingbats) and fonts without the
+    /// name's own letters (most Arabic, Hebrew and Indic fonts have Latin names); those show in
+    /// the system font.
+    public static func previewFace(of family: Family) -> String? {
+        guard let face = closestFace(inFamily:family.name,toWeight:0) else { return nil }
+        let font = CTFontCreateWithName(face.postScriptName as CFString,13,nil)
+        let style = CTFontGetSymbolicTraits(font).rawValue & CTFontSymbolicTraits.traitClassMask.rawValue
+        guard style != CTFontStylisticClass.symbolicClass.rawValue,
+              !((CTFontCopySupportedLanguages(font) as? [String]) ?? []).isEmpty else { return nil }
+        let text = Array(family.displayName.utf16)
+        var glyphs = [CGGlyph](repeating:0,count:text.count)
+        return CTFontGetGlyphsForCharacters(font,text,&glyphs,text.count) ? face.postScriptName : nil
     }
     /// The faces of one family: upright before italic, lightest first, normal width first.
     public static func faces(ofFamily family: String) -> [Face] {

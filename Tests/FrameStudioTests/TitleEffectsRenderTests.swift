@@ -338,4 +338,28 @@ final class TitleEffectsRenderTests: XCTestCase {
         store.undo(); XCTAssertEqual(store.project,outlined)
         store.undo(); XCTAssertEqual(store.project,original,"the drag was one undo step")
     }
+    @MainActor func testTurningATitleInThePreviewRedrawsItsShadowOnlyWhenItHasOne() async throws {
+        _ = NSApplication.shared
+        let store = EditorStore()
+        var plain = Clip(name:"Plain",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:3)); plain.style.text = "Turn"
+        var shadowed = Clip(name:"Shadowed",kind:.text,lane:.v2,start:.zero,duration:.init(seconds:3)); shadowed.style.text = "Shade"
+        shadowed.style.shadowOpacity = 1; shadowed.style.shadowDistance = 20; shadowed.style.shadowBlur = 0
+        store.edit("Fixture") { $0.clips = [plain,shadowed] }
+        for _ in 0..<1000 where store.isBuilding || store.player.currentItem == nil { try await Task.sleep(for:.milliseconds(10)) }
+        for clip in [plain,shadowed] {
+            store.selectedClipID = clip.id; store.previewTransformID = clip.id
+            let before = try XCTUnwrap(store.previewLayerImage(for:clip)), original = store.project
+            store.beginInteraction()
+            var turned = clip.style; turned.rotation = 90
+            store.updatePreviewTransform(clip.id,style:turned)
+            store.endInteraction()
+            XCTAssertEqual(store.project.clips.first { $0.id == clip.id }?.style.rotation,90)
+            XCTAssertFalse(store.isBuilding,"turned in place, not rebuilt")
+            let after = try XCTUnwrap(store.previewLayerImage(for:clip))
+            // Its shadow is drawn for the screen, so a shadowed title gets a new picture.
+            XCTAssertEqual(after === before,!clip.style.hasShadow,clip.name)
+            store.undo(); XCTAssertEqual(store.project,original,"one undo step")
+            for _ in 0..<1000 where store.isBuilding { try await Task.sleep(for:.milliseconds(10)) }
+        }
+    }
 }

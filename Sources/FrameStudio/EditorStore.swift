@@ -15,11 +15,56 @@ import FrameMedia
     /// A text field in the inspector has focus. Unmodified arrow-key menu equivalents beat any
     /// first responder, so the frame-step items must stand down or the caret cannot move.
     @Published var isEditingText = false
+    /// The one clip the inspector, transform, split and speed work on. Nil while several are
+    /// selected (selectedClipIDs), so single-clip actions stand down.
     @Published var selectedClipID: UUID? {
         didSet {
             if previewTransformID != selectedClipID { previewTransformID = nil }
             if selectedClipID != nil, selectedTransitionID != nil { selectedTransitionID = nil }
+            // Choosing one clip (or none) ends a multiple selection; while one is being made,
+            // selectedClipID is set to nil with the set already in place, and that keeps it.
+            if let id = selectedClipID { if selectedClipIDs != [id] { selectedClipIDs = [id] } }
+            else if selectedClipIDs.count == 1 { selectedClipIDs = [] }
         }
+    }
+    /// Every selected clip: the one above, or several picked with Shift on the timeline. Each
+    /// stands for its linked group.
+    @Published private(set) var selectedClipIDs: Set<UUID> = []
+    /// Selects these clips (and so their linked partners): one of them becomes the single
+    /// selection, several a multiple selection with no inspector clip.
+    func selectClips(_ ids: Set<UUID>) {
+        let clips = Dictionary(project.clips.map { ($0.id,$0) },uniquingKeysWith:{ a,_ in a })
+        let ids = ids.filter { clips[$0] != nil }
+        if !ids.isEmpty { selectedGap = nil; selectedTransitionID = nil }
+        // A video and its linked audio are one clip: both halves picked is still one selection,
+        // shown by its picture half.
+        let groups = Set(ids.compactMap { clips[$0].map { $0.linkID ?? $0.id } })
+        if groups.count <= 1 {
+            let single = ids.min { (clips[$0]!.kind == .audio ? 1 : 0) < (clips[$1]!.kind == .audio ? 1 : 0) }
+            selectedClipIDs = single.map { [$0] } ?? []; selectedClipID = single; return
+        }
+        selectedClipIDs = ids; selectedClipID = nil; previewTransformID = nil
+    }
+    /// The clips a Delete, Copy or group move acts on, as long as they still exist.
+    var selectionForEditing: Set<UUID> {
+        guard !selectedClipIDs.isEmpty else { return [] }
+        let existing = Set(project.clips.map(\.id))
+        return selectedClipIDs.intersection(existing)
+    }
+    /// How many clips are selected, a video with its linked audio counting once.
+    var selectedGroupCount: Int {
+        let ids = selectionForEditing
+        guard ids.count > 1 else { return ids.count }
+        return Set(project.clips.filter { ids.contains($0.id) }.map { $0.linkID ?? $0.id }).count
+    }
+    /// More than one clip selected.
+    var hasMultipleSelection: Bool { selectedGroupCount > 1 }
+    /// After an undo or redo some selected clips may be gone: keep the rest, as a single or
+    /// multiple selection, so what is drawn selected is what Delete and ⌘X act on.
+    private func pruneSelection() {
+        guard !selectedClipIDs.isEmpty else { return }
+        let kept = selectionForEditing
+        if kept != selectedClipIDs || (kept.count > 1) != (selectedClipID == nil) { selectClips(kept) }
     }
     @Published var previewTransformID: UUID?
     @Published var selectedGap: TimelineGap?
@@ -128,11 +173,13 @@ import FrameMedia
     var canRedo: Bool { history.canRedo }
     var timecode: String { project.frameRate.timecode(playhead) }
     static let clipPasteboardType = NSPasteboard.PasteboardType("com.framestudio.timeline-clips")
-    var canCopyClip: Bool { selectedClip != nil }
+    /// Where clips are copied to: the system clipboard (tests use a private one).
+    var pasteboard = NSPasteboard.general
+    var canCopyClip: Bool { selectedClip != nil || hasMultipleSelection }
     /// Only clips backed by a media stream can be retimed; text and stills have no source to speed up.
     var canRetimeSelection: Bool { selectedClip.map { $0.kind == .video || $0.kind == .audio } ?? false }
     var selectedSpeed: Double { selectedClip?.speed ?? 1 }
-    var canPasteClip: Bool { NSPasteboard.general.availableType(from:[Self.clipPasteboardType]) != nil }
+    var canPasteClip: Bool { pasteboard.availableType(from:[Self.clipPasteboardType]) != nil }
     var canCaptureSnapshot: Bool { project.duration > .zero && missing.isEmpty && !isBuilding && !isCapturingSnapshot && !isExporting }
     init() {
         saved = project
@@ -257,7 +304,8 @@ import FrameMedia
         item.videoComposition = composition
         return true
     }
-    /// Direct manipulation changes only placement; it does not rebuild tracks or audio.
+    /// Direct manipulation changes only placement (position, scale, rotation); it does not
+    /// rebuild tracks or audio.
     func updatePreviewTransform(_ id: UUID, style: ClipStyle) {
         guard previewTransformID == id, !isBuilding,
               let index = project.clips.firstIndex(where: { $0.id == id }),
@@ -266,12 +314,18 @@ import FrameMedia
               let instruction = composition.instructions.first as? FrameInstruction,
               instruction.layers.contains(where: { $0.clip.id == id }) else { return }
         var clip = project.clips[index]
-        clip.style.x = style.x; clip.style.y = style.y; clip.style.scale = style.scale
+        clip.style.x = style.x; clip.style.y = style.y; clip.style.scale = style.scale; clip.style.rotation = style.rotation
         guard clip != project.clips[index] else { return }
         var candidate = project; candidate.clips[index] = clip
         guard (try? candidate.validated()) != nil else { return }
+        let turned = clip.style.rotation != project.clips[index].style.rotation
         project = candidate
-        composition.instructions = [instruction.replacingTransform(of:clip)]
+        // A title's shadow keeps its screen direction, so turning a shadowed title redraws it.
+        if turned, clip.kind == .text, clip.style.hasShadow, let image = try? FrameRenderer.textImage(clip.style) {
+            composition.instructions = [instruction.replacingLayer(for:clip,image:image)]
+        } else {
+            composition.instructions = [instruction.replacingTransform(of:clip)]
+        }
         // A fresh composition re-renders a paused frame without replacing the player item (QA1966).
         item.videoComposition = composition
     }
@@ -300,8 +354,8 @@ import FrameMedia
         guard let media = project.media(for:clip), media.width > 0, media.height > 0 else { return nil }
         return CGSize(width:media.width,height:media.height)
     }
-    func undo() { commitPendingEdits(); endInteraction(); selectedGap = nil; if let previous = history.undo(project) { project = previous; restoreAccess(); rebuild() } }
-    func redo() { commitPendingEdits(); endInteraction(); selectedGap = nil; if let next = history.redo(project) { project = next; restoreAccess(); rebuild() } }
+    func undo() { commitPendingEdits(); endInteraction(); selectedGap = nil; if let previous = history.undo(project) { project = previous; pruneSelection(); restoreAccess(); rebuild() } }
+    func redo() { commitPendingEdits(); endInteraction(); selectedGap = nil; if let next = history.redo(project) { project = next; pruneSelection(); restoreAccess(); rebuild() } }
     func split() { guard let id = selectedClipID else { return }; edit("Split clip") { try Editing.split(id,at:playhead,in:&$0) } }
     /// Retiming changes the clip's timeline length, so it is one undoable step per commit,
     /// not per slider sample: the caller brackets a drag with begin/endInteraction.
@@ -318,12 +372,33 @@ import FrameMedia
     }
     func deleteSelection() {
         if selectedTransitionID != nil { removeSelectedTransition(); return }
+        if hasMultipleSelection {
+            let ids = selectionForEditing, count = selectedGroupCount
+            if edit("Delete clips",{ Editing.delete(ids,from:&$0) }) { selectClips([]); status = "Deleted \(count) clips · ⌘Z to undo" }
+            return
+        }
         guard let id = selectedClipID else { return }; if edit("Delete clip",{ Editing.delete(id,from:&$0) }) { selectedClipID = nil }
+    }
+    /// Moves the selected clips together by `delta`, as one undo step.
+    func moveClips(_ ids: Set<UUID>, by delta: MediaTime) {
+        guard !isExporting else { return }
+        edit("Move clips") { try Editing.move(ids,by:delta,in:&$0) }
+    }
+    /// Every clip on the timeline.
+    func selectAllClips() { selectClips(Set(project.clips.map(\.id))) }
+    /// Copy, then delete what was copied, as one undo step.
+    func cutSelection() {
+        let ids = selectionForEditing, count = selectedGroupCount
+        guard !ids.isEmpty, !isExporting else { return }
+        guard copySelection() else { return }                          // nothing is deleted unless it was copied
+        if edit(count > 1 ? "Cut clips" : "Cut clip",{ Editing.delete(ids,from:&$0) }) {
+            selectClips([]); status = count > 1 ? "Cut \(count) clips · ⌘V at playhead" : "Cut clip · ⌘V at playhead"
+        }
     }
     var selectedTransition: FrameCore.Transition? { selectedTransitionID.flatMap { id in project.transitions.first { $0.id == id } } }
     func selectTransition(_ id: UUID?) {
         selectedTransitionID = id
-        if id != nil { selectedClipID = nil; selectedGap = nil; sidePanel = .inspector }
+        if id != nil { selectClips([]); selectedGap = nil; sidePanel = .inspector }
     }
     /// Adds (or replaces) a transition on a clip edge and selects it. A new one takes its kind's
     /// usual length; swapping the kind keeps the length and direction already there.
@@ -335,7 +410,7 @@ import FrameMedia
             let existing = project.transitions.first { $0.from == from && $0.to == to }
             id = try Editing.setTransition(kind,direction:existing?.direction ?? .left,duration:existing?.duration,from:from,to:to,in:&$0)
         }), let id {
-            selectedTransitionID = id; selectedClipID = nil; selectedGap = nil
+            selectClips([]); selectedTransitionID = id; selectedGap = nil
             status = "\(kind.name) added · Delete to remove"
             return true
         }
@@ -364,33 +439,39 @@ import FrameMedia
         guard let id = selectedTransitionID else { return }
         if edit("Remove transition",{ Editing.removeTransition(id,from:&$0) }) { selectedTransitionID = nil }
     }
-    func copySelection() {
-        guard let id = selectedClipID else { return }
+    @discardableResult func copySelection() -> Bool {
+        let ids = selectionForEditing
+        guard !ids.isEmpty else { return false }
         do {
-            let payload = try ClipClipboard(copying:id,from:project)
+            let payload = ids.count == 1 ? try ClipClipboard(copying:ids.first!,from:project) : try ClipClipboard(copying:Array(ids),from:project)
             let item = NSPasteboardItem()
             guard item.setData(try payload.encoded(),forType:Self.clipPasteboardType) else { throw EditError("Cannot copy this clip.") }
-            NSPasteboard.general.clearContents()
-            guard NSPasteboard.general.writeObjects([item]) else { throw EditError("Cannot write to the clipboard.") }
-            status = payload.clips.count == 2 ? "Copied clip and linked audio · ⌘V at playhead" : "Copied clip · ⌘V at playhead"
-        } catch { report(error) }
+            pasteboard.clearContents()
+            guard pasteboard.writeObjects([item]) else { throw EditError("Cannot write to the clipboard.") }
+            status = payload.version == 2 ? "Copied \(selectedGroupCount) clips · ⌘V at playhead"
+                   : payload.clips.count == 2 ? "Copied clip and linked audio · ⌘V at playhead" : "Copied clip · ⌘V at playhead"
+            return true
+        } catch { report(error); return false }
     }
     func pasteClips() {
-        guard let data = NSPasteboard.general.data(forType:Self.clipPasteboardType) else { return }
+        guard let data = pasteboard.data(forType:Self.clipPasteboardType) else { return }
         do {
             let payload = try ClipClipboard.decode(data)
             endInteraction(); pause()
             let oldMedia = project.media
-            var insertedID: UUID?
-            if edit("Paste clip",{ insertedID = try Editing.paste(payload,at:playhead,into:&$0) }) {
-                selectedClipID = insertedID; selectedGap = nil
+            var inserted: (anchor: UUID, clips: [UUID])?
+            let several = payload.version == 2
+            if edit(several ? "Paste clips" : "Paste clip",{ inserted = try Editing.pasteAll(payload,at:playhead,into:&$0) }), let inserted {
+                // Several pasted clips stay selected together, ready to move or copy again.
+                if several { selectClips(Set(inserted.clips)) } else { selectedClipID = inserted.anchor }
+                selectedGap = nil
                 if project.media != oldMedia { restoreAccess(); rebuild() }
                 revealPlayheadRequest += 1
                 status = "Pasted clip at \(timecode) · ⌘Z to undo"
             }
         } catch { report(error) }
     }
-    func selectGap(_ gap: TimelineGap?) { selectedGap = gap; if gap != nil { selectedClipID = nil; selectedTransitionID = nil } }
+    func selectGap(_ gap: TimelineGap?) { if gap != nil { selectClips([]); selectedTransitionID = nil }; selectedGap = gap }
     func closeSelectedGap() {
         guard let gap = selectedGap else { return }
         // edit() clears selectedGap on success; restore it on failure so the outline stays put.
@@ -490,7 +571,10 @@ import FrameMedia
     func togglePlayback() {
         guard !isBuilding, player.currentItem != nil else { return }
         if isPlaying { pause() }
-        else { previewTransformID = nil; if playhead >= project.duration { seek(.zero) }; settleSeek(); player.play(); isPlaying = true }
+        else {
+            previewTransformID = nil; if playhead >= project.duration { seek(.zero) }; settleSeek(); player.play(); isPlaying = true
+            revealPlayheadRequest += 1                  // playing from a playhead scrolled out of view: show it
+        }
     }
     private func rebuild() {
         proxySwapDeferred = false               // this build picks up the current proxies
@@ -791,7 +875,7 @@ import FrameMedia
         player.replaceCurrentItem(with:nil); history = EditHistory(); playhead = .zero
         seekInFlight = nil; chaseTarget = nil; seeking = false
         proxyTask?.cancel(); proxyTask = nil; proxyJob = nil; proxyProgress = nil; proxies.removeAll(); proxyFailures.removeAll()
-        selectedClipID = nil; selectedGap = nil; selectedMediaID = nil; selectedTransitionID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
+        selectClips([]); selectedGap = nil; selectedMediaID = nil; selectedTransitionID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
         // Keep security scopes until app termination: an in-flight cancelled reader may still own a buffer.
     }
     func newProject() {

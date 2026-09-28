@@ -95,7 +95,7 @@ import FrameMedia
                 Button("Go to Selected Clip End") { store.goToSelectedClipEnd() }.keyboardShortcut(.rightArrow,modifiers:[.option]).disabled(store.selectedClip == nil || store.isEditingText)
                 Divider()
                 Button("Split at Playhead") { store.split() }.keyboardShortcut("b").disabled(store.selectedClip == nil)
-                Button("Delete Linked Selection") { store.deleteSelection() }.keyboardShortcut(.delete,modifiers:[]).disabled(store.selectedClip == nil)
+                Button("Delete Linked Selection") { store.deleteSelection() }.keyboardShortcut(.delete,modifiers:[]).disabled(store.selectedClip == nil && !store.hasMultipleSelection)
                 Button("Close Gap") { store.closeSelectedGap() }.keyboardShortcut(.delete,modifiers:[.command]).disabled(store.selectedGap == nil)
                 Button("Add Text Clip") { store.addText() }.keyboardShortcut("t",modifiers:[.command,.shift])
                 Toggle("Snapping",isOn:$store.snapping).keyboardShortcut("n",modifiers:[])

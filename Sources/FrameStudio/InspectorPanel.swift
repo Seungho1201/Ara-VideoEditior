@@ -29,6 +29,42 @@ struct InspectorPanel: View {
                             Text(clip.name).font(.system(size:13,weight:.semibold)).lineLimit(2)
                             HStack { Text("\(clip.lane.rawValue) · \(clip.kind.rawValue.capitalized)"); if clip.linkID != nil { Image(systemName:"link"); Text("Linked A/V") } }.font(.system(size:10)).foregroundStyle(Theme.accent)
                         }
+                        // A title's own settings come first: what it says and how it looks.
+                        if clip.kind == .text {
+                            section("TEXT") {
+                                TextEditor(text:$textDraft).font(.system(size:12)).frame(height:75).scrollContentBackground(.hidden).padding(5).background(Theme.background,in:RoundedRectangle(cornerRadius:4)).accessibilityLabel("Title text")
+                                    .focused($textFocused)
+                                    .onAppear { syncDraft(from:clip,force:true); store.flushPendingEdits = { flushTextCommit() } }
+                                    .onChange(of:clip.id) { _,_ in syncDraft(from:clip,force:true) }
+                                    // Undo/redo or Reset changed the text: follow it even while focused.
+                                    .onChange(of:clip.style.text) { _,now in followOutsideChange(now) }
+                                    .onChange(of:textDraft) { _,draft in scheduleTextCommit(draft) }
+                                    .onChange(of:textFocused) { _,focused in
+                                        store.isEditingText = focused
+                                        if !focused { flushTextCommit(); store.endLiveEdit() }
+                                    }
+                                    .onDisappear { store.isEditingText = false; flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
+                                TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
+                                                  isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
+                                                  addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable()
+                                titleControl("Font size",\.fontSize,range:8...300,suffix:" pt",clip:clip)
+                                titleColor("Text colour",\.red,\.green,\.blue,clip:clip)
+                            }
+                            // Width and opacity switch the effect on; the rest wait until it is.
+                            section("OUTLINE") {
+                                titleControl("Width",\.outlineWidth,range:0...20,suffix:" pt",clip:clip,undoName:"Outline")
+                                titleColor("Outline colour",\.outlineRed,\.outlineGreen,\.outlineBlue,clip:clip).disabled(!clip.style.hasOutline)
+                            }
+                            section("SHADOW") {
+                                titleControl("Opacity",\.shadowOpacity,range:0...1,multiplier:100,suffix:"%",clip:clip,undoName:"Shadow")
+                                Group {
+                                    titleControl("Distance",\.shadowDistance,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
+                                    titleControl("Angle",\.shadowAngle,range:-180...180,suffix:"°",clip:clip,undoName:"Shadow")
+                                    titleControl("Blur",\.shadowBlur,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
+                                    titleColor("Shadow colour",\.shadowRed,\.shadowGreen,\.shadowBlue,clip:clip)
+                                }.disabled(!clip.style.hasShadow)
+                            }
+                        }
                         section("TIMING") {
                             info("Start",store.project.frameRate.timecode(clip.start))
                             info("Source in",store.project.frameRate.timecode(clip.sourceStart))
@@ -77,44 +113,11 @@ struct InspectorPanel: View {
                                 Toggle("Mute",isOn:Binding(get:{store.selectedClip?.style.muted ?? false},set:{v in store.updateStyle { $0.muted = v } })).toggleStyle(.switch).controlSize(.mini)
                             }
                         }
-                        if clip.kind == .text {
-                            section("TEXT") {
-                                TextEditor(text:$textDraft).font(.system(size:12)).frame(height:75).scrollContentBackground(.hidden).padding(5).background(Theme.background,in:RoundedRectangle(cornerRadius:4)).accessibilityLabel("Title text")
-                                    .focused($textFocused)
-                                    .onAppear { syncDraft(from:clip,force:true); store.flushPendingEdits = { flushTextCommit() } }
-                                    .onChange(of:clip.id) { _,_ in syncDraft(from:clip,force:true) }
-                                    // Undo/redo or Reset changed the text: follow it even while focused.
-                                    .onChange(of:clip.style.text) { _,now in followOutsideChange(now) }
-                                    .onChange(of:textDraft) { _,draft in scheduleTextCommit(draft) }
-                                    .onChange(of:textFocused) { _,focused in
-                                        store.isEditingText = focused
-                                        if !focused { flushTextCommit(); store.endLiveEdit() }
-                                    }
-                                    .onDisappear { store.isEditingText = false; flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
-                                TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
-                                                  isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
-                                                  addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable()
-                                titleControl("Font size",\.fontSize,range:8...300,suffix:" pt",clip:clip)
-                                titleColor("Text colour",\.red,\.green,\.blue,clip:clip)
-                            }
-                            // Width and opacity switch the effect on; the rest wait until it is.
-                            section("OUTLINE") {
-                                titleControl("Width",\.outlineWidth,range:0...20,suffix:" pt",clip:clip,undoName:"Outline")
-                                titleColor("Outline colour",\.outlineRed,\.outlineGreen,\.outlineBlue,clip:clip).disabled(!clip.style.hasOutline)
-                            }
-                            section("SHADOW") {
-                                titleControl("Opacity",\.shadowOpacity,range:0...1,multiplier:100,suffix:"%",clip:clip,undoName:"Shadow")
-                                Group {
-                                    titleControl("Distance",\.shadowDistance,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
-                                    titleControl("Angle",\.shadowAngle,range:-180...180,suffix:"°",clip:clip,undoName:"Shadow")
-                                    titleControl("Blur",\.shadowBlur,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
-                                    titleColor("Shadow colour",\.shadowRed,\.shadowGreen,\.shadowBlue,clip:clip)
-                                }.disabled(!clip.style.hasShadow)
-                            }
-                        }
                         Button("Reset appearance") { store.updateStyle { style in let text = style.text; style = ClipStyle(); style.text = text } }.controlSize(.small)
                     }.padding(16)
                 }
+            } else if store.hasMultipleSelection {
+                multipleSelection
             } else if let gap = store.selectedGap {
                 VStack(alignment:.leading,spacing:18) {
                     VStack(alignment:.leading,spacing:6) {
@@ -244,6 +247,35 @@ struct InspectorPanel: View {
         if id == draftClipID { lastCommitted = text }
         store.updateStyleLive(id,name:"Edit text",closesWhenIdle:false) { $0.text = text }
     }
+    /// Several clips selected on the timeline: what they span, and what can be done with them.
+    private var multipleSelection: some View {
+        let ids = store.selectionForEditing
+        // Each selected clip with its linked partner, found in one pass.
+        let groups = Set(store.project.clips.filter { ids.contains($0.id) }.map { $0.linkID ?? $0.id })
+        let clips = store.project.clips.filter { groups.contains($0.linkID ?? $0.id) }
+        // A video with its linked audio counts once, as the timeline shows one selection for both.
+        let count = groups.count
+        let start = clips.map(\.start).min() ?? .zero, end = clips.map(\.end).max() ?? .zero
+        return VStack(alignment:.leading,spacing:18) {
+            VStack(alignment:.leading,spacing:6) {
+                Text("\(count) clips selected").font(.system(size:13,weight:.semibold))
+                Text("Multiple selection").font(.system(size:10)).foregroundStyle(Theme.accent)
+            }
+            section("RANGE") {
+                info("Start",store.project.frameRate.timecode(start))
+                info("End",store.project.frameRate.timecode(end))
+                info("Span",store.project.frameRate.timecode(end-start))
+            }
+            HStack(spacing:6) {
+                Button("Copy") { store.copySelection() }
+                Button("Cut") { store.cutSelection() }.disabled(store.isExporting)
+                Button("Delete") { store.deleteSelection() }.disabled(store.isExporting)
+            }.controlSize(.small)
+            Text("Drag any of them on the timeline to move them together. Shift-click adds or removes a clip, Shift-drag over empty track space adds more, Esc clears.")
+                .font(.system(size:10)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
+            Spacer(minLength:0)
+        }.padding(16)
+    }
     private func section<Content:View>(_ title:String,@ViewBuilder content:()->Content) -> some View {
         VStack(alignment:.leading,spacing:10) { panelTitle(title); content() }.font(.system(size:11))
     }
@@ -301,6 +333,21 @@ struct TitleFontControls: View, Equatable {
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.fontName == b.fontName && a.revision == b.revision && a.addedFolder == b.addedFolder && a.isAdding == b.isAdding
     }
+    private func familyEntries(current: FontLibrary.Face?, menu: (added: [FontLibrary.Family], system: [FontLibrary.Family]), listed: Set<String>) -> [FontPopUp.Entry] {
+        var entries: [FontPopUp.Entry] = []
+        if current == nil { entries.append(.item(tag:FontMenu.missingTag,title:"\(fontName) (missing)",face:nil)) }
+        // A family installed since the list was made (Font Book) still has an entry.
+        if let current, !listed.contains(current.family) {
+            entries.append(.item(tag:current.family,title:current.familyDisplayName,face:FontMenu.previewFace(of:FontLibrary.Family(name:current.family,displayName:current.familyDisplayName))))
+        }
+        if !menu.added.isEmpty {
+            entries.append(.header("Added"))
+            entries += menu.added.map { .family($0) }
+        }
+        entries.append(.header("System"))
+        entries += menu.system.map { .family($0) }
+        return entries
+    }
     var body: some View {
         let current = FontLibrary.face(fontName)
         let menu = FontMenu.families(revision,addedIn:addedFolder)
@@ -308,19 +355,13 @@ struct TitleFontControls: View, Equatable {
         VStack(alignment:.leading,spacing:10) {
             HStack {
                 Text("Font").foregroundStyle(Theme.muted); Spacer()
-                Picker("",selection:Binding(get:{ current?.family ?? FontMenu.missingTag },set:{ family in
+                // Each family in its own face, so the menu shows what it offers.
+                FontPopUp(entries:familyEntries(current:current,menu:menu,listed:listed),selected:current?.family ?? FontMenu.missingTag,
+                          title:current?.familyDisplayName ?? "\(fontName) (missing)",label:"Font family") { family in
                     guard family != FontMenu.missingTag, family != current?.family,
                           let face = FontLibrary.closestFace(inFamily:family,toWeight:current?.weight ?? 0.4,italic:current?.isItalic ?? false) else { return }
                     apply(face.postScriptName)
-                })) {
-                    if current == nil { Text("\(fontName) (missing)").tag(FontMenu.missingTag) }
-                    // A family installed since the list was made (Font Book) still has an entry.
-                    if let current, !listed.contains(current.family) { Text(current.familyDisplayName).tag(current.family) }
-                    if !menu.added.isEmpty {
-                        Section("Added") { ForEach(menu.added) { Text($0.displayName).tag($0.name) } }
-                    }
-                    Section("System") { ForEach(menu.system) { Text($0.displayName).tag($0.name) } }
-                }.labelsHidden().controlSize(.small).frame(maxWidth:170).accessibilityLabel("Font family")
+                }.frame(maxWidth:170)
             }
             if let current {
                 let faces = FontLibrary.faces(ofFamily:current.family)
@@ -328,13 +369,16 @@ struct TitleFontControls: View, Equatable {
                 if faces.count > 1 {
                     HStack {
                         Text("Style").foregroundStyle(Theme.muted); Spacer()
-                        Picker("",selection:Binding(get:{ current.postScriptName },set:{ name in
+                        // Two faces with one style name (a static file and a variable font of the
+                        // same family) are told apart by their PostScript names.
+                        let readable = FontMenu.previewFace(of:FontLibrary.Family(name:current.family,displayName:current.familyDisplayName)) != nil
+                        let entries = faces.map { face in
+                            FontPopUp.Entry.item(tag:face.postScriptName,title:repeated.contains(face.style) ? "\(face.style) · \(face.postScriptName)" : face.style,
+                                                 face:readable ? face.postScriptName : nil)
+                        }
+                        FontPopUp(entries:entries,selected:current.postScriptName,title:current.style,label:"Font style") { name in
                             if name != current.postScriptName { apply(name) }
-                        })) {
-                            // Two faces with one style name (a static file and a variable font of the
-                            // same family) are told apart by their PostScript names.
-                            ForEach(faces) { Text(repeated.contains($0.style) ? "\($0.style) · \($0.postScriptName)" : $0.style).tag($0.postScriptName) }
-                        }.labelsHidden().controlSize(.small).frame(maxWidth:170).accessibilityLabel("Font style")
+                        }.frame(maxWidth:170)
                     }
                 }
             } else {
@@ -359,9 +403,22 @@ struct TitleFontControls: View, Equatable {
     /// the first title selected does not wait for it.
     static func warm(_ revision: Int, addedIn folder: URL) async {
         if let cache, cache.revision == revision { return }
-        let all = await Task.detached(priority:.utility) { FontLibrary.families() }.value
+        let (all,faces) = await Task.detached(priority:.utility) { () -> ([FontLibrary.Family],[String:String?]) in
+            let all = FontLibrary.families()
+            return (all,Dictionary(uniqueKeysWithValues:all.map { ($0.name,FontLibrary.previewFace(of:$0)) }))
+        }.value
         let added = Set(FontLibrary.addedFaces(in:folder).map(\.family))
         cache = (revision,all.filter { added.contains($0.name) },all.filter { !added.contains($0.name) })
+        previews.merge(faces) { _,new in new }
+    }
+    /// The face each family's name is shown in (nil: the system font), worked out off the main
+    /// thread by warm(), or here on first use.
+    private static var previews: [String:String?] = [:]
+    static func previewFace(of family: FontLibrary.Family) -> String? {
+        if let known = previews[family.name] { return known }
+        let face = FontLibrary.previewFace(of:family)
+        previews[family.name] = .some(face)
+        return face
     }
     static func families(_ revision: Int, addedIn folder: URL) -> (added: [FontLibrary.Family], system: [FontLibrary.Family]) {
         if let cache, cache.revision == revision { return (cache.added,cache.system) }
@@ -369,5 +426,86 @@ struct TitleFontControls: View, Equatable {
         let split = (all.filter { added.contains($0.name) },all.filter { !added.contains($0.name) })
         cache = (revision,split.0,split.1)
         return split
+    }
+}
+
+
+/// A pop-up menu whose items are drawn in their own fonts. The button shows the choice in the
+/// system font (a script or display face would overflow it), and the items are made when the
+/// menu opens, so selecting a title never waits for some 250 fonts to load.
+struct FontPopUp: NSViewRepresentable {
+    enum Entry: Equatable {
+        case header(String)
+        case item(tag: String, title: String, face: String?)
+        /// A font family: tagged by its name, shown in its preview face (looked up as the menu opens).
+        case family(FontLibrary.Family)
+    }
+    let entries: [Entry]
+    let selected: String
+    let title: String
+    let label: String
+    let choose: (String) -> Void
+
+    @MainActor final class Coordinator: NSObject, NSMenuDelegate {
+        var entries: [Entry] = [], selected = "", choose: (String) -> Void = { _ in }
+        weak var button: NSPopUpButton?
+        private var built: (entries: [Entry], selected: String)?
+        /// The shared font objects, one per face, at a size that fits a menu row.
+        private static var fonts: [String:NSFont] = [:]
+        static func previewFont(_ face: String) -> NSFont? {
+            if let font = fonts[face] { return font }
+            guard var font = NSFont(name:face,size:13) else { return nil }
+            // Very tall faces (Zapfino) are made smaller, to a slightly taller row, but kept readable.
+            let height = font.ascender-font.descender+font.leading
+            if height > 26, let smaller = NSFont(name:face,size:max(10,13*26/height)) { font = smaller }
+            fonts[face] = font
+            return font
+        }
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            guard built?.entries != entries || built?.selected != selected else { return }
+            built = (entries,selected)
+            menu.removeAllItems()
+            var chosen: NSMenuItem?
+            for entry in entries {
+                switch entry {
+                case .header(let title): menu.addItem(.sectionHeader(title:title))
+                case .item,.family:
+                    let (tag,title,face): (String,String,String?) = switch entry {
+                    case .item(let tag,let title,let face): (tag,title,face)
+                    case .family(let family): (family.name,family.displayName,FontMenu.previewFace(of:family))
+                    case .header: ("","",nil)
+                    }
+                    let item = NSMenuItem(title:title,action:#selector(picked(_:)),keyEquivalent:"")
+                    item.target = self; item.representedObject = tag
+                    if let face, let font = Self.previewFont(face) { item.attributedTitle = NSAttributedString(string:title,attributes:[.font:font]) }
+                    if tag == selected { item.state = .on; chosen = item }
+                    menu.addItem(item)
+                }
+            }
+            // Opens with the current choice under the pointer, as a pop-up menu does.
+            if let chosen { button?.select(chosen) }
+        }
+        @objc func picked(_ item: NSMenuItem) { if let tag = item.representedObject as? String { choose(tag) } }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame:.zero,pullsDown:false)
+        button.controlSize = .small; button.font = .systemFont(ofSize:NSFont.smallSystemFontSize)
+        button.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        let cell = button.cell as? NSPopUpButtonCell
+        cell?.usesItemFromMenu = false; cell?.menuItem = NSMenuItem(title:title,action:nil,keyEquivalent:"")
+        button.menu?.addItem(withTitle:title,action:nil,keyEquivalent:"")      // until the menu first opens
+        button.menu?.delegate = context.coordinator
+        context.coordinator.button = button
+        return button
+    }
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.entries = entries; coordinator.selected = selected; coordinator.choose = choose
+        if let cell = button.cell as? NSPopUpButtonCell, cell.menuItem?.title != title { cell.menuItem = NSMenuItem(title:title,action:nil,keyEquivalent:""); button.needsDisplay = true }
+        button.setAccessibilityLabel(label); button.toolTip = title
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
+        CGSize(width:min(proposal.width ?? 170,170),height:nsView.cell?.cellSize.height ?? 22)
     }
 }

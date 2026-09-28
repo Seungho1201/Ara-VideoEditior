@@ -151,6 +151,26 @@ public enum Editing {
     public static func delete(_ id: UUID, from project: inout Project) {
         let ids = Set(project.group(for: id).map(\.id)); project.clips.removeAll { ids.contains($0.id) }
     }
+    /// Deletes several clips, each with its linked partner.
+    public static func delete(_ ids: Set<UUID>, from project: inout Project) {
+        var all = Set<UUID>()
+        for id in ids { all.formUnion(project.group(for: id).map(\.id)) }
+        project.clips.removeAll { all.contains($0.id) }
+    }
+    /// Moves several clips (each with its linked partner) together in time, on their own tracks.
+    /// No earlier than the timeline's start: the earliest one stops at zero. Rejected as one unit.
+    public static func move(_ ids: Set<UUID>, by delta: MediaTime, in project: inout Project) throws {
+        var all = Set<UUID>()
+        for id in ids { all.formUnion(project.group(for: id).map(\.id)) }
+        guard let earliest = project.clips.filter({ all.contains($0.id) }).map(\.start).min() else { return }
+        let shift = max(project.frameRate.quantize(delta), .zero - earliest)
+        guard shift != .zero else { return }
+        var candidate = project
+        for i in candidate.clips.indices where all.contains(candidate.clips[i].id) {
+            candidate.clips[i].start = candidate.clips[i].start + shift
+        }
+        project = try candidate.validated()
+    }
     /// The empty range on `lane` containing `time`, bounded by a following clip.
     /// Trailing space after the last clip is not a gap: there is nothing to close up against.
     public static func gap(on lane: Lane, at time: MediaTime, in project: Project) -> TimelineGap? {
