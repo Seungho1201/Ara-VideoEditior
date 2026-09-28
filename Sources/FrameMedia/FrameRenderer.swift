@@ -150,29 +150,91 @@ public enum FrameRenderer {
         return image.transformed(by:geometry.renderTransform)
             .applyingFilter("CIColorMatrix",parameters:["inputAVector":CIVector(x:0,y:0,z:0,w:s.opacity)])
     }
-    public static func textImage(_ style: ClipStyle) throws -> CIImage {
+    /// Room a title's image keeps for its outline and shadow (the shadow's distance plus its blur's
+    /// spread), in 1080-basis units, on every side: an effect never moves the letters. The
+    /// transform box leaves it out, so it fits the letters, not the shadow.
+    public static func effectMargin(_ style: ClipStyle) -> CGFloat {
+        let reach = (style.hasOutline ? style.outlineWidth : 0)+(style.hasShadow ? style.shadowDistance+style.shadowBlur*1.5 : 0)
+        return reach > 0 ? ceil(reach)+2 : 0
+    }
+    /// A title drawn into an image. `scale` is output pixels per point of the 1080-pixel basis the
+    /// style is written in (2 for a 4K export). The text is laid out once, at the basis size, and
+    /// drawn scaled: a 4K title breaks, spaces and sizes everything (emoji included) exactly as
+    /// the preview does, only rasterised at 4K instead of enlarged from 1080. The image comes back
+    /// in basis units, so it is placed the same at every resolution. Titles without an outline or
+    /// shadow at scale 1 keep exactly the raster they always had.
+    public static func textImage(_ style: ClipStyle, scale requested: CGFloat = 1) throws -> CIImage {
+        let scale = max(1,requested.isFinite ? requested : 1)
+        let space = CGColorSpace(name:CGColorSpace.sRGB)!
         let font = FontLibrary.font(style.fontName,size:style.fontSize)       // the default when not available here
-        let color = CGColor(colorSpace:CGColorSpace(name:CGColorSpace.sRGB)!,components:[style.red,style.green,style.blue,1])!
+        let color = CGColor(colorSpace:space,components:[style.red,style.green,style.blue,1])!
         let text = NSAttributedString(string:style.text.isEmpty ? " " : style.text,attributes:[NSAttributedString.Key(kCTFontAttributeName as String):font,NSAttributedString.Key(kCTForegroundColorAttributeName as String):color])
         let framesetter = CTFramesetterCreateWithAttributedString(text)
         let suggested = CTFramesetterSuggestFrameSizeWithConstraints(framesetter,CFRange(location:0,length:0),nil,CGSize(width:1700,height:4000),nil)
         let box = CGRect(x:0,y:0,width:ceil(suggested.width),height:ceil(suggested.height))
         let frame = CTFramesetterCreateFrame(framesetter,CFRange(location:0,length:0),CGPath(rect:box,transform:nil),nil)
         // Some fonts draw past their line metrics (Gmarket Sans descenders reach 0.35 em below a
-        // 0.2 em descent). Widen the 12 px margin, on every side so the title stays centred, only
-        // when the ink needs it: titles that fit keep exactly the raster they always had.
+        // 0.2 em descent). Widen the margin, on every side so the title stays centred, only when
+        // the ink needs it.
         let lines = CTFrameGetLines(frame) as? [CTLine] ?? []
         var origins = [CGPoint](repeating:.zero,count:lines.count)
         CTFrameGetLineOrigins(frame,CFRange(location:0,length:0),&origins)
         let ink = zip(lines,origins).reduce(CGRect.null) { $0.union(CTLineGetImageBounds($1.0,nil).offsetBy(dx:$1.1.x,dy:$1.1.y)) }
         let overhang = ink.isNull ? 0 : max(0,-ink.minX,-ink.minY,ink.maxX-box.maxX,ink.maxY-box.maxY)
-        let pad = overhang > 10 ? Int(ceil(overhang))+2 : 12
+        let pad = (overhang > 10 ? Int(ceil(overhang))+2 : 12)+Int(effectMargin(style))
         let width = max(8,Int(box.width)+2*pad), height = max(8,Int(box.height)+2*pad)
-        guard let context = CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { throw EditError("Cannot render text.") }
+        guard let context = CGContext(data:nil,width:Int(CGFloat(width)*scale),height:Int(CGFloat(height)*scale),bitsPerComponent:8,bytesPerRow:0,space:space,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { throw EditError("Cannot render text.") }
+        context.scaleBy(x:scale,y:scale)
         context.translateBy(x:CGFloat(pad),y:CGFloat(pad))
         CTFrameDraw(frame,context)
-        guard let image = context.makeImage() else { throw EditError("Cannot create text image.") }
-        return CIImage(cgImage:image)
+        guard var image = context.makeImage() else { throw EditError("Cannot create text image.") }
+        if style.hasOutline || style.hasShadow { image = try withEffects(image,drawnIn:context,style,scale:scale) }
+        let drawn = CIImage(cgImage:image)
+        return scale == 1 ? drawn : drawn.transformed(by:CGAffineTransform(scaleX:1/scale,y:1/scale))
+    }
+    /// The letters with their outline under them and one shadow under both (never one per part:
+    /// the shadow is cast by the finished picture). `context` holds the letters' pixels.
+    private static func withEffects(_ letters: CGImage, drawnIn context: CGContext, _ style: ClipStyle, scale: CGFloat) throws -> CGImage {
+        let width = letters.width, height = letters.height, space = CGColorSpace(name:CGColorSpace.sRGB)!
+        let all = CGRect(x:0,y:0,width:width,height:height)
+        func canvas() throws -> CGContext {
+            guard let made = CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:0,space:space,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { throw EditError("Cannot render text.") }
+            return made
+        }
+        var body = letters
+        if style.hasOutline {
+            guard let pixels = context.data else { throw EditError("Cannot render text.") }
+            let cover = TitleOutline.coverage(of:pixels.assumingMemoryBound(to:UInt8.self),width:width,height:height,bytesPerRow:context.bytesPerRow,radius:style.outlineWidth*scale)
+            let outlined = try canvas()
+            guard let data = outlined.data else { throw EditError("Cannot render text.") }
+            // Premultiplied sRGB in the outline's colour, then the letters drawn over it.
+            let bytes = data.assumingMemoryBound(to:UInt8.self), rowBytes = outlined.bytesPerRow
+            let tint = [style.outlineRed,style.outlineGreen,style.outlineBlue].map { $0*255 }
+            for y in 0..<height {
+                for x in 0..<width {
+                    let c = cover[y*width+x]
+                    guard c > 0 else { continue }
+                    let i = y*rowBytes+x*4, a = Double(c)/255
+                    bytes[i] = UInt8(tint[0]*a+0.5); bytes[i+1] = UInt8(tint[1]*a+0.5); bytes[i+2] = UInt8(tint[2]*a+0.5); bytes[i+3] = c
+                }
+            }
+            outlined.draw(letters,in:all)
+            guard let made = outlined.makeImage() else { throw EditError("Cannot create text image.") }
+            body = made
+        }
+        if style.hasShadow {
+            let shadowed = try canvas()
+            // The angle is on screen, clockwise from the right, whatever the title's rotation (the
+            // image is turned clockwise by `rotation` after this). Quartz offsets are y-up and,
+            // like the blur, in pixels.
+            let angle = (style.shadowAngle-style.rotation)*Double.pi/180, distance = style.shadowDistance*scale
+            let color = CGColor(colorSpace:space,components:[style.shadowRed,style.shadowGreen,style.shadowBlue,style.shadowOpacity])!
+            shadowed.setShadow(offset:CGSize(width:cos(angle)*distance,height:-sin(angle)*distance),blur:style.shadowBlur*scale,color:color)
+            shadowed.draw(body,in:all)
+            guard let made = shadowed.makeImage() else { throw EditError("Cannot create text image.") }
+            body = made
+        }
+        return body
     }
 }
 

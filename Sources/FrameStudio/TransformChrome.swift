@@ -103,7 +103,8 @@ import FrameMedia
         // Text and stills: the layer image the current player item renders. While a rebuild is in
         // flight that item is about to be replaced, so wait for the new one.
         guard !store.isBuilding, let layer = store.previewLayerImage(for:clip) else { return current }
-        let key = "\(clip.id)|\(ObjectIdentifier(layer).hashValue)|\(s.text.hashValue)|\(s.fontName)|\(s.fontSize)|\(look)"
+        let effects = [s.outlineWidth,s.outlineRed,s.outlineGreen,s.outlineBlue,s.shadowOpacity,s.shadowDistance,s.shadowAngle,s.shadowBlur,s.shadowRed,s.shadowGreen,s.shadowBlue]
+        let key = "\(clip.id)|\(ObjectIdentifier(layer).hashValue)|\(s.text.hashValue)|\(s.fontName)|\(s.fontSize)|\(s.red),\(s.green),\(s.blue)|\(effects)|\(look)"
         if key == imageKey || key == pendingKey { return current }
         pendingKey = key; task?.cancel()
         let reuse = identityLook ? layer.cgImage : nil

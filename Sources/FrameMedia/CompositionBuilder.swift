@@ -221,7 +221,8 @@ public actor CompositionBuilder {
             for clip in project.clips.filter({ $0.lane == lane }).sorted(by:{ $0.start < $1.start }) {
                 try Task.checkCancellation()
                 var image: CIImage?
-                if clip.kind == .text { image = try FrameRenderer.textImage(clip.style) }
+                // Titles are drawn at the output's own resolution (a 4K export draws them at 4K).
+                if clip.kind == .text { image = try FrameRenderer.textImage(clip.style,scale:CGFloat(height)/1080) }
                 else if clip.kind == .image {
                     guard let id = clip.mediaID, let url = urls[id], let still = CIImage(contentsOf:url,options:[.applyOrientationProperty:true]) else { throw EditError("Cannot decode image \(clip.name).") }
                     image = still

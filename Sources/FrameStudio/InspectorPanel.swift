@@ -16,6 +16,8 @@ struct InspectorPanel: View {
     /// The document the draft was taken from. A draft never lands in a different document.
     @State private var draftSession: UUID?
     @FocusState private var textFocused: Bool
+    /// The title whose appearance slider is being dragged: its edits stay one undo step until release.
+    @State private var titleDrag: UUID?
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
             if let transition = store.selectedTransition {
@@ -92,14 +94,22 @@ struct InspectorPanel: View {
                                 TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
                                                   isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
                                                   addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable()
-                                control("Font size",\.fontSize,range:8...300,suffix:" pt")
-                                ColorPicker("Text colour",selection:Binding(get:{Color(red:clip.style.red,green:clip.style.green,blue:clip.style.blue)},set:{color in
-                                    guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
-                                    // The picker re-sends its colour after a colour-space round trip; that is not an edit.
-                                    let s = clip.style, tolerance = 0.5/255
-                                    guard abs(c.redComponent-s.red) > tolerance || abs(c.greenComponent-s.green) > tolerance || abs(c.blueComponent-s.blue) > tolerance else { return }
-                                    store.updateStyleLive(clip.id,name:"Text colour") { $0.red = c.redComponent; $0.green = c.greenComponent; $0.blue = c.blueComponent }
-                                }),supportsOpacity:false)
+                                titleControl("Font size",\.fontSize,range:8...300,suffix:" pt",clip:clip)
+                                titleColor("Text colour",\.red,\.green,\.blue,clip:clip)
+                            }
+                            // Width and opacity switch the effect on; the rest wait until it is.
+                            section("OUTLINE") {
+                                titleControl("Width",\.outlineWidth,range:0...20,suffix:" pt",clip:clip,undoName:"Outline")
+                                titleColor("Outline colour",\.outlineRed,\.outlineGreen,\.outlineBlue,clip:clip).disabled(!clip.style.hasOutline)
+                            }
+                            section("SHADOW") {
+                                titleControl("Opacity",\.shadowOpacity,range:0...1,multiplier:100,suffix:"%",clip:clip,undoName:"Shadow")
+                                Group {
+                                    titleControl("Distance",\.shadowDistance,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
+                                    titleControl("Angle",\.shadowAngle,range:-180...180,suffix:"°",clip:clip,undoName:"Shadow")
+                                    titleControl("Blur",\.shadowBlur,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
+                                    titleColor("Shadow colour",\.shadowRed,\.shadowGreen,\.shadowBlue,clip:clip)
+                                }.disabled(!clip.style.hasShadow)
                             }
                         }
                         Button("Reset appearance") { store.updateStyle { style in let text = style.text; style = ClipStyle(); style.text = text } }.controlSize(.small)
@@ -239,6 +249,32 @@ struct InspectorPanel: View {
     }
     private func info(_ key:String,_ value:String) -> some View {
         HStack { Text(key).foregroundStyle(Theme.muted); Spacer(); Text(value).font(.system(size:10,design:.monospaced)) }
+    }
+    /// A slider for how a title is drawn. It redraws the title in the preview without rebuilding
+    /// the composition, and one drag is one undo step.
+    private func titleControl(_ label:String,_ key:WritableKeyPath<ClipStyle,Double>,range:ClosedRange<Double>,multiplier:Double = 1,suffix:String = "",clip:Clip,undoName:String? = nil) -> some View {
+        VStack(spacing:5) {
+            HStack {
+                Text(label).foregroundStyle(Theme.muted); Spacer()
+                Text(String(format:"%.0f",clip.style[keyPath:key]*multiplier)+suffix).font(.system(size:10,design:.monospaced))
+            }
+            Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in
+                       // Keyboard steps have no drag around them: those close after a pause.
+                       store.updateStyleLive(clip.id,name:undoName ?? label,closesWhenIdle:titleDrag != clip.id) { $0[keyPath:key] = min(range.upperBound,max(range.lowerBound,v)) }
+                   }),in:range,onEditingChanged:{ active in
+                       // The title's typed text lands first, as its own step.
+                       if active { store.commitPendingEdits(); titleDrag = clip.id } else { titleDrag = nil; store.endLiveEdit() }
+                   }).controlSize(.mini).accessibilityLabel(undoName.map { "\($0) \(label.lowercased())" } ?? label)
+        }
+    }
+    private func titleColor(_ label:String,_ red:WritableKeyPath<ClipStyle,Double>,_ green:WritableKeyPath<ClipStyle,Double>,_ blue:WritableKeyPath<ClipStyle,Double>,clip:Clip) -> some View {
+        ColorPicker(label,selection:Binding(get:{Color(red:clip.style[keyPath:red],green:clip.style[keyPath:green],blue:clip.style[keyPath:blue])},set:{color in
+            guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
+            // The picker re-sends its colour after a colour-space round trip; that is not an edit.
+            let s = clip.style, tolerance = 0.5/255
+            guard abs(c.redComponent-s[keyPath:red]) > tolerance || abs(c.greenComponent-s[keyPath:green]) > tolerance || abs(c.blueComponent-s[keyPath:blue]) > tolerance else { return }
+            store.updateStyleLive(clip.id,name:label) { $0[keyPath:red] = c.redComponent; $0[keyPath:green] = c.greenComponent; $0[keyPath:blue] = c.blueComponent }
+        }),supportsOpacity:false)
     }
     private func control(_ label:String,_ key:WritableKeyPath<ClipStyle,Double>,range:ClosedRange<Double>,multiplier:Double = 1,suffix:String = "") -> some View {
         VStack(spacing:5) {

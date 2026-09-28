@@ -221,6 +221,9 @@ import FrameMedia
         guard clip != project.clips[index] else { return }
         var candidate = project; candidate.clips[index] = clip
         guard (try? candidate.validated()) != nil else { return }
+        // A different edit landing mid-run (the title's text committing during a slider drag) is
+        // its own undo step.
+        if liveEditStart != nil, liveEditName != name { endLiveEdit() }
         if liveEditStart == nil { liveEditStart = project; liveEditName = name }
         project = candidate; selectedGap = nil
         if !refreshPreviewLayer(clip) { rebuild() }
@@ -272,6 +275,13 @@ import FrameMedia
         // A fresh composition re-renders a paused frame without replacing the player item (QA1966).
         item.videoComposition = composition
     }
+    /// How far a title's image reaches past its letters' box on every side (see previewSourceSize),
+    /// measured from the style it was drawn with.
+    func previewSourceMargin(for clip: Clip) -> CGFloat {
+        guard let layer = (player.currentItem?.videoComposition?.instructions.first as? FrameInstruction)?.layers.first(where: { $0.clip.id == clip.id }),
+              layer.clip.kind == .text, layer.image != nil else { return 0 }
+        return FrameRenderer.effectMargin(layer.clip.style)
+    }
     /// The rendered image a text or still layer shows in the current preview.
     func previewLayerImage(for clip: Clip) -> CIImage? {
         (player.currentItem?.videoComposition?.instructions.first as? FrameInstruction)?
@@ -279,10 +289,13 @@ import FrameMedia
     }
     /// What the preview decodes for this clip: its FHD proxy when there is one.
     func previewSourceURL(for clip: Clip) -> URL? { clip.mediaID.flatMap { proxies[$0] ?? urls[$0] } }
+    /// For a title, the size of its letters' box: the image less the room kept for its outline
+    /// and shadow (`previewSourceMargin`), so the transform box fits the letters.
     func previewSourceSize(for clip: Clip) -> CGSize? {
         if let instruction = player.currentItem?.videoComposition?.instructions.first as? FrameInstruction,
-           let image = instruction.layers.first(where: { $0.clip.id == clip.id })?.image {
-            return image.extent.size
+           let layer = instruction.layers.first(where: { $0.clip.id == clip.id }), let image = layer.image {
+            let margin = layer.clip.kind == .text ? FrameRenderer.effectMargin(layer.clip.style) : 0
+            return CGSize(width:max(1,image.extent.width-2*margin),height:max(1,image.extent.height-2*margin))
         }
         guard let media = project.media(for:clip), media.width > 0, media.height > 0 else { return nil }
         return CGSize(width:media.width,height:media.height)

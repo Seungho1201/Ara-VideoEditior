@@ -134,7 +134,11 @@ struct PreviewSurface: NSViewRepresentable {
         let area = chrome.convert(canvas,from:self)
         // 1. The part of the clip outside the canvas, at reduced opacity, placed by the renderer's own transform.
         let time = clip.sourceStart + (store.playhead - clip.start).scaled(by:clip.speed)
-        if let picture = ghost.image(for:clip,sourceTime:time,sourceSize:geometry.sourceSize,store:store) {
+        // A title's outline and shadow reach past its box; the ghost is kept per drawn size, so one
+        // made before an effect changed is never drawn stretched into the new one.
+        let margin = store.previewSourceMargin(for:clip)
+        let drawn = CGRect(origin:.zero,size:geometry.sourceSize).insetBy(dx:-margin,dy:-margin)
+        if let picture = ghost.image(for:clip,sourceTime:time,sourceSize:drawn.size,store:store) {
             context.saveGState()
             let outside = CGMutablePath(); outside.addRect(chrome.bounds); outside.addRect(area)
             context.addPath(outside); context.clip(using:.evenOdd)
@@ -142,7 +146,7 @@ struct PreviewSurface: NSViewRepresentable {
             context.interpolationQuality = .high
             context.translateBy(x:area.minX,y:area.maxY); context.scaleBy(x:1,y:-1)   // canvas space, y up
             context.concatenate(geometry.renderTransform)
-            context.draw(picture,in:CGRect(origin:.zero,size:geometry.sourceSize))
+            context.draw(picture,in:drawn)
             context.restoreGState()
         }
         // 2. Outline and handles on top of everything.

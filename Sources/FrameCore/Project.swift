@@ -75,10 +75,30 @@ public struct ClipStyle: Codable, Hashable, Sendable {
     public var red: Double = 1
     public var green: Double = 1
     public var blue: Double = 1
+    /// Title outline, drawn outside the letters (it never eats into them), in points at a
+    /// 1080-pixel short edge like fontSize. 0 is no outline.
+    public var outlineWidth: Double = 0
+    public var outlineRed: Double = 0
+    public var outlineGreen: Double = 0
+    public var outlineBlue: Double = 0
+    /// Title drop shadow, cast once by the letters and their outline together. 0 opacity is none.
+    /// Distance and blur are points at a 1080-pixel short edge; the angle is the direction the
+    /// shadow falls, clockwise from the right as seen on screen (45° is down and to the right).
+    public var shadowOpacity: Double = 0
+    public var shadowDistance: Double = 6
+    public var shadowAngle: Double = 45
+    public var shadowBlur: Double = 8
+    public var shadowRed: Double = 0
+    public var shadowGreen: Double = 0
+    public var shadowBlue: Double = 0
     public static let defaultFontName = "HelveticaNeue-Bold"
+    public var hasOutline: Bool { outlineWidth > 0 }
+    public var hasShadow: Bool { shadowOpacity > 0 }
     public init() {}
     private enum CodingKeys: String, CodingKey {
         case x, y, scale, rotation, opacity, brightness, contrast, saturation, volume, muted, text, fontName, fontSize, red, green, blue
+        case outlineWidth, outlineRed, outlineGreen, outlineBlue
+        case shadowOpacity, shadowDistance, shadowAngle, shadowBlur, shadowRed, shadowGreen, shadowBlue
     }
     /// Documents from before fonts could be chosen have no font name: they keep the font they
     /// were made with.
@@ -93,6 +113,13 @@ public struct ClipStyle: Codable, Hashable, Sendable {
         fontName = try c.decodeIfPresent(String.self,forKey:.fontName) ?? Self.defaultFontName
         fontSize = try c.decode(Double.self,forKey:.fontSize)
         red = try c.decode(Double.self,forKey:.red); green = try c.decode(Double.self,forKey:.green); blue = try c.decode(Double.self,forKey:.blue)
+        // Documents from before outlines and shadows: titles without either.
+        func optional(_ key: CodingKeys, _ fallback: Double) throws -> Double { try c.decodeIfPresent(Double.self,forKey:key) ?? fallback }
+        outlineWidth = try optional(.outlineWidth,0)
+        outlineRed = try optional(.outlineRed,0); outlineGreen = try optional(.outlineGreen,0); outlineBlue = try optional(.outlineBlue,0)
+        shadowOpacity = try optional(.shadowOpacity,0); shadowDistance = try optional(.shadowDistance,6)
+        shadowAngle = try optional(.shadowAngle,45); shadowBlur = try optional(.shadowBlur,8)
+        shadowRed = try optional(.shadowRed,0); shadowGreen = try optional(.shadowGreen,0); shadowBlue = try optional(.shadowBlue,0)
     }
 }
 
@@ -231,6 +258,12 @@ public struct Project: Codable, Hashable, Sendable {
                   !s.fontName.isEmpty, s.fontName.count <= 255, !s.fontName.contains(where: \.isNewline) else { throw EditError("Invalid clip properties.") }
             guard (-2...2).contains(s.x), (-2...2).contains(s.y), (-360...360).contains(s.rotation),
                   [s.red,s.green,s.blue].allSatisfy({ (0...1).contains($0) }) else { throw EditError("Invalid transform or text color.") }
+            let effects = [s.outlineWidth,s.outlineRed,s.outlineGreen,s.outlineBlue,s.shadowOpacity,s.shadowDistance,s.shadowAngle,s.shadowBlur,s.shadowRed,s.shadowGreen,s.shadowBlue]
+            guard effects.allSatisfy(\.isFinite), (0...20).contains(s.outlineWidth), (0...1).contains(s.shadowOpacity),
+                  (0...40).contains(s.shadowDistance), (-180...180).contains(s.shadowAngle), (0...40).contains(s.shadowBlur),
+                  [s.outlineRed,s.outlineGreen,s.outlineBlue,s.shadowRed,s.shadowGreen,s.shadowBlue].allSatisfy({ (0...1).contains($0) }) else {
+                throw EditError("Invalid title outline or shadow.")
+            }
         }
         for lane in videoLanes+audioLanes {
             let sorted = clips.filter { $0.lane == lane }.sorted { $0.start < $1.start }
