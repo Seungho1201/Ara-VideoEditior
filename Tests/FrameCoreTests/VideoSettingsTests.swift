@@ -94,10 +94,10 @@ final class VideoSettingsTests: XCTestCase {
             let loaded = try ProjectFile.decode(JSONSerialization.data(withJSONObject:object))
             XCTAssertEqual(loaded.outputResolution,1080)
         }
-        object["outputResolution"] = 720
+        object["outputResolution"] = 900
         XCTAssertThrowsError(try ProjectFile.decode(JSONSerialization.data(withJSONObject:object)))
         var project = try fixture(); let before = project
-        XCTAssertThrowsError(try Editing.setVideoSettings(aspectRatio:.portrait,frameRate:.init(24),resolution:720,in:&project))
+        XCTAssertThrowsError(try Editing.setVideoSettings(aspectRatio:.portrait,frameRate:.init(24),resolution:900,in:&project))
         XCTAssertEqual(project,before)
     }
     func testVersionOneMigratesToLandscapeAndVersionTwoRequiresValidAspect() throws {
@@ -125,6 +125,29 @@ final class VideoSettingsTests: XCTestCase {
                 XCTAssertEqual(a.x*2,b.x,accuracy:0.001); XCTAssertEqual(a.y*2,b.y,accuracy:0.001)
             }
             XCTAssertTrue(small.contains(small.center))
+        }
+    }
+
+    func testEveryOutputQualityHasEvenSidesAndKeepsTheShape() {
+        XCTAssertEqual(OutputQuality.allCases.map(\.name),["HD","Full HD","2K","QHD","3K","4K"])
+        for quality in OutputQuality.allCases {
+            for ratio in VideoAspectRatio.allCases {
+                let size = ratio.size(resolution:quality.rawValue), full = ratio.size()
+                XCTAssertEqual(Int(size.width)%2,0,"\(quality.name) \(ratio.rawValue)"); XCTAssertEqual(Int(size.height)%2,0)
+                XCTAssertEqual(min(size.width,size.height),CGFloat(quality.rawValue),"the short edge is the preset")
+                XCTAssertEqual(size.width/size.height,full.width/full.height,accuracy:0.002,"\(quality.name) \(ratio.rawValue)")
+            }
+        }
+        XCTAssertEqual(VideoAspectRatio.landscape.size(resolution:1440),CGSize(width:2560,height:1440))
+        XCTAssertEqual(VideoAspectRatio.landscape.size(resolution:1152),CGSize(width:2048,height:1152))
+        XCTAssertEqual(VideoAspectRatio.landscape.size(resolution:1620),CGSize(width:2880,height:1620))
+        XCTAssertEqual(VideoAspectRatio.landscape.size(resolution:720),CGSize(width:1280,height:720))
+        XCTAssertEqual(VideoAspectRatio.social.size(resolution:1620),CGSize(width:1620,height:2024))
+        XCTAssertEqual(OutputQuality.bitRate(shortEdge:1080),12_000_000); XCTAssertEqual(OutputQuality.bitRate(shortEdge:2160),40_000_000)
+        var project = Project()
+        for quality in OutputQuality.allCases {
+            XCTAssertNoThrow(try Editing.setVideoSettings(aspectRatio:.landscape,frameRate:.init(30),resolution:quality.rawValue,in:&project))
+            XCTAssertEqual(project.outputResolution,quality.rawValue)
         }
     }
 }

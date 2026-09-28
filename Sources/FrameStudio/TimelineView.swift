@@ -16,7 +16,7 @@ struct TimelineView: View {
                     ForEach(store.project.displayLanes) { lane in
                         HStack(spacing:7) {
                             RoundedRectangle(cornerRadius:1).fill(lane.isVideo ? Color.blue.opacity(0.8) : Theme.accent).frame(width:3,height:22)
-                            VStack(alignment:.leading,spacing:4) { Text(lane.rawValue).font(.system(size:11,weight:.semibold)); Text(lane.isVideo ? (lane.number == 1 ? "Picture" : "Overlay") : "Audio").font(.system(size:8)).foregroundStyle(Theme.muted) }
+                            VStack(alignment:.leading,spacing:4) { Text(lane.rawValue).font(.system(size:11,weight:.semibold)); Text(LocalizedStringKey(lane.isVideo ? (lane.number == 1 ? "Picture" : "Overlay") : "Audio")).font(.system(size:8)).foregroundStyle(Theme.muted) }
                                 .lineLimit(1).fixedSize()
                             Spacer(minLength:0)
                             if removable(lane) {
@@ -60,6 +60,7 @@ struct TimelineView: View {
                 .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.leading).padding(.leading,12).contentShape(Rectangle())
         }
         .buttonStyle(.plain).frame(height:TimelineCanvas.addBand)
+        .helpTip(kind == .video ? "Add a video track" : "Add an audio track",kind == .video ? .above : .below)
         .disabled(atLimit || store.isExporting)
         .help(atLimit ? "A timeline has at most \(Project.trackCounts.upperBound) \(kind == .video ? "video" : "audio") tracks"
                       : kind == .video ? "Add a video track above V\(count)" : "Add an audio track below A\(count)")
@@ -178,7 +179,7 @@ struct TimelineSurface: NSViewRepresentable {
     private struct TransitionEdge: Equatable { let from: UUID?; let to: UUID? }
     private var transitionDropFeedback = CatchFeedback<TransitionEdge>()
     private func feelSnap(_ target: MediaTime?, _ event: NSEvent) {
-        if snapFeedback.cue(for:target,at:event.timestamp,enabled:store?.scrubHaptics == true) { performHaptic(.alignment) }
+        if snapFeedback.cue(for:target,at:event.timestamp,enabled:store?.haptics(.snapping) == true) { performHaptic(.alignment) }
     }
     private var mediaDragSequence: Int?
     /// Kept at the AppKit boundary so input tests can capture cues without vibrating hardware.
@@ -248,11 +249,12 @@ struct TimelineSurface: NSViewRepresentable {
         // mouseDown pauses first, so a press on the ruler during playback still scrubs.
         if store.isPlaying { if mode == .scrub { mode = nil }; resetScrubbing(); return }
         if scrubSession != store.session { scrubFeedback = ScrubFeedbackCadence(); scrubSession = store.session }
+        scrubFeedback.strength = store.skimHapticStrength
         let position = store.project.scrubPosition(at:time(at:point.x),snapping:store.snapping && !event.modifierFlags.contains(.shift))
         setScrubEnd(position.snappedEnd)
         let didMove = store.playhead != position.time
         if didMove { store.seek(position.time) }
-        guard let cue = scrubFeedback.cue(for:position,at:event.timestamp,enabled:store.scrubHaptics),
+        guard let cue = scrubFeedback.cue(for:position,at:event.timestamp,enabled:store.haptics(.skimming)),
               didMove || cue == .clipEnd else { return }
         // macOS exposes semantic patterns, not an intensity control. Alignment is the
         // system's boundary cue; levelChange is for pressure zones, not a stronger tap.
@@ -492,7 +494,7 @@ struct TimelineSurface: NSViewRepresentable {
                 let path = NSBezierPath(roundedRect:box.insetBy(dx:1,dy:1),xRadius:4,yRadius:4)
                 NSColor.white.withAlphaComponent(0.14).setFill(); path.fill()
                 NSColor.white.setStroke(); path.lineWidth = 2; path.stroke()
-                if box.width > 132 { label("⌘⌫ close gap · \(store.project.frameRate.timecode(gap.duration))",at:NSPoint(x:box.minX+8,y:box.midY-6),size:9,color:.white) }
+                if box.width > 132 { label(String(localized:"\(ShortcutSettings.shared.label(.closeGap)) close gap · \(store.project.frameRate.timecode(gap.duration))"),at:NSPoint(x:box.minX+8,y:box.midY-6),size:9,color:.white) }
             }
         }
         if let (id,lane,time) = dropped, let media = store.project.media.first(where:{$0.id == id}) {
@@ -709,7 +711,7 @@ struct TimelineSurface: NSViewRepresentable {
             var position = resize.edge+MediaTime(seconds:(point.x-origin.x)/pixelsPerSecond)
             var target: MediaTime?
             if store.snapping && !event.modifierFlags.contains(.shift) {
-                target = Editing.snapTarget(position,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:resize.base)
+                target = Editing.snapTarget(position,excludingTransition:resize.original.id,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:resize.base)
                 position = store.project.frameRate.quantize(target ?? position)
             }
             var preview = resize.base
@@ -847,24 +849,19 @@ struct TimelineSurface: NSViewRepresentable {
     }
     override func keyDown(with event:NSEvent) {
         guard let store else { return }
-        // A Korean input source may not produce the Latin menu equivalent. Physical N
-        // still works when the timeline has focus; text fields retain their own responder.
-        if event.modifierFlags.intersection([.command,.shift,.option,.control]).isEmpty {
-            if event.keyCode == 45 { if !event.isARepeat { store.snapping.toggle() }; return }
-        }
+        // A Korean input source may not produce the Latin menu equivalent, so the timeline's
+        // own commands also work from here by key position; text fields keep their own keys.
+        if let command = ShortcutSettings.shared.command(matching:event), store.performFromKeyboard(command,repeating:event.isARepeat) { return }
         if event.modifierFlags.intersection([.command,.shift,.option,.control]) == [.command] {
             if Self.isCommand(event,"c",keyCode:8) { copy(nil); return }
             if Self.isCommand(event,"v",keyCode:9) { paste(nil); return }
         }
+        let modifiers = event.modifierFlags.intersection(Shortcut.modifierMask)
         switch event.keyCode {
-        case 123:
-            if event.modifierFlags.contains(.option) { store.goToSelectedClipStart() }
-            else { store.step(event.modifierFlags.contains(.shift) ? -10 : -1) }
-        case 124:
-            if event.modifierFlags.contains(.option) { store.goToSelectedClipEnd() }
-            else { store.step(event.modifierFlags.contains(.shift) ? 10 : 1) }
-        case 49: store.togglePlayback()
-        case 51,117: store.deleteSelection()
+        // Shift-arrows move ten frames, whatever the frame keys are set to.
+        case 123 where modifiers == [.shift]: store.step(-10)
+        case 124 where modifiers == [.shift]: store.step(10)
+        case 117 where modifiers.isEmpty: store.deleteSelection()
         case 53:
             resetScrubbing()
             if transitionResize != nil {
@@ -914,7 +911,7 @@ struct TimelineSurface: NSViewRepresentable {
         defer {
             needsDisplay = true
             if let cue = mediaDropFeedback.cue(for:feedbackTarget,at:ProcessInfo.processInfo.systemUptime,
-                                              enabled:store?.scrubHaptics == true) { performHaptic(cue) }
+                                              enabled:store?.haptics(.mediaDrop) == true) { performHaptic(cue) }
         }
         guard store != nil else { return [] }
         let point = convert(sender.draggingLocation,from:nil)
@@ -922,7 +919,7 @@ struct TimelineSurface: NSViewRepresentable {
             transitionDrop = transitionTarget(kind,at:point)
             // Over a new cut or clip edge the transition would go on: a tick.
             let edge = transitionDrop.map { TransitionEdge(from:$0.transition.from,to:$0.transition.to) }
-            if transitionDropFeedback.cue(for:edge,at:ProcessInfo.processInfo.systemUptime,enabled:store?.scrubHaptics == true) { performHaptic(.alignment) }
+            if transitionDropFeedback.cue(for:edge,at:ProcessInfo.processInfo.systemUptime,enabled:store?.haptics(.transitions) == true) { performHaptic(.alignment) }
             return transitionDrop == nil ? [] : .copy
         }
         if let value = sender.draggingPasteboard.string(forType:.string), let id = UUID(uuidString:value) {
@@ -947,7 +944,7 @@ struct TimelineSurface: NSViewRepresentable {
         if let kind = TransitionDrag.kind(from:sender.draggingPasteboard) {
             guard let drop = transitionTarget(kind,at:convert(sender.draggingLocation,from:nil)) else { return false }
             let applied = store.applyTransition(kind,from:drop.transition.from,to:drop.transition.to)
-            if applied { window?.makeFirstResponder(self); if store.scrubHaptics { performHaptic(.generic) } }
+            if applied { window?.makeFirstResponder(self); if store.haptics(.transitions) { performHaptic(.generic) } }
             return applied
         }
         if let value = sender.draggingPasteboard.string(forType:.string), let id = UUID(uuidString:value) {
@@ -955,7 +952,7 @@ struct TimelineSurface: NSViewRepresentable {
             // since the last draggingUpdated. Only a committed add earns a cue.
             guard let target = mediaDropTarget(id,at:convert(sender.draggingLocation,from:nil)),
                   store.addMedia(id,lane:target.lane,at:target.time) else { return false }
-            if store.scrubHaptics { performHaptic(.generic) }
+            if store.haptics(.mediaDrop) { performHaptic(.generic) }
             window?.makeFirstResponder(self)
             return true
         }

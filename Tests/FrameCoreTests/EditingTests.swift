@@ -171,8 +171,9 @@ final class EditingTests: XCTestCase {
     }
     func testSpeedIsBoundedAndRefusedForTextAndOverlongSource() throws {
         var (p,id) = try fixture(); let original = p
-        XCTAssertThrowsError(try Editing.setSpeed(id,to:0.1,in:&p))   // below 0.25x
-        XCTAssertThrowsError(try Editing.setSpeed(id,to:8,in:&p))     // above 4x
+        XCTAssertThrowsError(try Editing.setSpeed(id,to:0.05,in:&p))  // below 0.1x
+        XCTAssertThrowsError(try Editing.setSpeed(id,to:10.5,in:&p))  // above 10x
+        for speed in [5.0,10.0,2.37] { var copy = p; XCTAssertNoThrow(try Editing.setSpeed(id,to:speed,in:&copy),"\(speed)x") }
         XCTAssertEqual(p,original)
         let title = try Editing.addText(at:.init(seconds:25),to:&p)
         XCTAssertThrowsError(try Editing.setSpeed(title,to:2,in:&p))  // text has no source to retime

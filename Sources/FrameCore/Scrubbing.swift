@@ -36,15 +36,25 @@ public extension Project {
 /// gesture. The UI chooses how to render these cues (including a hardware haptic, if enabled).
 public struct ScrubFeedbackCadence: Sendable {
     public enum Cue: Equatable, Sendable { case frame, clipEnd }
-    /// The shortest time between two frame pulses while skimming. macOS offers no haptic
-    /// strength, so the skim is made gentler by pulsing 10 % less often than the original
-    /// 0.08 s (at most about 11.2 pulses a second instead of 12.5). A clip-end cue is not throttled.
-    public static let frameInterval: TimeInterval = 0.08/0.9
+    /// How often frame pulses may come, chosen in Settings. macOS offers no haptic strength, so
+    /// a gentler skim pulses less often than the 0.08 s of the full rate (12.5 a second):
+    /// 80 % by default (0.1 s, 10 a second), 60 % when light (about 7.5). A clip-end cue is not throttled.
+    public enum Strength: String, CaseIterable, Sendable {
+        case precise, standard, light
+        /// The share of the full pulse rate.
+        public var share: Double {
+            switch self { case .precise: 1; case .standard: 0.8; case .light: 0.6 }
+        }
+        public var frameInterval: TimeInterval { 0.08/share }
+    }
+    /// The default shortest time between two frame pulses.
+    public static let frameInterval: TimeInterval = Strength.standard.frameInterval
+    public var strength: Strength
     private var previous: ScrubPosition?
     private var lastCueAt = -Double.infinity
     private var lastEnd: MediaTime?
     private var lastEndAt = -Double.infinity
-    public init() {}
+    public init(strength: Strength = .standard) { self.strength = strength }
 
     public mutating func cue(for position: ScrubPosition, at timestamp: TimeInterval, enabled: Bool = true) -> Cue? {
         defer { previous = position }
@@ -55,7 +65,7 @@ public struct ScrubFeedbackCadence: Sendable {
             lastEnd = end; lastEndAt = timestamp; lastCueAt = timestamp
             return .clipEnd
         }
-        guard position.time != previous?.time, timestamp-lastCueAt >= Self.frameInterval else { return nil }
+        guard position.time != previous?.time, timestamp-lastCueAt >= strength.frameInterval else { return nil }
         lastCueAt = timestamp
         return .frame
     }

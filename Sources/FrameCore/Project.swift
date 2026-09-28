@@ -140,7 +140,8 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
     public var end: MediaTime { start + duration }
     /// How much of the source this clip consumes. Equal to `duration` at 1x.
     public var sourceLength: MediaTime { speed == 1 ? duration : duration.scaled(by: speed) }
-    public static let speedRange: ClosedRange<Double> = 0.25...4
+    /// 0.1x–10x: presets up to 5x, and any value typed in between.
+    public static let speedRange: ClosedRange<Double> = 0.1...10
     public init(mediaID: UUID? = nil, name: String, kind: MediaKind, lane: Lane, start: MediaTime,
                 sourceStart: MediaTime = .zero, duration: MediaTime, speed: Double = 1, linkID: UUID? = nil) {
         self.mediaID = mediaID; self.name = name; self.kind = kind; self.lane = lane; self.start = start
@@ -225,7 +226,7 @@ public struct Project: Codable, Hashable, Sendable {
     public func validated() throws -> Project {
         guard version == 2 else { throw EditError("This project version is not supported (\(version)).") }
         guard FrameRate.supported.contains(frameRate) else { throw EditError("Unsupported project frame rate.") }
-        guard [1080,2160].contains(outputResolution) else { throw EditError("Choose Full HD or 4K output quality.") }
+        guard OutputQuality.resolutions.contains(outputResolution) else { throw EditError("Choose an output quality from HD to 4K.") }
         guard Set(media.map(\.id)).count == media.count, Set(clips.map(\.id)).count == clips.count else { throw EditError("Duplicate identifiers in project.") }
         guard Self.trackCounts.contains(videoTrackCount), Self.trackCounts.contains(audioTrackCount) else { throw EditError("Invalid track count.") }
         for media in media {
@@ -240,7 +241,7 @@ public struct Project: Codable, Hashable, Sendable {
                   clip.end.seconds < 7 * 86400,
                   clip.lane.isVideo == (clip.kind != .audio), hasLane(clip.lane) else { throw EditError("Invalid clip timing or track.") }
             // Bound speed before any multiplication: sourceLength feeds Int64 arithmetic below.
-            guard clip.speed.isFinite, Clip.speedRange.contains(clip.speed) else { throw EditError("Clip speed must be between 25% and 400%.") }
+            guard clip.speed.isFinite, Clip.speedRange.contains(clip.speed) else { throw EditError("Clip speed must be between 0.1x and 10x.") }
             guard clip.kind == .video || clip.kind == .audio || clip.speed == 1 else { throw EditError("Only video and audio clips can be retimed.") }
             guard clip.start == frameRate.quantize(clip.start), clip.duration == frameRate.quantize(clip.duration) else { throw EditError("Clip timing is off the project frame grid.") }
             if clip.kind != .text {

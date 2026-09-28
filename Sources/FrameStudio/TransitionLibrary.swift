@@ -11,12 +11,14 @@ struct SidePanel: View {
         VStack(alignment:.leading,spacing:0) {
             HStack(spacing:16) {
                 ForEach(EditorStore.SidePanel.allCases,id:\.self) { tab in
+                    let tip = tab == .inspector ? "Settings of the selected clip" : "Transitions: drag onto a cut"
                     Button { store.sidePanel = tab } label: {
-                        Text(tab.rawValue).font(.system(size:10,weight:.bold)).tracking(1.7)
+                        Text(LocalizedStringKey(tab.rawValue)).font(.system(size:10,weight:.bold)).tracking(1.7)
                             .foregroundStyle(store.sidePanel == tab ? Color.primary : Theme.muted)
                             .padding(.bottom,4)
                             .overlay(alignment:.bottom) { Rectangle().fill(store.sidePanel == tab ? Theme.accent : .clear).frame(height:2) }
                     }.buttonStyle(.plain).accessibilityAddTraits(store.sidePanel == tab ? .isSelected : [])
+                    .helpTip(tip,.below)
                 }
                 Spacer()
                 Image(systemName:store.sidePanel == .inspector ? "slider.horizontal.3" : "square.on.square").foregroundStyle(Theme.muted)
@@ -53,7 +55,7 @@ struct TransitionLibrary: View {
                 }
                 ForEach(TransitionKind.Category.allCases,id:\.self) { category in
                     VStack(alignment:.leading,spacing:8) {
-                        Text(category.rawValue.uppercased()).font(.system(size:9,weight:.bold)).tracking(1.4).foregroundStyle(Theme.muted)
+                        Text(category.displayName.uppercased()).font(.system(size:9,weight:.bold)).tracking(1.4).foregroundStyle(Theme.muted)
                         LazyVGrid(columns:columns,spacing:12) {
                             ForEach(TransitionKind.allCases.filter { $0.category == category }) { kind in
                                 Button { apply(kind) } label: { tile(kind) }
@@ -63,7 +65,7 @@ struct TransitionLibrary: View {
                                     // media cards. A SwiftUI Button's press must not consume the drag.
                                     .overlay { TransitionDragHandle(kind:kind,apply:{ apply(kind) }).accessibilityHidden(true) }
                                     .help(store.selectedClip == nil ? "Drag onto the timeline" : "Click to add to the selected clip's \(atEnd ? "end" : "start") · or drag onto the timeline")
-                                    .accessibilityLabel("\(kind.name) transition")
+                                    .accessibilityLabel("\(kind.displayName) transition")
                             }
                         }
                     }
@@ -78,7 +80,7 @@ struct TransitionLibrary: View {
     }
     private func apply(_ kind: TransitionKind) {
         guard let edge = store.transitionEdge(ofSelectedClipAtEnd:atEnd) else {
-            store.status = "Select a video, image or title clip first, or drag \(kind.name) onto the timeline"; return
+            store.status = String(localized:"Select a video, image or title clip first, or drag \(kind.displayName) onto the timeline"); return
         }
         store.applyTransition(kind,from:edge.from,to:edge.to)
     }
@@ -96,7 +98,7 @@ struct TransitionLibrary: View {
             .aspectRatio(16/9,contentMode:.fit)
             .clipShape(RoundedRectangle(cornerRadius:4))
             .overlay(RoundedRectangle(cornerRadius:4).stroke(hovered == kind ? Theme.accent : .white.opacity(0.12),lineWidth:1))
-            Text(kind.name).font(.system(size:10,weight:.medium)).lineLimit(1)
+            Text(kind.displayName).font(.system(size:10,weight:.medium)).lineLimit(1)
         }.contentShape(Rectangle())
     }
 }

@@ -190,7 +190,9 @@ public enum FrameRenderer {
         guard var image = context.makeImage() else { throw EditError("Cannot create text image.") }
         if style.hasOutline || style.hasShadow { image = try withEffects(image,drawnIn:context,style,scale:scale) }
         let drawn = CIImage(cgImage:image)
-        return scale == 1 ? drawn : drawn.transformed(by:CGAffineTransform(scaleX:1/scale,y:1/scale))
+        // Back to the 1080 layout's size exactly, also for scales such as 4/3 (QHD) whose
+        // pixel sizes round: the picture then fits the same box at every quality.
+        return scale == 1 ? drawn : drawn.transformed(by:CGAffineTransform(scaleX:CGFloat(width)/CGFloat(image.width),y:CGFloat(height)/CGFloat(image.height)))
     }
     /// The letters with their outline under them and one shadow under both (never one per part:
     /// the shadow is cast by the finished picture). `context` holds the letters' pixels.

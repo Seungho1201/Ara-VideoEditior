@@ -30,7 +30,7 @@ import FrameMedia
     /// The timeline toolbar's rectangle select: the next drag across the tracks selects the clips
     /// it covers, without Shift, and then it switches itself off. Esc switches it off too.
     @Published var dragSelectArmed = false {
-        didSet { if dragSelectArmed, !oldValue { status = "Drag across the timeline to select clips · Esc to cancel" } }
+        didSet { if dragSelectArmed, !oldValue { status = String(localized:"Drag across the timeline to select clips · Esc to cancel") } }
     }
     /// Every selected clip: the one above, or several picked with Shift on the timeline. Each
     /// stands for its linked group.
@@ -77,6 +77,8 @@ import FrameMedia
     @Published var selectedTransitionID: UUID?
     enum SidePanel: String, CaseIterable { case inspector = "INSPECTOR", transitions = "TRANSITIONS" }
     @Published var sidePanel: SidePanel = .inspector
+    /// Help mode: callouts over the editor (the timeline's ? button).
+    @Published var showHelp = false
     @Published var selectedMediaID: UUID?
     /// The playhead has its own observable. It moves up to 60 times a second while scrubbing and
     /// 30 while playing; published through the store, every move re-evaluated the whole editor
@@ -94,6 +96,16 @@ import FrameMedia
     @Published var scrubHaptics = UserDefaults.standard.object(forKey:"timeline.scrubHaptics") as? Bool ?? true {
         didSet { UserDefaults.standard.set(scrubHaptics,forKey:"timeline.scrubHaptics") }
     }
+    /// Kinds of haptic turned off in Settings (all on by default); `scrubHaptics` turns them all off.
+    @Published var hapticsOff: Set<HapticKind> = Set((UserDefaults.standard.stringArray(forKey:"haptics.off") ?? []).compactMap(HapticKind.init)) {
+        didSet { UserDefaults.standard.set(hapticsOff.map(\.rawValue).sorted(),forKey:"haptics.off") }
+    }
+    /// How often skimming pulses: every frame change up to the full rate, 90 % or 70 % of it.
+    @Published var skimHapticStrength = ScrubFeedbackCadence.Strength(rawValue:UserDefaults.standard.string(forKey:"haptics.skimStrength") ?? "") ?? .standard {
+        didSet { UserDefaults.standard.set(skimHapticStrength.rawValue,forKey:"haptics.skimStrength") }
+    }
+    /// Whether this kind of haptic plays.
+    func haptics(_ kind: HapticKind) -> Bool { scrubHaptics && !hapticsOff.contains(kind) }
     @Published var isPlaying = false
     @Published var isBuilding = false
     @Published var isImporting = false
@@ -109,7 +121,7 @@ import FrameMedia
     var fontFolder = FontLibrary.folder
     var exportHeight: Int { project.outputResolution }
     @Published var message: String?
-    @Published var status = "Import media to start editing"
+    @Published var status = String(localized:"Import media to start editing")
     @Published var thumbnails: [UUID:NSImage] = [:]
     @Published var waveforms: [UUID:[Float]] = [:]
     @Published var missing: Set<UUID> = []
@@ -228,7 +240,7 @@ import FrameMedia
             }
         }
     }
-    func report(_ error: Error) { if !(error is CancellationError) { message = error.localizedDescription; status = "Action could not be completed" } }
+    func report(_ error: Error) { if !(error is CancellationError) { message = error.localizedDescription; status = String(localized:"Action could not be completed") } }
     @discardableResult func edit(_ name: String, _ operation: (inout Project) throws -> Void) -> Bool {
         commitPendingEdits()
         do {
@@ -368,6 +380,27 @@ import FrameMedia
         guard let id = selectedClipID else { return }
         edit("Change speed") { try Editing.setSpeed(id,to:speed,in:&$0) }
     }
+    /// The toolbar and inspector presets.
+    static let speedPresets: [Double] = [0.25,0.5,0.75,1,1.5,2,3,4,5]
+    /// A typed speed: "2.5", "2.5x", "2,5" or "250%". Nil when it is not a number in range.
+    static func parseSpeed(_ text: String) -> Double? {
+        var t = text.trimmingCharacters(in:.whitespaces).lowercased().replacingOccurrences(of:",",with:".")
+        var scale = 1.0
+        if t.hasSuffix("%") { t.removeLast(); scale = 0.01 }
+        else if t.hasSuffix("x") || t.hasSuffix("×") { t.removeLast() }
+        guard let value = Double(t.trimmingCharacters(in:.whitespaces)), value.isFinite else { return nil }
+        // Two decimals, as the speed is shown.
+        let speed = (value*scale*100).rounded()/100
+        return Clip.speedRange.contains(speed) ? speed : nil
+    }
+    /// Applies a typed speed to the selected clip. False (with a note) when it is not usable.
+    @discardableResult func setCustomSpeed(_ text: String) -> Bool {
+        guard let speed = Self.parseSpeed(text) else {
+            status = String(localized:"Enter a speed from 0.1x to 10x"); NSSound.beep(); return false
+        }
+        if abs(speed-selectedSpeed) > 0.0001 { setSpeed(speed) }
+        return true
+    }
     /// Slider path: every sample resolves against the snapshot the drag started from, so
     /// dragging back to where you began restores the clip exactly instead of ratcheting down.
     func setSpeedInteractively(_ speed: Double) {
@@ -379,7 +412,7 @@ import FrameMedia
         if selectedTransitionID != nil { removeSelectedTransition(); return }
         if hasMultipleSelection {
             let ids = selectionForEditing, count = selectedGroupCount
-            if edit("Delete clips",{ Editing.delete(ids,from:&$0) }) { selectClips([]); status = "Deleted \(count) clips · ⌘Z to undo" }
+            if edit("Delete clips",{ Editing.delete(ids,from:&$0) }) { selectClips([]); status = String(localized:"Deleted \(count) clips")+undoHint }
             return
         }
         guard let id = selectedClipID else { return }; if edit("Delete clip",{ Editing.delete(id,from:&$0) }) { selectedClipID = nil }
@@ -397,7 +430,7 @@ import FrameMedia
         guard !ids.isEmpty, !isExporting else { return }
         guard copySelection() else { return }                          // nothing is deleted unless it was copied
         if edit(count > 1 ? "Cut clips" : "Cut clip",{ Editing.delete(ids,from:&$0) }) {
-            selectClips([]); status = count > 1 ? "Cut \(count) clips · ⌘V at playhead" : "Cut clip · ⌘V at playhead"
+            selectClips([]); status = count > 1 ? String(localized:"Cut \(count) clips · ⌘V at playhead") : String(localized:"Cut clip · ⌘V at playhead")
         }
     }
     var selectedTransition: FrameCore.Transition? { selectedTransitionID.flatMap { id in project.transitions.first { $0.id == id } } }
@@ -416,7 +449,7 @@ import FrameMedia
             id = try Editing.setTransition(kind,direction:existing?.direction ?? .left,duration:existing?.duration,from:from,to:to,in:&$0)
         }), let id {
             selectClips([]); selectedTransitionID = id; selectedGap = nil
-            status = "\(kind.name) added · Delete to remove"
+            status = String(localized:"\(kind.displayName) added · Delete to remove")
             return true
         }
         return false
@@ -437,7 +470,7 @@ import FrameMedia
         guard !isExporting, project.transitions.contains(where: { $0.id == id }) else { return }
         if edit("Transition length",{ try Editing.updateTransition(id,duration:duration,in:&$0) }),
            let transition = project.transitions.first(where: { $0.id == id }) {
-            status = "\(transition.kind.name) · \(String(format:"%.2f s",transition.duration.seconds))"
+            status = "\(transition.kind.displayName) · \(String(format:String(localized:"%.2f s"),transition.duration.seconds))"
         }
     }
     func removeSelectedTransition() {
@@ -453,8 +486,8 @@ import FrameMedia
             guard item.setData(try payload.encoded(),forType:Self.clipPasteboardType) else { throw EditError("Cannot copy this clip.") }
             pasteboard.clearContents()
             guard pasteboard.writeObjects([item]) else { throw EditError("Cannot write to the clipboard.") }
-            status = payload.version == 2 ? "Copied \(selectedGroupCount) clips · ⌘V at playhead"
-                   : payload.clips.count == 2 ? "Copied clip and linked audio · ⌘V at playhead" : "Copied clip · ⌘V at playhead"
+            status = payload.version == 2 ? String(localized:"Copied \(selectedGroupCount) clips · ⌘V at playhead")
+                   : payload.clips.count == 2 ? String(localized:"Copied clip and linked audio · ⌘V at playhead") : String(localized:"Copied clip · ⌘V at playhead")
             return true
         } catch { report(error); return false }
     }
@@ -473,8 +506,8 @@ import FrameMedia
                 if project.media != oldMedia { restoreAccess(); rebuild() }
                 revealPlayheadRequest += 1
                 let lane = project.clip(inserted.anchor)?.lane.rawValue ?? ""
-                status = inserted.raised > 0 ? "Pasted on \(lane) at \(timecode): the track below was in use here · ⌘Z to undo"
-                                             : "Pasted clip at \(timecode) · ⌘Z to undo"
+                status = (inserted.raised > 0 ? String(localized:"Pasted on \(lane) at \(timecode): the track below was in use here")
+                                              : String(localized:"Pasted clip at \(timecode)"))+undoHint
             }
         } catch { report(error) }
     }
@@ -486,25 +519,25 @@ import FrameMedia
     }
     @discardableResult func addMedia(_ id: UUID, lane: Lane? = nil, at time: MediaTime? = nil) -> Bool {
         guard !isExporting, let media = project.media.first(where: { $0.id == id }) else { return false }
-        guard !missing.contains(id) else { message = "Relink this source in the library before adding it."; return false }
+        guard !missing.contains(id) else { message = String(localized:"Relink this source in the library before adding it."); return false }
         let target = lane ?? (media.kind == .audio ? .a1 : .v1)
         let end = project.clips.filter { $0.lane == target || (media.hasAudio && $0.lane == target.paired) }.map(\.end).max() ?? .zero
         var result: UUID?
         guard edit("Add clip", { result = try Editing.add(mediaID:id,lane:target,at:time ?? end,to:&$0) }) else { return false }
-        selectedClipID = result; status = "Added \(media.name) to \(target.rawValue)"
+        selectedClipID = result; status = String(localized:"Added \(media.name) to \(target.rawValue)")
         return true
     }
     /// A new empty track above the top video track, or below the bottom audio track.
     func addTrack(_ kind: Lane.Kind) {
         var added: Lane?
         if edit(kind == .video ? "Add video track" : "Add audio track", { added = try Editing.addTrack(kind,to:&$0) }), let added {
-            status = "Added \(added.rawValue) · ⌘Z to undo"
+            status = String(localized:"Added \(added.rawValue)")+undoHint
         }
     }
     /// Removes an empty added track; the tracks above move down one number.
     func removeTrack(_ lane: Lane) {
         if edit("Remove \(lane.rawValue)", { try Editing.removeTrack(lane,from:&$0) }) {
-            status = "Removed \(lane.rawValue) · ⌘Z to undo"
+            status = String(localized:"Removed \(lane.rawValue)")+undoHint
         }
     }
     func addText() {
@@ -592,7 +625,7 @@ import FrameMedia
         guard !project.clips.isEmpty else { player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false; return }
         guard missing.isEmpty else {
             player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false
-            status = "\(missing.count) missing files · Use Relink in the library"; return
+            status = String(localized:"\(missing.count) missing files · Use Relink in the library"); return
         }
         let snapshot = project, mediaURLs = urls, pictures = proxies
         isBuilding = true
@@ -606,14 +639,14 @@ import FrameMedia
                 let item = bundle.playerItem()
                 itemObservation = item.observe(\.status,options:[.new]) { [weak self] item,_ in
                     if item.status == .failed {
-                        let text = item.error?.localizedDescription ?? "Preview failed."
+                        let text = item.error?.localizedDescription ?? String(localized:"Preview failed.")
                         Task { @MainActor in self?.message = text }
                     }
                 }
                 player.replaceCurrentItem(with:item); isBuilding = false; seek(playhead)
                 resumeAfterBuild = false
                 if resume { player.play(); isPlaying = true }
-                status = "\(project.clips.filter { $0.kind != .audio || $0.linkID == nil }.count) clips · SDR Rec.709"
+                status = String(localized:"\(project.clips.filter { $0.kind != .audio || $0.linkID == nil }.count) clips · SDR Rec.709")
             } catch {
                 guard revision == token else { return }; isBuilding = false; resumeAfterBuild = false
                 if !(error is CancellationError) { player.replaceCurrentItem(with:nil); report(error) }
@@ -621,14 +654,14 @@ import FrameMedia
         }
     }
     func chooseImport() {
-        let panel = NSOpenPanel(); panel.title = "Import media"; panel.allowsMultipleSelection = true
+        let panel = NSOpenPanel(); panel.title = String(localized:"Import media"); panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.movie,.audio,.png,.jpeg,.tiff]
         if panel.runModal() == .OK { importFiles(panel.urls) }
     }
     /// `applyToSelection` for a title's own Add Font… button; File > Add Fonts… only adds.
     func chooseFonts(applyToSelection: Bool = false) {
-        let panel = NSOpenPanel(); panel.title = "Add fonts"; panel.prompt = "Add"; panel.allowsMultipleSelection = true
-        panel.message = "Choose font files (TTF, OTF, TTC) or the ZIP archive they came in."
+        let panel = NSOpenPanel(); panel.title = String(localized:"Add fonts"); panel.prompt = String(localized:"Add"); panel.allowsMultipleSelection = true
+        panel.message = String(localized:"Choose font files (TTF, OTF, TTC) or the ZIP archive they came in.")
         panel.allowedContentTypes = [.zip] + FontLibrary.fileExtensions.sorted().compactMap { UTType(filenameExtension:$0) }
         if panel.runModal() == .OK { addFonts(panel.urls,applyToSelection:applyToSelection) }
     }
@@ -638,8 +671,8 @@ import FrameMedia
     /// closest to the title's weight and slant.
     func addFonts(_ urls: [URL], applyToSelection: Bool) {
         guard !urls.isEmpty else { return }
-        guard !isAddingFonts else { message = "Fonts are still being added. Add these again when that finishes."; return }
-        isAddingFonts = true; status = "Adding fonts…"
+        guard !isAddingFonts else { message = String(localized:"Fonts are still being added. Add these again when that finishes."); return }
+        isAddingFonts = true; status = String(localized:"Adding fonts…")
         let target = applyToSelection ? selectedClip.flatMap { $0.kind == .text ? $0.id : nil } : nil
         let folder = fontFolder, session = session
         Task { [weak self] in
@@ -652,7 +685,7 @@ import FrameMedia
                 fontsRevision += 1
                 let names = Set(imported.added.map(\.postScriptName)), count = imported.added.count
                 let families = Array(NSOrderedSet(array:imported.added.map(\.familyDisplayName))) as? [String] ?? []
-                status = "Added \(count) font\(count == 1 ? "" : "s") · \(families.joined(separator:", "))"
+                status = String(localized:"Added \(count) fonts · \(families.joined(separator:", "))")
                 redrawTitles { names.contains($0.style.fontName) }
                 var applied = false
                 // Only in the document the font was asked for, and not when the title was already
@@ -667,8 +700,8 @@ import FrameMedia
                     applied = true
                 }
                 var notes: [String] = []
-                if !applied { notes.append("Added \(families.joined(separator:", ")) (\(count) style\(count == 1 ? "" : "s")). Choose it from a title's Font menu.") }
-                if !imported.skipped.isEmpty { notes.append("Some files were not added:\n" + imported.skipped.joined(separator:"\n")) }
+                if !applied { notes.append(String(localized:"Added \(families.joined(separator:", ")) (\(count) styles). Choose it from a title's Font menu.")) }
+                if !imported.skipped.isEmpty { notes.append(String(localized:"Some files were not added:")+"\n" + imported.skipped.joined(separator:"\n")) }
                 if !notes.isEmpty { message = notes.joined(separator:"\n\n") }
             }
         }
@@ -701,7 +734,7 @@ import FrameMedia
         if !fonts.isEmpty { addFonts(fonts,applyToSelection:false) }
         let files = files.filter { !FontLibrary.accepts($0) }
         guard !files.isEmpty else { return }
-        guard !isImporting else { message = "An import is already running. Wait for it to finish."; return }
+        guard !isImporting else { message = String(localized:"An import is already running. Wait for it to finish."); return }
         showLauncher = false
         for url in files { hold(url) }
         let projectID = project.id; isImporting = true
@@ -711,7 +744,7 @@ import FrameMedia
             for url in files {
                 guard !Task.isCancelled, project.id == projectID else { break }
                 if let existing = project.media.first(where: { $0.path == url.path }) { selectedMediaID = existing.id; continue }
-                status = "Reading \(url.lastPathComponent)…"
+                status = String(localized:"Reading \(url.lastPathComponent)…")
                 do {
                     let media = try await library.inspect(url)
                     guard !Task.isCancelled, project.id == projectID else { break }
@@ -719,7 +752,7 @@ import FrameMedia
                     analyze(media,url:url); ensureProxies()
                 } catch { if !(error is CancellationError) { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") } }
             }
-            if project.id == projectID { isImporting = false; status = "\(project.media.count) media items"; if !errors.isEmpty { message = errors.joined(separator:"\n\n") } }
+            if project.id == projectID { isImporting = false; status = String(localized:"\(project.media.count) media items"); if !errors.isEmpty { message = errors.joined(separator:"\n\n") } }
         }
     }
     private func analyze(_ media: MediaReference, url: URL) {
@@ -731,7 +764,7 @@ import FrameMedia
                 guard !Task.isCancelled, project.id == projectID, project.media.contains(where: { $0.id == media.id }) else { return }
                 if let data = analysis.thumbnail { thumbnails[media.id] = NSImage(data:data) }
                 waveforms[media.id] = analysis.peaks
-            } catch { if !(error is CancellationError), project.id == projectID { status = "Analysis unavailable for \(media.name): \(error.localizedDescription)" } }
+            } catch { if !(error is CancellationError), project.id == projectID { status = String(localized:"Analysis unavailable for \(media.name): \(error.localizedDescription)") } }
         }
     }
     private func restoreAccess() {
@@ -825,7 +858,7 @@ import FrameMedia
                 // Stopped because its source left the project: not a failure, move on.
                 if !(error is CancellationError) {
                     proxyFailures.insert(key)
-                    status = "FHD preview media unavailable for \(name) · Previewing the original"
+                    status = String(localized:"FHD preview media unavailable for \(name) · Previewing the original")
                 }
             }
             mapProxies()
@@ -842,7 +875,7 @@ import FrameMedia
         }
     }
     func relink(_ media: MediaReference) {
-        let panel = NSOpenPanel(); panel.title = "Relink \(media.name)"
+        let panel = NSOpenPanel(); panel.title = String(localized:"Relink \(media.name)")
         guard panel.runModal() == .OK, let url = panel.url else { return }; hold(url)
         let projectID = project.id
         Task {
@@ -860,9 +893,9 @@ import FrameMedia
     }
     func confirmDiscard() -> Bool {
         guard dirty else { return true }
-        let alert = NSAlert(); alert.messageText = "Save changes to \(project.name)?"
-        alert.informativeText = "Your source media files are never modified."
-        alert.addButton(withTitle:"Save"); alert.addButton(withTitle:"Cancel"); alert.addButton(withTitle:"Discard Changes")
+        let alert = NSAlert(); alert.messageText = String(localized:"Save changes to \(project.name)?")
+        alert.informativeText = String(localized:"Your source media files are never modified.")
+        alert.addButton(withTitle:String(localized:"Save")); alert.addButton(withTitle:String(localized:"Cancel")); alert.addButton(withTitle:String(localized:"Discard Changes"))
         switch alert.runModal() {
         case .alertFirstButtonReturn: return save()
         case .alertThirdButtonReturn: return true
@@ -902,7 +935,7 @@ import FrameMedia
         commitPendingEdits()
         guard !isExporting, !isCapturingSnapshot, confirmDiscard() else { return false }
         resetSession(); project = next; saved = nil; documentURL = nil
-        status = "New project · \(next.aspectRatio.dimensions(resolution:next.outputResolution)) · \(next.frameRate.label) fps"
+        status = String(localized:"New project · \(next.aspectRatio.dimensions(resolution:next.outputResolution)) · \(next.frameRate.label) fps")
         showNewProjectSheet = false; showLauncher = false
         return true
     }
@@ -910,7 +943,7 @@ import FrameMedia
         commitPendingEdits()
         var target = documentURL
         if target == nil || `as` {
-            let panel = NSSavePanel(); panel.title = "Save Ara project"
+            let panel = NSSavePanel(); panel.title = String(localized:"Save Ara project")
             panel.allowedContentTypes = [UTType(exportedAs:"com.framestudio.project",conformingTo:.json)]
             panel.nameFieldStringValue = project.name+".framestudio"
             guard panel.runModal() == .OK, let url = panel.url else { return false }; target = url
@@ -921,7 +954,7 @@ import FrameMedia
             try ProjectFile.encode(next).write(to:target,options:.atomic)
             project = next; saved = project; documentURL = target
             NSDocumentController.shared.noteNewRecentDocumentURL(target); registry.record(target)
-            status = "Saved \(target.lastPathComponent)"; return true
+            status = String(localized:"Saved \(target.lastPathComponent)"); return true
         } catch { report(error); return false }
     }
     /// Returning to the start screen keeps the current project loaded; choosing another one
@@ -943,11 +976,11 @@ import FrameMedia
     func addProjects(_ urls: [URL]) {
         Task {
             let added = await registry.add(from:urls)
-            if added == 0 { message = "No new .framestudio projects were found there." }
+            if added == 0 { message = String(localized:"No new .framestudio projects were found there.") }
         }
     }
     func chooseOpen() {
-        let panel = NSOpenPanel(); panel.title = "Open project"
+        let panel = NSOpenPanel(); panel.title = String(localized:"Open project")
         panel.allowedContentTypes = [UTType(exportedAs:"com.framestudio.project",conformingTo:.json),.json]
         if panel.runModal() == .OK, let url = panel.url { openProject(url) }
     }
@@ -958,10 +991,10 @@ import FrameMedia
             let scope = url.startAccessingSecurityScopedResource(); defer { if scope { url.stopAccessingSecurityScopedResource() } }
             let loaded = try ProjectFile.decode(Data(contentsOf:url))
             resetSession(); project = loaded; documentURL = url; restoreAccess(); saved = project
-            if missing.isEmpty { rebuild() } else { status = "\(missing.count) sources need relinking · Use Relink in the library" }
+            if missing.isEmpty { rebuild() } else { status = String(localized:"\(missing.count) sources need relinking · Use Relink in the library") }
             let fonts = missingFonts
             if !fonts.isEmpty {
-                message = "This project uses fonts that aren't on this Mac: \(fonts.joined(separator:", ")). Titles in them are shown in Helvetica Neue Bold until you add the fonts (Add Font… in a title's inspector)."
+                message = String(localized:"This project uses fonts that aren't on this Mac: \(fonts.joined(separator:", ")). Titles in them are shown in Helvetica Neue Bold until you add the fonts (Add Font… in a title's inspector).")
             }
             NSDocumentController.shared.noteNewRecentDocumentURL(url); registry.record(url)
             showLauncher = false
@@ -973,15 +1006,15 @@ import FrameMedia
         pause(); seek(time)
         let snapshot = project, mediaURLs = urls
         let timecode = snapshot.frameRate.timecode(time)
-        let panel = NSSavePanel(); panel.title = "Save timeline snapshot"; panel.allowedContentTypes = [.png]
-        panel.message = "Current composed frame · \(timecode) · \(snapshot.aspectRatio.dimensions()) PNG"
+        let panel = NSSavePanel(); panel.title = String(localized:"Save timeline snapshot"); panel.allowedContentTypes = [.png]
+        panel.message = String(localized:"Current composed frame · \(timecode) · \(snapshot.aspectRatio.dimensions()) PNG")
         panel.nameFieldStringValue = snapshot.name+"-"+timecode.replacingOccurrences(of:":",with:"-")+".png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard !mediaURLs.values.contains(where: { $0.standardizedFileURL.resolvingSymlinksInPath() == url.standardizedFileURL.resolvingSymlinksInPath() }) else {
-            message = "Choose a different filename. A snapshot cannot replace source media."; return
+            message = String(localized:"Choose a different filename. A snapshot cannot replace source media."); return
         }
         let token = UUID(); snapshotID = token; isCapturingSnapshot = true
-        status = "Saving snapshot at \(timecode)…"
+        status = String(localized:"Saving snapshot at \(timecode)…")
         snapshotTask = Task { [self] in
             do {
                 let bundle = try await builder.build(snapshot,urls:mediaURLs)
@@ -989,43 +1022,43 @@ import FrameMedia
                 try await snapshotExporter.export(bundle,at:time,to:url)
                 guard snapshotID == token else { return }
                 isCapturingSnapshot = false; snapshotTask = nil; snapshotID = nil
-                status = "Snapshot saved · \(url.lastPathComponent) · \(snapshot.aspectRatio.dimensions())"
+                status = String(localized:"Snapshot saved · \(url.lastPathComponent) · \(snapshot.aspectRatio.dimensions())")
             } catch {
                 guard snapshotID == token else { return }
                 isCapturingSnapshot = false; snapshotTask = nil; snapshotID = nil
-                if error is CancellationError { status = "Snapshot cancelled" } else { report(error) }
+                if error is CancellationError { status = String(localized:"Snapshot cancelled") } else { report(error) }
             }
         }
     }
     func chooseExport(aspectRatio: VideoAspectRatio, frameRate: FrameRate, height: Int) {
         commitPendingEdits()
         guard !project.clips.isEmpty, !isExporting else { return }
-        let panel = NSSavePanel(); panel.title = "Export H.264 / AAC MP4"; panel.allowedContentTypes = [.mpeg4Movie]
+        let panel = NSSavePanel(); panel.title = String(localized:"Export H.264 / AAC MP4"); panel.allowedContentTypes = [.mpeg4Movie]
         panel.nameFieldStringValue = project.name+".mp4"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard !urls.values.contains(where: { $0.standardizedFileURL.resolvingSymlinksInPath() == url.standardizedFileURL.resolvingSymlinksInPath() }) else {
-            message = "Choose a different output filename. Export cannot replace source media."; return
+            message = String(localized:"Choose a different output filename. Export cannot replace source media."); return
         }
         // Canceling the destination panel leaves the project and export preset untouched.
         do { try setVideoSettings(aspectRatio:aspectRatio,frameRate:frameRate,resolution:height) }
         catch { report(error); return }
         let snapshot = project, mediaURLs = urls
-        pause(); isExporting = true; exportProgress = 0; status = "Preparing export…"
+        pause(); isExporting = true; exportProgress = 0; status = String(localized:"Preparing export…")
         exportTask = Task { [self] in
             do {
                 let bundle = try await builder.build(snapshot,urls:mediaURLs,height:height)
                 try await exporter.export(bundle,to:url) { [weak self] value in
                     await MainActor.run { self?.exportProgress = value }
                 }
-                status = "Exported \(url.lastPathComponent)"; isExporting = false
+                status = String(localized:"Exported \(url.lastPathComponent)"); isExporting = false
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             } catch {
                 isExporting = false
-                if error is CancellationError { status = "Export cancelled · Partial file removed" } else { report(error) }
+                if error is CancellationError { status = String(localized:"Export cancelled · Partial file removed") } else { report(error) }
             }
         }
     }
-    func cancelExport() { exportTask?.cancel(); status = "Cancelling export…" }
+    func cancelExport() { exportTask?.cancel(); status = String(localized:"Cancelling export…") }
 }
 
 @MainActor final class PlayheadClock: ObservableObject {

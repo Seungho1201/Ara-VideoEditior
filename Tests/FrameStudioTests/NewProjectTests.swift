@@ -64,7 +64,7 @@ final class NewProjectTests: XCTestCase {
             XCTAssertThrowsError(try store.createProject(name:name,aspectRatio:.portrait,frameRate:.init(60),resolution:2160))
         }
         XCTAssertThrowsError(try store.createProject(name:"Invalid fps",aspectRatio:.portrait,frameRate:.init(0),resolution:2160))
-        XCTAssertThrowsError(try store.createProject(name:"Invalid quality",aspectRatio:.portrait,frameRate:.init(60),resolution:720))
+        XCTAssertThrowsError(try store.createProject(name:"Invalid quality",aspectRatio:.portrait,frameRate:.init(60),resolution:900))
         XCTAssertEqual(store.project,before)
         XCTAssertEqual(store.session,session)
         XCTAssertTrue(store.showNewProjectSheet)

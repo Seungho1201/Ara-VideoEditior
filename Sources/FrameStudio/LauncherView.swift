@@ -7,6 +7,7 @@ import FrameMedia
 struct LauncherView: View {
     @ObservedObject var store: EditorStore
     @ObservedObject var registry: ProjectRegistry
+    @ObservedObject private var shortcuts = ShortcutSettings.shared
     @State private var selection: String?
     @State private var query = ""
     @State private var dropTargeted = false
@@ -60,9 +61,9 @@ struct LauncherView: View {
             Text("Ara").font(.system(size:28,weight:.bold)).tracking(1)
             Text("Local video editing on your Mac").font(.system(size:12)).foregroundStyle(Theme.muted).padding(.top,4)
             VStack(spacing:10) {
-                // ⌘N and ⌘O come from the File menu, which stays live on this screen.
-                launchButton("New Project",detail:"Set up a new timeline  ⌘N",icon:"plus.rectangle.on.rectangle",prominent:true) { store.newProject() }
-                launchButton("Open…",detail:"Choose a .framestudio file  ⌘O",icon:"doc") { store.chooseOpen() }
+                // The File menu's New and Open shortcuts stay live on this screen.
+                launchButton("New Project",detail:"Set up a new timeline  \(shortcuts.label(.newProject))",icon:"plus.rectangle.on.rectangle",prominent:true) { store.newProject() }
+                launchButton("Open…",detail:"Choose a .framestudio file  \(shortcuts.label(.openProject))",icon:"doc") { store.chooseOpen() }
                 launchButton("Add Project…",detail:"Name, quality, aspect ratio and fps",icon:"folder.badge.plus") { store.newProject() }
                 if store.hasOpenWork {
                     launchButton("Back to \(store.project.name)",detail:store.dirty ? "Unsaved changes" : "Continue editing",icon:"arrow.uturn.backward") { store.resumeEditing() }
@@ -75,7 +76,7 @@ struct LauncherView: View {
         }.padding(28)
     }
 
-    private func launchButton(_ title:String,detail:String,icon:String,prominent:Bool = false,action:@escaping () -> Void) -> some View {
+    private func launchButton(_ title:LocalizedStringKey,detail:LocalizedStringKey,icon:String,prominent:Bool = false,action:@escaping () -> Void) -> some View {
         Button(action:action) {
             HStack(spacing:12) {
                 Image(systemName:icon).font(.system(size:16,weight:.medium)).frame(width:24)
@@ -89,7 +90,7 @@ struct LauncherView: View {
             .foregroundStyle(prominent ? Theme.background : Color.primary)
             .background(prominent ? Theme.accent : Theme.raised,in:RoundedRectangle(cornerRadius:8))
             .contentShape(RoundedRectangle(cornerRadius:8))
-        }.buttonStyle(.plain).accessibilityLabel(title)
+        }.buttonStyle(.plain).accessibilityLabel(Text(title))
     }
 
     private var projects: some View {

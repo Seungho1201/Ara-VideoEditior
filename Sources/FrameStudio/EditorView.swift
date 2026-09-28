@@ -16,6 +16,8 @@ import FrameCore
 
 struct EditorView: View {
     @ObservedObject var store: EditorStore
+    @ObservedObject private var shortcuts = ShortcutSettings.shared
+    @State private var customSpeed = false
     @State private var iconHovered = false
     var body: some View {
         Group {
@@ -45,6 +47,8 @@ struct EditorView: View {
                 timeline.frame(minHeight:345,idealHeight:345)
             }
         }
+        .overlay { if store.showHelp { HelpOverlay(isShown:$store.showHelp) } }
+        .animation(.easeOut(duration:0.15),value:store.showHelp)
     }
     private var toolbar: some View {
         HStack(spacing:14) {
@@ -59,46 +63,64 @@ struct EditorView: View {
             }
             .buttonStyle(.plain).onHover { iconHovered = $0 }
             .disabled(store.isExporting || store.isCapturingSnapshot)
-            .help("Projects  ⇧⌘1").accessibilityLabel("Back to projects")
+            .help("Projects  \(shortcuts.label(.startScreen))").accessibilityLabel("Back to projects")
+            .helpTip("Projects",.below,shortcut:shortcuts.label(.startScreen))
             VStack(alignment:.leading,spacing:3) {
                 Text("Ara").font(.system(size:16,weight:.bold)).tracking(1)
                 Text(store.project.name + (store.dirty ? " •" : "")).font(.system(size:12)).foregroundStyle(Theme.muted).lineLimit(1)
                     .help(store.status)
             }
             Spacer(minLength:10)
-            toolbarButton("New",icon:"doc.badge.plus",action:store.newProject)
-            toolbarButton("Open",icon:"folder",action:store.chooseOpen)
-            toolbarButton("Save",icon:"square.and.arrow.down") { store.save() }
+            toolbarButton("New",icon:"doc.badge.plus",action:store.newProject).helpTip("New project",.below,shortcut:shortcuts.label(.newProject))
+            toolbarButton("Open",icon:"folder",action:store.chooseOpen).helpTip("Open project",.below,shortcut:shortcuts.label(.openProject))
+            toolbarButton("Save",icon:"square.and.arrow.down") { store.save() }.helpTip("Save project",.below,shortcut:shortcuts.label(.save))
             Rectangle().fill(.white.opacity(0.1)).frame(width:1,height:24)
-            toolbarButton("Import",icon:"plus",action:store.chooseImport)
+            toolbarButton("Import",icon:"plus",action:store.chooseImport).helpTip("Import media",.below,shortcut:shortcuts.label(.importMedia))
             Button { store.showExportSheet = true } label: { Label("Export",systemImage:"arrow.up.right").font(.system(size:12,weight:.semibold)).padding(.horizontal,13).padding(.vertical,8) }
                 .buttonStyle(.plain).background(Theme.accent,in:RoundedRectangle(cornerRadius:6)).foregroundStyle(Theme.background).disabled(store.isExporting || store.isCapturingSnapshot)
+                .helpTip("Export movie",.below,shortcut:shortcuts.label(.exportMovie))
         }.padding(.horizontal,18).frame(height:64).background(Theme.panel)
     }
     /// Presets only. The inspector keeps the continuous slider for in-between values.
+    /// The gauge and the speed are two menus opening the same list: an AppKit menu button jumps to
+    /// its new width, so the speed is its own view that slides in, and the icons after it move
+    /// over smoothly instead of jumping.
     private var speedMenu: some View {
-        Menu {
-            ForEach([0.25,0.5,0.75,1.0,1.5,2.0,3.0,4.0],id:\.self) { preset in
-                Button(preset == 1 ? "1x · Normal" : String(format:"%gx",preset)) { store.setSpeed(preset) }
-            }
-        } label: {
-            HStack(spacing:4) {
-                Image(systemName:"speedometer")
-                // The selected clip's speed; with nothing to retime the gauge stands alone.
-                if store.canRetimeSelection {
-                    Text(String(format:"%.2fx",store.selectedSpeed)).font(.system(size:11,weight:.medium,design:.monospaced))
-                }
+        HStack(spacing:4) {
+            speedPresets { Image(systemName:"speedometer") }
+            // The selected clip's speed; with nothing to retime the gauge stands alone.
+            if store.canRetimeSelection {
+                speedPresets { Text(String(format:"%.2fx",store.selectedSpeed)).font(.system(size:11,weight:.medium,design:.monospaced)) }
+                    .transition(.asymmetric(insertion:.opacity.combined(with:.offset(x:-8)),removal:.opacity.combined(with:.offset(x:-8))))
             }
         }
+        .help("Playback speed of the selected clip")
+        .helpTip("Clip speed")
+        .popover(isPresented:$customSpeed,arrowEdge:.bottom) {
+            VStack(alignment:.leading,spacing:8) {
+                Text("Custom speed").font(.system(size:12,weight:.semibold))
+                SpeedField(store:store,width:120,focusOnAppear:true) { customSpeed = false }
+                Text("0.1x – 10x · Return to apply").font(.system(size:10)).foregroundStyle(Theme.muted)
+            }.padding(14)
+        }
+        .accessibilityElement(children:.contain)
+        .accessibilityLabel("Clip playback speed")
+    }
+    private func speedPresets<Label:View>(@ViewBuilder label: () -> Label) -> some View {
+        Menu {
+            ForEach(EditorStore.speedPresets,id:\.self) { preset in
+                Button(preset == 1 ? "1x · Normal" : String(format:"%gx",preset)) { store.setSpeed(preset) }
+            }
+            Divider()
+            Button("Custom…") { customSpeed = true }
+        } label: { label() }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         // A borderless menu draws in the accent colour; match the white toolbar icons instead.
         .tint(.primary)
         .disabled(!store.canRetimeSelection)
-        .help("Playback speed of the selected clip")
-        .accessibilityLabel("Clip playback speed")
     }
     private func toolbarButton(_ name: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action:action) { Label(name,systemImage:icon).font(.system(size:12,weight:.medium)) }.buttonStyle(.plain).padding(.horizontal,5).help(name).accessibilityLabel(name)
+        Button(action:action) { Label(LocalizedStringKey(name),systemImage:icon).font(.system(size:12,weight:.medium)) }.buttonStyle(.plain).padding(.horizontal,5).help(LocalizedStringKey(name)).accessibilityLabel(Text(LocalizedStringKey(name)))
     }
     private var viewer: some View {
         VStack(spacing:0) {
@@ -111,7 +133,7 @@ struct EditorView: View {
                         Text(store.missing.isEmpty ? "A blank frame. A new story." : "Reconnect your source media").font(.system(size:16,weight:.medium))
                         Text(store.missing.isEmpty ? "Import a file, then drag it onto the timeline." : "Use Relink in the media library to restore playback.").font(.system(size:12)).foregroundStyle(Theme.muted)
                     }.foregroundStyle(.white.opacity(0.8))
-                } else { PreviewSurface(store:store) }
+                } else { PreviewSurface(store:store).helpTip("Double-click a clip to move, resize and rotate it",.inside) }
                 if store.isBuilding { VStack { Spacer(); HStack(spacing:8) { ProgressView().controlSize(.mini); Text("Updating preview").font(.system(size:11)) }.padding(9).background(.black.opacity(0.7),in:Capsule()).padding(12) } }
             }.aspectRatio(store.project.aspectRatio.value,contentMode:.fit).padding(.horizontal,50).frame(maxWidth:.infinity,maxHeight:.infinity)
             HStack(spacing:8) {
@@ -119,15 +141,15 @@ struct EditorView: View {
                 Spacer(minLength:0)
                 HStack(spacing:4) {
                     Button(action:store.goToSelectedClipStart) { Image(systemName:"backward.end.fill").frame(width:26,height:28) }
-                        .help("Selected clip: first frame ⌥←").accessibilityLabel("Go to selected clip start").disabled(store.selectedClip == nil)
+                        .help("Selected clip: first frame \(shortcuts.label(.clipStart))").accessibilityLabel("Go to selected clip start").disabled(store.selectedClip == nil).helpTip("Selected clip: first frame",shortcut:shortcuts.label(.clipStart))
                     Button { store.step(-1) } label: { Image(systemName:"backward.frame").frame(width:26,height:28) }
-                        .help("Previous frame ←").accessibilityLabel("Previous frame")
+                        .help("Previous frame \(shortcuts.label(.previousFrame))").accessibilityLabel("Previous frame").helpTip("Previous frame",shortcut:shortcuts.label(.previousFrame))
                     Button { store.togglePlayback() } label: { Image(systemName:store.isPlaying ? "pause.fill" : "play.fill").frame(width:28,height:28) }
-                        .help("Play / Pause Space").accessibilityLabel(store.isPlaying ? "Pause" : "Play").disabled(store.isBuilding)
+                        .help("Play / Pause \(shortcuts.label(.playPause))").accessibilityLabel(store.isPlaying ? Text("Pause") : Text("Play")).disabled(store.isBuilding).helpTip("Play / Pause",shortcut:shortcuts.label(.playPause))
                     Button { store.step(1) } label: { Image(systemName:"forward.frame").frame(width:26,height:28) }
-                        .help("Next frame →").accessibilityLabel("Next frame")
+                        .help("Next frame \(shortcuts.label(.nextFrame))").accessibilityLabel("Next frame").helpTip("Next frame",shortcut:shortcuts.label(.nextFrame))
                     Button(action:store.goToSelectedClipEnd) { Image(systemName:"forward.end.fill").frame(width:26,height:28) }
-                        .help("Selected clip: last frame ⌥→").accessibilityLabel("Go to selected clip end").disabled(store.selectedClip == nil)
+                        .help("Selected clip: last frame \(shortcuts.label(.clipEnd))").accessibilityLabel("Go to selected clip end").disabled(store.selectedClip == nil).helpTip("Selected clip: last frame",shortcut:shortcuts.label(.clipEnd))
                 }
                 Spacer(minLength:0)
                 Text(store.project.frameRate.timecode(store.project.duration)).font(.system(size:11,design:.monospaced)).foregroundStyle(Theme.muted).fixedSize()
@@ -138,35 +160,44 @@ struct EditorView: View {
         VStack(spacing:0) {
             HStack(spacing:16) {
                 panelTitle("TIMELINE")
-                Button { store.undo() } label:{Image(systemName:"arrow.uturn.backward")}.disabled(!store.canUndo).help("Undo ⌘Z")
-                Button { store.redo() } label:{Image(systemName:"arrow.uturn.forward")}.disabled(!store.canRedo).help("Redo ⇧⌘Z")
+                Button { store.undo() } label:{Image(systemName:"arrow.uturn.backward")}.disabled(!store.canUndo).help("Undo \(shortcuts.label(.undo))").helpTip("Undo",shortcut:shortcuts.label(.undo))
+                Button { store.redo() } label:{Image(systemName:"arrow.uturn.forward")}.disabled(!store.canRedo).help("Redo \(shortcuts.label(.redo))").helpTip("Redo",shortcut:shortcuts.label(.redo))
                 Divider().frame(height:18)
-                Button { store.split() } label:{Image(systemName:"scissors")}.disabled(store.selectedClip == nil).help("Split at playhead ⌘B").accessibilityLabel("Split at playhead")
+                Button { store.split() } label:{Image(systemName:"scissors")}.disabled(store.selectedClip == nil).help("Split at playhead \(shortcuts.label(.split))").accessibilityLabel("Split at playhead").helpTip("Split at playhead",shortcut:shortcuts.label(.split))
                 Button(action:store.chooseSnapshot) {
                     if store.isCapturingSnapshot { ProgressView().controlSize(.mini).frame(width:16,height:16) }
                     else { Image(systemName:"camera").frame(width:16,height:16) }
-                }.disabled(!store.canCaptureSnapshot).help("Save current frame as PNG ⇧⌘E").accessibilityLabel("Capture timeline snapshot")
+                }.disabled(!store.canCaptureSnapshot).help("Save current frame as PNG \(shortcuts.label(.snapshot))").accessibilityLabel("Capture timeline snapshot").helpTip("Save frame as PNG",shortcut:shortcuts.label(.snapshot))
                 speedMenu
                 Button { store.addText() } label:{
                     CaptionsGlyph(lineWidth:1).stroke(style:StrokeStyle(lineWidth:1,lineCap:.round,lineJoin:.round)).frame(width:17,height:12.6)
-                }.help("Add a title above the clips at the playhead ⇧⌘T").accessibilityLabel("Add text clip")
+                }.help("Add a title above the clips at the playhead \(shortcuts.label(.addText))").accessibilityLabel("Add text clip").helpTip("Add title",shortcut:shortcuts.label(.addText))
                 // Rectangle select, once: the next drag across the tracks selects what it covers.
                 Button { store.dragSelectArmed.toggle() } label:{
                     DragSelectGlyph().frame(width:15,height:15)
                         .padding(3).background(store.dragSelectArmed ? Theme.accent.opacity(0.22) : .clear,in:RoundedRectangle(cornerRadius:4))
                         .foregroundStyle(store.dragSelectArmed ? Theme.accent : Color.primary)
                 }.padding(-3).disabled(store.project.clips.isEmpty)
-                 .help(store.dragSelectArmed ? "Drag across the timeline to select clips · Esc to cancel" : "Select clips with a rectangle: the next drag across the timeline, no Shift needed")
-                 .accessibilityLabel("Rectangle select").accessibilityAddTraits(store.dragSelectArmed ? .isSelected : [])
-                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil && !store.hasMultipleSelection).help("Delete selected clips")
+                 .help(store.dragSelectArmed ? LocalizedStringKey("Drag across the timeline to select clips · Esc to cancel") : LocalizedStringKey("Select clips with a rectangle: the next drag across the timeline, no Shift needed"))
+                 .accessibilityLabel("Rectangle select").accessibilityAddTraits(store.dragSelectArmed ? .isSelected : []).helpTip("Rectangle select")
+                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil && !store.hasMultipleSelection).help("Delete selected clips").helpTip("Delete",shortcut:shortcuts.label(.delete))
                 Spacer(minLength:4)
-                Toggle(isOn:$store.snapping) { Image(systemName:"magnifyingglass") }.toggleStyle(.button).help("Snap to clip edges and playhead N").accessibilityLabel("Snapping")
+                Toggle(isOn:$store.snapping) { Image(systemName:"magnifyingglass") }.toggleStyle(.button).help("Snap to clip edges and playhead \(shortcuts.label(.snapping))").accessibilityLabel("Snapping").helpTip("Snapping",shortcut:shortcuts.label(.snapping))
                 Text("−").foregroundStyle(Theme.muted)
-                Slider(value:$store.zoom,in:8...220).frame(width:115).help("Timeline zoom")
+                Slider(value:$store.zoom,in:8...220).frame(width:115).help("Timeline zoom").helpTip("Timeline zoom · pinch",shortcut:"")
                 Text("+").foregroundStyle(Theme.muted)
+                Button { store.showHelp.toggle() } label: {
+                    Image(systemName:"questionmark.circle").font(.system(size:14))
+                        .foregroundStyle(store.showHelp ? Theme.accent : Color.primary)
+                }
+                .help("Show what each control does").accessibilityLabel("Tips")
+                .helpTip("Show these tips")
             }.font(.system(size:11,weight:.medium)).buttonStyle(.plain).padding(.horizontal,16).frame(height:42).background(Theme.panel)
+            // The clip speed slides in and out; the icons after it follow instead of jumping.
+            .animation(.snappy(duration:0.28),value:store.canRetimeSelection)
             Divider()
             TimelineView(store:store)
+                .helpTip("Drag clips to move, their edges to trim · Shift-drag selects several · drag the ruler to skim",.inside)
         }
     }
     private var exportProgress: some View {
@@ -180,7 +211,7 @@ struct EditorView: View {
     }
 }
 
-@MainActor func panelTitle(_ text: String) -> some View { Text(text).font(.system(size:10,weight:.bold)).tracking(1.7).foregroundStyle(Theme.muted) }
+@MainActor func panelTitle(_ text: String) -> some View { Text(LocalizedStringKey(text)).font(.system(size:10,weight:.bold)).tracking(1.7).foregroundStyle(Theme.muted) }
 
 struct LibraryPanel: View {
     @ObservedObject var store: EditorStore
@@ -189,7 +220,7 @@ struct LibraryPanel: View {
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
             HStack {
-                panelTitle("MEDIA")
+                panelTitle("MEDIA").helpTip("Drag media onto the timeline, or double-click to add it at the end",.below)
                 Spacer()
                 if let proxy = store.proxyProgress {
                     HStack(spacing:6) {

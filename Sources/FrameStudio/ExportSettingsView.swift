@@ -23,7 +23,7 @@ struct ExportSettingsView: View {
                 GridRow {
                     Text("Aspect ratio")
                     Picker("Aspect ratio",selection:$aspectRatio) {
-                        ForEach(VideoAspectRatio.allCases) { Text($0.name).tag($0) }
+                        ForEach(VideoAspectRatio.allCases) { Text(LocalizedStringKey($0.name)).tag($0) }
                     }.labelsHidden().frame(maxWidth:.infinity)
                 }
                 GridRow {
@@ -35,8 +35,9 @@ struct ExportSettingsView: View {
                 GridRow {
                     Text("Resolution")
                     Picker("Resolution",selection:$resolution) {
-                        Text("Full HD · \(aspectRatio.dimensions())").tag(1080)
-                        Text("4K · \(aspectRatio.dimensions(resolution:2160))").tag(2160)
+                        ForEach(OutputQuality.allCases) { quality in
+                            Text(verbatim:"\(quality.name) · \(aspectRatio.dimensions(resolution:quality.rawValue))").tag(quality.rawValue)
+                        }
                     }.labelsHidden()
                 }
             }

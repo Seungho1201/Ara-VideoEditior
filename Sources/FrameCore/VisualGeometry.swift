@@ -76,6 +76,18 @@ public struct VisualGeometry {
         var result = style; result.rotation = angle
         return result
     }
+    /// Centre alignment while moving: a centre within `threshold` points of one of `centers`
+    /// across or down lands exactly on it (each axis on its own). Also returns the guides it
+    /// lined up on: the x of a vertical line, the y of a horizontal one.
+    public func aligned(to centers: [CGPoint], threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
+        let c = center
+        let x = centers.map(\.x).filter { abs($0-c.x) <= threshold }.min { abs($0-c.x) < abs($1-c.x) }
+        let y = centers.map(\.y).filter { abs($0-c.y) <= threshold }.min { abs($0-c.y) < abs($1-c.y) }
+        var result = style
+        if let x { result.x = min(2,max(-2,x/canvasSize.width-0.5)) }
+        if let y { result.y = min(2,max(-2,y/canvasSize.height-0.5)) }
+        return (result,x,y)
+    }
     public func moved(by delta: CGSize) -> ClipStyle {
         var result = style
         result.x = min(2,max(-2,style.x + delta.width/canvasSize.width))

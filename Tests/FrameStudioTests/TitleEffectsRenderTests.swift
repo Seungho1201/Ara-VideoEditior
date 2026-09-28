@@ -309,6 +309,29 @@ final class TitleEffectsRenderTests: XCTestCase {
         }
     }
 
+    /// The inspector's placement and colour sliders show each step in the preview at once.
+    @MainActor func testPlacementAndColourSlidersUpdateThePreviewWithoutARebuild() async throws {
+        _ = NSApplication.shared
+        let store = EditorStore()
+        var clip = Clip(name:"Title",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:3))
+        clip.style.text = "Live"
+        store.edit("Fixture") { $0.clips = [clip] }
+        for _ in 0..<1000 where store.isBuilding || store.player.currentItem == nil { try await Task.sleep(for:.milliseconds(10)) }
+        let original = store.project
+        func shown() -> ClipStyle? {
+            (store.player.currentItem?.videoComposition?.instructions.first as? FrameInstruction)?.layers.first { $0.clip.id == clip.id }?.clip.style
+        }
+        for step in stride(from:0.9,through:0.4,by:-0.1) {
+            store.updateStyleLive(clip.id,name:"Adjust clip",closesWhenIdle:false) { $0.opacity = step; $0.brightness = 1-step; $0.x = step/4 }
+            XCTAssertFalse(store.isBuilding,"shown in place, not rebuilt")
+            XCTAssertEqual(try XCTUnwrap(shown()).opacity,step,accuracy:1e-9,"the preview draws the new value at once")
+        }
+        store.endLiveEdit()
+        XCTAssertEqual(try XCTUnwrap(shown()),store.project.clips[0].style)
+        XCTAssertEqual(store.undoName,"Adjust clip")
+        store.undo(); XCTAssertEqual(store.project,original,"the drag was one undo step")
+    }
+
     @MainActor func testEffectSlidersRedrawThePreviewAsOneUndoStepAndKeepTheBoxOnTheLetters() async throws {
         _ = NSApplication.shared
         let store = EditorStore()

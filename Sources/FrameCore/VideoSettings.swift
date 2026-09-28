@@ -2,6 +2,34 @@ import Foundation
 import CoreGraphics
 
 /// Canvas presets share the same dimensions in preview, snapshots and movie export.
+/// Output quality presets, by the canvas's short edge: 720 (HD) to 2160 (4K).
+public enum OutputQuality: Int, CaseIterable, Sendable, Identifiable {
+    case hd = 720, fullHD = 1080, twoK = 1152, qhd = 1440, threeK = 1620, uhd = 2160
+    public var id: Int { rawValue }
+    public var name: String {
+        switch self {
+        case .hd: "HD"
+        case .fullHD: "Full HD"
+        case .twoK: "2K"
+        case .qhd: "QHD"
+        case .threeK: "3K"
+        case .uhd: "4K"
+        }
+    }
+    public static let resolutions = allCases.map(\.rawValue)
+    /// H.264 average bit rate: 12 Mbps at Full HD and 40 at 4K as before, the rest in between.
+    public static func bitRate(shortEdge: Int) -> Int {
+        switch shortEdge {
+        case ..<1080: 8_000_000
+        case ..<1152: 12_000_000
+        case ..<1440: 16_000_000
+        case ..<1620: 24_000_000
+        case ..<2160: 30_000_000
+        default: 40_000_000
+        }
+    }
+}
+
 public enum VideoAspectRatio: String, Codable, CaseIterable, Hashable, Sendable, Identifiable {
     case landscape = "16:9", portrait = "9:16", square = "1:1", classic = "4:3", social = "4:5"
     public var id: String { rawValue }
@@ -14,7 +42,8 @@ public enum VideoAspectRatio: String, Codable, CaseIterable, Hashable, Sendable,
         case .social: "4:5 · Portrait"
         }
     }
-    /// `resolution` is the short edge: 1080 for preview/HD, 2160 for the 4K preset.
+    /// `resolution` is the short edge of an `OutputQuality` (1080 for the preview). Both sides
+    /// are even, as H.264 needs: 4:5 at 3K is 1620 × 2024, not 2025.
     public func size(resolution: Int = 1080) -> CGSize {
         let base: (Int,Int) = switch self {
         case .landscape: (1920,1080)
@@ -23,7 +52,8 @@ public enum VideoAspectRatio: String, Codable, CaseIterable, Hashable, Sendable,
         case .classic: (1440,1080)
         case .social: (1080,1350)
         }
-        return CGSize(width:base.0*resolution/1080,height:base.1*resolution/1080)
+        func even(_ side: Int) -> Int { (side*resolution/1080)/2*2 }
+        return CGSize(width:even(base.0),height:even(base.1))
     }
     public var value: Double { let s = size(); return s.width/s.height }
     public func dimensions(resolution: Int = 1080) -> String {

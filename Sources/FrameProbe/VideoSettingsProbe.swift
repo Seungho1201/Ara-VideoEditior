@@ -18,7 +18,8 @@ extension FrameProbe {
         original.clips[titleIndex].style.text = "Ara"; original.clips[titleIndex].style.fontSize = 100
         original.clips[titleIndex].style.y = -0.2
         let builder = CompositionBuilder(), exporter = MovieExporter()
-        let cases: [(VideoAspectRatio,FrameRate,Int)] = [(.landscape,.init(24000,1001),1080),(.portrait,.init(30),1080),(.square,.init(24),1080),(.classic,.init(25),1080),(.social,.init(50),1080),(.portrait,.init(30),2160)]
+        let cases: [(VideoAspectRatio,FrameRate,Int)] = [(.landscape,.init(24000,1001),1080),(.portrait,.init(30),1080),(.square,.init(24),1080),(.classic,.init(25),1080),(.social,.init(50),1080),(.portrait,.init(30),2160),
+                                                       (.landscape,.init(30),720),(.landscape,.init(30),1152),(.landscape,.init(30),1440),(.social,.init(30),1620)]
         for (ratio,rate,resolution) in cases {
             var project = original
             try Editing.setVideoSettings(aspectRatio:ratio,frameRate:rate,in:&project)

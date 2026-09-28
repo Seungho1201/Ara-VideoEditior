@@ -14,6 +14,26 @@ final class TransitionTests: XCTestCase {
         return (p,a,b)
     }
 
+    func testTransitionEdgesAreSnapTargets() throws {
+        var (p,a,b) = try cutProject()
+        // A title on V2 over the second clip, with a 1 s fade out ending at 8 s (starts at 7 s).
+        let title = try Editing.addText(at:.init(seconds:4.5),to:&p)
+        let fade = try Editing.setTransition(.dipToBlack,duration:.init(seconds:1),from:title,to:nil,in:&p)
+        let own = try Editing.setTransition(.dipToBlack,duration:.init(seconds:0.6),from:b,to:nil,in:&p)
+        let titleWindow = try XCTUnwrap(p.window(of:p.transitions.first { $0.id == fade }!))
+        let threshold = MediaTime(seconds:0.1)
+        // Resizing V1's fade out near the title's fade start catches it.
+        let near = titleWindow.start + MediaTime(seconds:0.05)
+        XCTAssertEqual(Editing.snapTarget(near,excludingTransition:own,playhead:.init(seconds:30),threshold:threshold,project:p),titleWindow.start)
+        // Its own edges are never a target for itself.
+        let ownWindow = try XCTUnwrap(p.window(of:p.transitions.first { $0.id == own }!))
+        let beside = ownWindow.start + MediaTime(seconds:0.05)
+        XCTAssertNotEqual(Editing.snapTarget(beside,excludingTransition:own,playhead:.init(seconds:30),threshold:.init(seconds:0.06),project:p),ownWindow.start)
+        // Moving the title: its own fade goes with it and is no target.
+        XCTAssertNil(Editing.snapTarget(titleWindow.start+MediaTime(seconds:0.02),excluding:title,playhead:.init(seconds:30),threshold:.init(seconds:0.03),project:p))
+        _ = a
+    }
+
     func testACutTransitionIsCentredOnTheCut() throws {
         var (p,a,b) = try cutProject()
         let id = try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:a,to:b,in:&p)

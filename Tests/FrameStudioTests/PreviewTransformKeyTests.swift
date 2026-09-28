@@ -80,4 +80,41 @@ final class PreviewTransformKeyTests: XCTestCase {
             canvas.removeFromSuperview()
         }
     }
+
+    @MainActor func testMovingLinesTheCentreUpWithAGuideAndATick() async throws {
+        try await withOverlay { store, overlay, title in
+            // A second title B, showing too, with its centre at (560, 360) on the 800×450 frame.
+            var other = Clip(name:"B",kind:.text,lane:.v2,start:.zero,duration:.init(seconds:5)); other.style.text = "B"
+            other.style.x = 0.2; other.style.y = 0.3
+            store.edit("B") { $0.clips.append(other) }
+            for _ in 0..<1000 where store.isBuilding { try await Task.sleep(for:.milliseconds(10)) }
+            store.selectedClipID = title.id; store.previewTransformID = title.id
+            var ticks: [NSHapticFeedbackManager.FeedbackPattern] = []
+            overlay.performHaptic = { ticks.append($0) }
+            let saved = UserDefaults.standard.object(forKey:"timeline.scrubHaptics"); store.scrubHaptics = true
+            defer { if let saved { UserDefaults.standard.set(saved,forKey:"timeline.scrubHaptics") } else { UserDefaults.standard.removeObject(forKey:"timeline.scrubHaptics") } }
+            // The title starts in the middle; dragged to (558, 228): B's centre across, the frame's down.
+            overlay.mouseDown(with:mouse(.leftMouseDown,CGPoint(x:400,y:225),in:overlay))
+            overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:480,y:300),in:overlay))
+            overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:558,y:228),in:overlay))
+            XCTAssertEqual(overlay.guides.vertical,560); XCTAssertEqual(overlay.guides.horizontal,225)
+            let style = try XCTUnwrap(store.project.clips.first { $0.id == title.id }?.style)
+            XCTAssertEqual(style.x,0.2,accuracy:1e-9,"exactly on B's centre across")
+            XCTAssertEqual(style.y,0,accuracy:1e-9,"and on the frame's centre down")
+            XCTAssertEqual(ticks,[.alignment],"one tick for lining up (the first sample was on no guide)")
+            // Moving on along the guide keeps it, without another tick.
+            overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:559,y:229),in:overlay))
+            XCTAssertEqual(ticks,[.alignment])
+            overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:559,y:229),in:overlay))
+            XCTAssertNil(overlay.guides.vertical,"no guide once let go")
+            // With Shift held during the drag, nothing lines up.
+            store.previewTransformID = title.id
+            overlay.mouseDown(with:mouse(.leftMouseDown,CGPoint(x:560,y:225),in:overlay))
+            overlay.mouseDragged(with:NSEvent.mouseEvent(with:.leftMouseDragged,location:overlay.convert(CGPoint(x:402,y:227),to:nil),modifierFlags:.shift,timestamp:ProcessInfo.processInfo.systemUptime,
+                                                         windowNumber:overlay.window!.windowNumber,context:nil,eventNumber:0,clickCount:1,pressure:1)!)
+            XCTAssertNil(overlay.guides.vertical); XCTAssertNil(overlay.guides.horizontal)
+            XCTAssertNotEqual(store.project.clips.first { $0.id == title.id }?.style.x ?? 0,0,"not pulled to the middle")
+            overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:402,y:227),in:overlay))
+        }
+    }
 }

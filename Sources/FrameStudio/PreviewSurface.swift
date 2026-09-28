@@ -65,8 +65,30 @@ struct PreviewSurface: NSViewRepresentable {
         let corner: Int?
         let canvas: CGRect
         var rotating = false
+        /// The centres a move lines up with: the frame's and those of the other clips showing.
+        var centers: [CGPoint] = []
     }
     private var drag: Drag?
+    /// The centre guides a move is on right now (x of a vertical line, y of a horizontal one).
+    private(set) var guides: (vertical: CGFloat?, horizontal: CGFloat?) = (nil,nil)
+    private var verticalFeedback = CatchFeedback<CGFloat>(), horizontalFeedback = CatchFeedback<CGFloat>()
+    /// Kept at the AppKit boundary so tests can capture cues without vibrating hardware.
+    var performHaptic: (NSHapticFeedbackManager.FeedbackPattern) -> Void = { pattern in
+        NSHapticFeedbackManager.defaultPerformer.perform(pattern,performanceTime:.now)
+    }
+    static let guideColor = NSColor.systemYellow
+    /// Centres a moving clip can line up with: the frame's, and every other clip showing now
+    /// (its linked partner aside).
+    private func alignmentCenters(excluding clip: Clip, in canvas: CGRect) -> [CGPoint] {
+        guard let store else { return [] }
+        let own = Set(store.project.group(for:clip.id).map(\.id)), size = canvas.size
+        var centers = [CGPoint(x:size.width/2,y:size.height/2)]
+        for other in store.project.clips where other.lane.isVideo && !own.contains(other.id) && other.style.opacity > 0
+            && store.playhead >= other.start && store.playhead < other.end {
+            centers.append(CGPoint(x:size.width*(0.5+other.style.x),y:size.height*(0.5+other.style.y)))
+        }
+        return centers
+    }
     weak var chrome: TransformChromeView?
     private let ghost = TransformGhost()
     /// Share of the clip left visible outside the canvas while transforming (70 % transparent).
@@ -210,7 +232,19 @@ struct PreviewSurface: NSViewRepresentable {
             context.draw(picture,in:drawn)
             context.restoreGState()
         }
-        // 2. Outline and handles on top of everything.
+        // 2. Centre guides a move has lined up on, across the frame.
+        if guides.vertical != nil || guides.horizontal != nil {
+            Self.guideColor.setStroke()
+            if let x = guides.vertical {
+                let top = chrome.convert(CGPoint(x:canvas.minX+x,y:canvas.minY),from:self), bottom = chrome.convert(CGPoint(x:canvas.minX+x,y:canvas.maxY),from:self)
+                let line = NSBezierPath(); line.move(to:top); line.line(to:bottom); line.lineWidth = 1; line.stroke()
+            }
+            if let y = guides.horizontal {
+                let left = chrome.convert(CGPoint(x:canvas.minX,y:canvas.minY+y),from:self), right = chrome.convert(CGPoint(x:canvas.maxX,y:canvas.minY+y),from:self)
+                let line = NSBezierPath(); line.move(to:left); line.line(to:right); line.lineWidth = 1; line.stroke()
+            }
+        }
+        // 3. Outline and handles on top of everything.
         let points = geometry.corners.map { chrome.convert(CGPoint(x:$0.x+canvas.minX,y:$0.y+canvas.minY),from:self) }
         let outline = NSBezierPath(); outline.move(to:points[0]); points.dropFirst().forEach { outline.line(to:$0) }; outline.close()
         NSColor.black.withAlphaComponent(0.6).setStroke(); outline.lineWidth = 3.5; outline.stroke()
@@ -219,7 +253,14 @@ struct PreviewSurface: NSViewRepresentable {
             let handle = NSBezierPath(roundedRect:CGRect(x:point.x-5,y:point.y-5,width:10,height:10),xRadius:2,yRadius:2)
             Theme.accentNS.setFill(); handle.fill(); NSColor.black.withAlphaComponent(0.65).setStroke(); handle.lineWidth = 1; handle.stroke()
         }
-        // 3. The rotation handle: a stem from the middle of the top edge to a round knob.
+        // 4. The centre, as a small cross: yellow while it sits on a guide.
+        let middle = chrome.convert(CGPoint(x:geometry.center.x+canvas.minX,y:geometry.center.y+canvas.minY),from:self)
+        let cross = NSBezierPath(), arm: CGFloat = 7
+        cross.move(to:CGPoint(x:middle.x-arm,y:middle.y)); cross.line(to:CGPoint(x:middle.x+arm,y:middle.y))
+        cross.move(to:CGPoint(x:middle.x,y:middle.y-arm)); cross.line(to:CGPoint(x:middle.x,y:middle.y+arm))
+        NSColor.black.withAlphaComponent(0.6).setStroke(); cross.lineWidth = 3.5; cross.stroke()
+        (guides.vertical != nil || guides.horizontal != nil ? Self.guideColor : Theme.accentNS).setStroke(); cross.lineWidth = 1.5; cross.stroke()
+        // 5. The rotation handle: a stem from the middle of the top edge to a round knob.
         guard showsRotationHandle(geometry) else { return }
         let rotation = rotationHandle(geometry)
         let edge = chrome.convert(CGPoint(x:rotation.edge.x+canvas.minX,y:rotation.edge.y+canvas.minY),from:self)
@@ -299,7 +340,7 @@ struct PreviewSurface: NSViewRepresentable {
             if let clip = clips.first(where: { geometry(for:$0)?.contains(point) == true }),
                canvas.contains(location) || clip.id == store.previewTransformID {
                 store.selectedClipID = clip.id; store.selectedGap = nil; store.previewTransformID = clip.id
-                store.status = "Drag to move · Corners / pinch / ⌥ scroll to resize · Top handle to rotate · Return or Esc to finish"
+                store.status = String(localized:"Drag to move · Corners / pinch / ⌥ scroll to resize · Top handle to rotate · Return or Esc to finish")
             } else { store.previewTransformID = nil }
             refresh(); return
         }
@@ -308,8 +349,10 @@ struct PreviewSurface: NSViewRepresentable {
         let corner = rotating ? nil : geometry.corners.firstIndex { hypot($0.x-point.x,$0.y-point.y) <= 12 }
         guard rotating || corner != nil || geometry.contains(point) || geometry.isNearOutline(point) else { store.previewTransformID = nil; refresh(); return }
         finishDrag(); store.pause(); store.beginInteraction()
-        drag = Drag(id:clip.id,origin:point,geometry:geometry,corner:corner,canvas:canvas,rotating:rotating)
-        store.status = rotating ? "Rotating clip in preview" : corner == nil ? "Moving clip in preview" : "Resizing clip in preview"
+        drag = Drag(id:clip.id,origin:point,geometry:geometry,corner:corner,canvas:canvas,rotating:rotating,
+                    centers:alignmentCenters(excluding:clip,in:canvas))
+        verticalFeedback = CatchFeedback(); horizontalFeedback = CatchFeedback()
+        store.status = rotating ? String(localized:"Rotating clip in preview") : corner == nil ? String(localized:"Moving clip in preview") : String(localized:"Resizing clip in preview")
         (rotating ? Self.rotateCursor : NSCursor.closedHand).set()
     }
     override func mouseDragged(with event: NSEvent) {
@@ -321,19 +364,30 @@ struct PreviewSurface: NSViewRepresentable {
             // On the centre there is no angle to read: keep the one already applied.
             guard let style = drag.geometry.rotated(from:drag.origin,to:point,step:event.modifierFlags.contains(.shift) ? 15 : nil,magnet:store.snapping ? 2 : 0) else { return }
             store.updatePreviewTransform(drag.id,style:style); needsDisplay = true; chrome?.needsDisplay = true
-            store.status = String(format:"Rotation %.0f°",style.rotation)
+            store.status = String(format:String(localized:"Rotation %.0f°"),style.rotation)
             return
         }
-        let style = drag.corner.map { drag.geometry.resized(corner:$0,to:point) }
+        var style = drag.corner.map { drag.geometry.resized(corner:$0,to:point) }
             ?? drag.geometry.moved(by:CGSize(width:point.x-drag.origin.x,height:point.y-drag.origin.y))
+        guides = (nil,nil)
+        // A move lines the clip's centre up with the frame's or another clip's, within 5 pt: a
+        // yellow guide shows it, and a tick is felt. Shift during the drag, or snapping off, lets go.
+        if drag.corner == nil, store.snapping, !event.modifierFlags.contains(.shift) {
+            let moving = VisualGeometry(sourceSize:drag.geometry.sourceSize,canvasSize:drag.geometry.canvasSize,style:style,isText:drag.geometry.isText)
+            let aligned = moving.aligned(to:drag.centers,threshold:5)
+            style = aligned.style; guides = (aligned.vertical,aligned.horizontal)
+        }
+        let caught = verticalFeedback.cue(for:guides.vertical,at:event.timestamp,enabled:store.haptics(.alignment))
+        let caughtAcross = horizontalFeedback.cue(for:guides.horizontal,at:event.timestamp,enabled:store.haptics(.alignment))
+        if caught || caughtAcross { performHaptic(.alignment) }
         store.updatePreviewTransform(drag.id,style:style); needsDisplay = true; chrome?.needsDisplay = true
-        store.status = String(format:"Position %.0f%%, %.0f%% · Scale %.0f%%",style.x*100,style.y*100,style.scale*100)
+        store.status = String(format:String(localized:"Position %.0f%%, %.0f%% · Scale %.0f%%"),style.x*100,style.y*100,style.scale*100)
     }
     override func mouseUp(with event: NSEvent) { finishDrag() }
     func finishDrag() {
         guard drag != nil || zoomOrigin != nil else { return }
         zoomEndTask?.cancel(); zoomEndTask = nil
-        drag = nil; zoomOrigin = nil; store?.endInteraction(); window?.invalidateCursorRects(for:self)
+        drag = nil; zoomOrigin = nil; guides = (nil,nil); store?.endInteraction(); window?.invalidateCursorRects(for:self)
         chrome?.needsDisplay = true; if let chrome { chrome.window?.invalidateCursorRects(for:chrome) }
     }
     override func magnify(with event: NSEvent) { scaleBy(max(0.1,1+event.magnification)) }
@@ -357,9 +411,7 @@ struct PreviewSurface: NSViewRepresentable {
         (event.keyCode == 36 || event.keyCode == 76) && event.modifierFlags.intersection([.command,.shift,.option,.control]).isEmpty
     }
     override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.intersection([.command,.shift,.option,.control]).isEmpty {
-            if event.keyCode == 45 { if !event.isARepeat { store?.snapping.toggle() }; return }
-        }
+        if ShortcutSettings.shared.command(matching:event) == .snapping { if !event.isARepeat { store?.snapping.toggle() }; return }
         if event.keyCode == 53 {
             if store?.dragSelectArmed == true { store?.dragSelectArmed = false }
             if let drag { store?.updatePreviewTransform(drag.id,style:drag.geometry.style) }

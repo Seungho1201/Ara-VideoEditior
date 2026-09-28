@@ -14,5 +14,10 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary_dir/Ara" "$app/Contents/MacOS/Ara"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/Ara.icns "$app/Contents/Resources/Ara.icns"
+# The interface's translations (the language is chosen in Settings).
+for lproj in Resources/*.lproj; do
+    rm -rf "$app/Contents/Resources/$(basename "$lproj")"
+    cp -R "$lproj" "$app/Contents/Resources/"
+done
 codesign --force --sign - "$app"
 printf 'Built %s\n' "$PWD/$app"

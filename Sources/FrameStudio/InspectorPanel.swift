@@ -5,6 +5,7 @@ import FrameMedia
 
 struct InspectorPanel: View {
     @ObservedObject var store: EditorStore
+    @ObservedObject private var shortcuts = ShortcutSettings.shared
     /// The title being typed. The text view binds to this, never to the store: writing the
     /// store's value back into an NSTextView mid-composition cancels Hangul (and any IME) input.
     @State private var textDraft = ""
@@ -69,21 +70,22 @@ struct InspectorPanel: View {
                             info("Start",store.project.frameRate.timecode(clip.start))
                             info("Source in",store.project.frameRate.timecode(clip.sourceStart))
                             info("Duration",store.project.frameRate.timecode(clip.duration))
-                            HStack { Button("Trim start here") { store.trim(clip.id,leading:true,to:store.playhead) }; Button("Trim end here") { store.trim(clip.id,leading:false,to:store.playhead) } }.controlSize(.mini)
                         }
                         if clip.kind == .video || clip.kind == .audio {
                             section("SPEED") {
                                 HStack {
                                     Text("Playback").foregroundStyle(Theme.muted); Spacer()
-                                    Text(String(format:"%.2fx",clip.speed)).font(.system(size:10,design:.monospaced))
+                                    // Type any speed from 0.1x to 10x; Return applies it.
+                                    SpeedField(store:store)
                                 }
-                                Slider(value:Binding(get:{store.selectedClip?.speed ?? 1},
-                                                     set:{ v in store.setSpeedInteractively(min(Clip.speedRange.upperBound,max(Clip.speedRange.lowerBound,(v*20).rounded()/20))) }),
-                                       in:Clip.speedRange,
+                                // On a log scale, so 1x sits in the middle and slow speeds get as much room as fast ones.
+                                Slider(value:Binding(get:{log2(store.selectedClip?.speed ?? 1)},
+                                                     set:{ v in store.setSpeedInteractively(min(Clip.speedRange.upperBound,max(Clip.speedRange.lowerBound,(pow(2,v)*20).rounded()/20))) }),
+                                       in:log2(Clip.speedRange.lowerBound)...log2(Clip.speedRange.upperBound),
                                        onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } })
                                     .controlSize(.mini).accessibilityLabel("Playback speed")
                                 HStack(spacing:5) {
-                                    ForEach([0.25,0.5,1.0,2.0,4.0],id:\.self) { preset in
+                                    ForEach([0.25,0.5,1.0,2.0,4.0,5.0],id:\.self) { preset in
                                         Button(preset == 1 ? "1x" : String(format:"%gx",preset)) { store.setSpeed(preset) }
                                             .controlSize(.mini).disabled(abs(clip.speed-preset) < 0.001)
                                     }
@@ -131,7 +133,7 @@ struct InspectorPanel: View {
                     }
                     Text("Closing the gap pulls every later clip on \(gap.lane.rawValue) — and its linked audio — back by the gap length.")
                         .font(.system(size:11)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
-                    Button("Close Gap  ⌘⌫") { store.closeSelectedGap() }.controlSize(.small)
+                    Button("Close Gap  \(shortcuts.label(.closeGap))") { store.closeSelectedGap() }.controlSize(.small)
                 }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
                 Spacer(minLength:0)
             } else {
@@ -154,7 +156,7 @@ struct InspectorPanel: View {
         ScrollView {
             VStack(alignment:.leading,spacing:18) {
                 VStack(alignment:.leading,spacing:6) {
-                    Text(transition.kind.name).font(.system(size:13,weight:.semibold))
+                    Text(transition.kind.displayName).font(.system(size:13,weight:.semibold))
                     Text("\(lane) · \(placement)").font(.system(size:10)).foregroundStyle(Theme.accent)
                 }
                 Image(nsImage:TransitionPreviews.image(transition.kind,direction:transition.direction)).resizable().aspectRatio(16/9,contentMode:.fit)
@@ -164,8 +166,8 @@ struct InspectorPanel: View {
                         Text("Kind").foregroundStyle(Theme.muted); Spacer()
                         Picker("",selection:Binding(get:{store.selectedTransition?.kind ?? transition.kind},set:{ store.updateSelectedTransition(kind:$0) })) {
                             ForEach(TransitionKind.Category.allCases,id:\.self) { category in
-                                Section(category.rawValue) {
-                                    ForEach(TransitionKind.allCases.filter { $0.category == category }) { Text($0.name).tag($0) }
+                                Section(category.displayName) {
+                                    ForEach(TransitionKind.allCases.filter { $0.category == category }) { Text($0.displayName).tag($0) }
                                 }
                             }
                         }.labelsHidden().controlSize(.small).frame(maxWidth:150)
@@ -280,14 +282,14 @@ struct InspectorPanel: View {
         VStack(alignment:.leading,spacing:10) { panelTitle(title); content() }.font(.system(size:11))
     }
     private func info(_ key:String,_ value:String) -> some View {
-        HStack { Text(key).foregroundStyle(Theme.muted); Spacer(); Text(value).font(.system(size:10,design:.monospaced)) }
+        HStack { Text(LocalizedStringKey(key)).foregroundStyle(Theme.muted); Spacer(); Text(value).font(.system(size:10,design:.monospaced)) }
     }
     /// A slider for how a title is drawn. It redraws the title in the preview without rebuilding
     /// the composition, and one drag is one undo step.
     private func titleControl(_ label:String,_ key:WritableKeyPath<ClipStyle,Double>,range:ClosedRange<Double>,multiplier:Double = 1,suffix:String = "",clip:Clip,undoName:String? = nil) -> some View {
         VStack(spacing:5) {
             HStack {
-                Text(label).foregroundStyle(Theme.muted); Spacer()
+                Text(LocalizedStringKey(label)).foregroundStyle(Theme.muted); Spacer()
                 Text(String(format:"%.0f",clip.style[keyPath:key]*multiplier)+suffix).font(.system(size:10,design:.monospaced))
             }
             Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in
@@ -296,11 +298,11 @@ struct InspectorPanel: View {
                    }),in:range,onEditingChanged:{ active in
                        // The title's typed text lands first, as its own step.
                        if active { store.commitPendingEdits(); titleDrag = clip.id } else { titleDrag = nil; store.endLiveEdit() }
-                   }).controlSize(.mini).accessibilityLabel(undoName.map { "\($0) \(label.lowercased())" } ?? label)
+                   }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(undoName.map { "\($0) \(label.lowercased())" } ?? label)))
         }
     }
     private func titleColor(_ label:String,_ red:WritableKeyPath<ClipStyle,Double>,_ green:WritableKeyPath<ClipStyle,Double>,_ blue:WritableKeyPath<ClipStyle,Double>,clip:Clip) -> some View {
-        ColorPicker(label,selection:Binding(get:{Color(red:clip.style[keyPath:red],green:clip.style[keyPath:green],blue:clip.style[keyPath:blue])},set:{color in
+        ColorPicker(LocalizedStringKey(label),selection:Binding(get:{Color(red:clip.style[keyPath:red],green:clip.style[keyPath:green],blue:clip.style[keyPath:blue])},set:{color in
             guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
             // The picker re-sends its colour after a colour-space round trip; that is not an edit.
             let s = clip.style, tolerance = 0.5/255
@@ -311,10 +313,22 @@ struct InspectorPanel: View {
     private func control(_ label:String,_ key:WritableKeyPath<ClipStyle,Double>,range:ClosedRange<Double>,multiplier:Double = 1,suffix:String = "") -> some View {
         VStack(spacing:5) {
             HStack {
-                Text(label).foregroundStyle(Theme.muted); Spacer()
+                Text(LocalizedStringKey(label)).foregroundStyle(Theme.muted); Spacer()
                 Text(String(format:"%.0f",(store.selectedClip?.style[keyPath:key] ?? 0)*multiplier)+suffix).font(.system(size:10,design:.monospaced))
             }
-            Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in store.updateStyle { $0[keyPath:key] = v } }),in:range,onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } }).controlSize(.mini).accessibilityLabel(label)
+            if key == \ClipStyle.volume {
+                // Volume changes the audio mix (and the linked clip's level): that needs a rebuild.
+                Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in store.updateStyle { $0[keyPath:key] = v } }),in:range,onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(label)))
+            } else {
+                // Placement and colour only change how the layer is drawn: the preview shows each
+                // step at once, without rebuilding the composition, and one drag is one undo step.
+                Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in
+                           guard let id = store.selectedClipID else { return }
+                           store.updateStyleLive(id,name:"Adjust clip",closesWhenIdle:titleDrag != id) { $0[keyPath:key] = min(range.upperBound,max(range.lowerBound,v)) }
+                       }),in:range,onEditingChanged:{ active in
+                           if active { store.commitPendingEdits(); titleDrag = store.selectedClipID } else { titleDrag = nil; store.endLiveEdit() }
+                       }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(label)))
+            }
         }
     }
 }
@@ -507,5 +521,30 @@ struct FontPopUp: NSViewRepresentable {
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
         CGSize(width:min(proposal.width ?? 170,170),height:nsView.cell?.cellSize.height ?? 22)
+    }
+}
+
+/// The selected clip's speed, editable: "2.5", "2.5x" or "250%", applied with Return. Leaving the
+/// field without Return puts back the speed the clip has.
+struct SpeedField: View {
+    @ObservedObject var store: EditorStore
+    var width: CGFloat = 62
+    var focusOnAppear = false
+    var onCommit: () -> Void = {}
+    @State private var text = ""
+    @FocusState private var focused: Bool
+    private var shown: String { String(format:"%.2fx",store.selectedSpeed) }
+    var body: some View {
+        TextField("",text:$text)
+            .textFieldStyle(.roundedBorder).controlSize(.mini)
+            .font(.system(size:10,design:.monospaced)).multilineTextAlignment(.trailing)
+            .frame(width:width).focused($focused)
+            .onSubmit { if store.setCustomSpeed(text) { onCommit() }; text = shown }
+            .onAppear { text = shown; if focusOnAppear { focused = true } }
+            .onChange(of:store.selectedSpeed) { if !focused { text = shown } }
+            .onChange(of:store.selectedClipID) { text = shown }
+            .onChange(of:focused) { _,now in if !now { text = shown } }
+            .help("Type a speed from 0.1x to 10x and press Return")
+            .accessibilityLabel("Custom speed")
     }
 }

@@ -125,7 +125,7 @@ public enum Editing {
         // A SwiftUI Slider lands on values like 1.0000000000000002, which defeats every `speed == 1`
         // fast path (Clip.sourceLength, the badge, the composition's no-scale branch).
         let speed = (speed * 1000).rounded() / 1000
-        guard speed.isFinite, Clip.speedRange.contains(speed) else { throw EditError("Clip speed must be between 25% and 400%.") }
+        guard speed.isFinite, Clip.speedRange.contains(speed) else { throw EditError("Clip speed must be between 0.1x and 10x.") }
         let anchor = base ?? project
         guard let selected = anchor.clips.first(where: { $0.id == id }) else { return }
         guard selected.kind == .video || selected.kind == .audio else { throw EditError("Only video and audio clips can be retimed.") }
@@ -198,12 +198,18 @@ public enum Editing {
                                playhead: MediaTime, threshold: MediaTime, project: Project) -> MediaTime {
         project.frameRate.quantize(snapTarget(time,duration:duration,excluding:id,playhead:playhead,threshold:threshold,project:project) ?? time)
     }
-    /// What `snapped` lands on: a clip edge, the playhead or the start (the position that puts
-    /// the dragged span's start or end on it), or nil when nothing is within `threshold`.
+    /// What `snapped` lands on: a clip edge, a transition's start or end, the playhead or the
+    /// start (the position that puts the dragged span's start or end on it), or nil when nothing
+    /// is within `threshold`. `excludingTransition` is the one being resized.
     public static func snapTarget(_ time: MediaTime, duration: MediaTime = .zero, excluding id: UUID? = nil,
+                                  excludingTransition transitionID: UUID? = nil,
                                   playhead: MediaTime, threshold: MediaTime, project: Project) -> MediaTime? {
         let excluded = Set(id.map { project.group(for: $0).map(\.id) } ?? [])
-        let edges = [.zero,playhead] + project.clips.filter { !excluded.contains($0.id) }.flatMap { [$0.start,$0.end] }
+        // A transition on a clip being moved moves with it; its old place is no target.
+        let transitionEdges = project.transitions.filter { transition in
+            transition.id != transitionID && ![transition.from,transition.to].contains { $0.map(excluded.contains) == true }
+        }.compactMap(project.window).flatMap { [$0.start,$0.end] }
+        let edges = [.zero,playhead] + project.clips.filter { !excluded.contains($0.id) }.flatMap { [$0.start,$0.end] } + transitionEdges
         let candidates = edges.flatMap { [$0, $0 - duration] }.filter { $0 >= .zero && abs($0.ticks-time.ticks) <= threshold.ticks }
         return candidates.min { abs($0.ticks-time.ticks) < abs($1.ticks-time.ticks) }
     }

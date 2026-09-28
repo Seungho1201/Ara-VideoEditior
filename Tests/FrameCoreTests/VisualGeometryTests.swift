@@ -178,4 +178,25 @@ final class VisualGeometryTests: XCTestCase {
         XCTAssertLessThan(knob.y,bottomMiddle.y)                            // above the clip on screen
         XCTAssertTrue(roomAbove.contains(knob))
     }
+    func testMovingLinesTheCentreUpWithOtherCentres() {
+        let centers = [CGPoint(x:480,y:270),CGPoint(x:200,y:100)]
+        func near(_ x: CGFloat, _ y: CGFloat) -> VisualGeometry {
+            var style = ClipStyle(); style.scale = 0.3
+            style.x = x/canvas.width-0.5; style.y = y/canvas.height-0.5
+            return VisualGeometry(sourceSize:canvas,canvasSize:canvas,style:style)
+        }
+        // Across: within 5 pt of 480 lands on it; down, nothing near.
+        var result = near(483.5,150).aligned(to:centers,threshold:5)
+        XCTAssertEqual(result.vertical,480); XCTAssertNil(result.horizontal)
+        XCTAssertEqual(VisualGeometry(sourceSize:canvas,canvasSize:canvas,style:result.style).center.x,480,accuracy:1e-9)
+        XCTAssertEqual(result.style.y,near(483.5,150).style.y,"the other axis is left alone")
+        // Both at once, each to its nearest.
+        result = near(201,103).aligned(to:centers,threshold:5)
+        XCTAssertEqual(result.vertical,200); XCTAssertEqual(result.horizontal,100)
+        assertPoint(VisualGeometry(sourceSize:canvas,canvasSize:canvas,style:result.style).center,CGPoint(x:200,y:100))
+        // Farther than the threshold: untouched.
+        result = near(330,190).aligned(to:centers,threshold:5)
+        XCTAssertNil(result.vertical); XCTAssertNil(result.horizontal)
+        XCTAssertEqual(result.style,near(330,190).style)
+    }
 }

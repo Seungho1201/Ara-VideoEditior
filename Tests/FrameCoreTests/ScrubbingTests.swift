@@ -82,10 +82,10 @@ final class ScrubbingTests: XCTestCase {
         func position(_ frame: Int64) -> ScrubPosition { .init(time:.init(ticks:frame*10_000)) }
         XCTAssertEqual(cadence.cue(for:position(1),at:0),.frame)
         XCTAssertNil(cadence.cue(for:position(2),at:0.01))
-        XCTAssertNil(cadence.cue(for:position(3),at:0.085))          // 0.08 s is no longer quite enough
-        XCTAssertEqual(cadence.cue(for:position(4),at:0.09),.frame)
+        XCTAssertNil(cadence.cue(for:position(3),at:0.095))          // the default waits 0.1 s
+        XCTAssertEqual(cadence.cue(for:position(4),at:0.10),.frame)
         let end = ScrubPosition(time:.init(ticks:1_000_000),snappedEnd:.init(ticks:1_000_000))
-        XCTAssertEqual(cadence.cue(for:end,at:0.10),.clipEnd) // not lost to the frame throttle
+        XCTAssertEqual(cadence.cue(for:end,at:0.11),.clipEnd) // not lost to the frame throttle
         XCTAssertNil(cadence.cue(for:end,at:1)) // holding still never repeats
         XCTAssertEqual(cadence.cue(for:position(106),at:1.1),.frame)
         XCTAssertEqual(cadence.cue(for:end,at:1.11),.clipEnd) // a later re-entry
@@ -93,7 +93,7 @@ final class ScrubbingTests: XCTestCase {
         XCTAssertNil(cadence.cue(for:end,at:1.13)) // edge jitter suppressed
     }
 
-    func testSkimmingPulsesTenPercentLessOften() {
+    func testSkimmingPulsesTwentyPercentLessOftenByDefault() {
         // A fast skim: a new frame every 10 ms for a second.
         func pulses(interval: TimeInterval) -> Int {
             var last = -Double.infinity, count = 0
@@ -104,8 +104,24 @@ final class ScrubbingTests: XCTestCase {
         for step in 0...100 where cadence.cue(for:.init(time:.init(ticks:Int64(step)*20_000)),at:Double(step)*0.01) == .frame { now += 1 }
         let before = pulses(interval:0.08)
         XCTAssertEqual(before,13)
-        XCTAssertLessThanOrEqual(Double(now),Double(before)*0.9+0.5,"about 10 % fewer pulses (\(now) against \(before))")
-        XCTAssertGreaterThanOrEqual(now,11,"only a little gentler")
+        XCTAssertLessThanOrEqual(Double(now),Double(before)*0.8+0.5,"about 20 % fewer pulses (\(now) against \(before))")
+        XCTAssertGreaterThanOrEqual(now,9,"gentler, not silent")
+    }
+
+    func testSkimmingRateSettings() {
+        // A fast skim: a new frame every 10 ms for two seconds.
+        func pulses(_ strength: ScrubFeedbackCadence.Strength) -> Int {
+            var cadence = ScrubFeedbackCadence(strength:strength), count = 0
+            for step in 0...200 where cadence.cue(for:.init(time:.init(ticks:Int64(step)*20_000)),at:Double(step)*0.01) == .frame { count += 1 }
+            return count
+        }
+        let precise = pulses(.precise), standard = pulses(.standard), light = pulses(.light)
+        XCTAssertGreaterThanOrEqual(precise,23)                      // about every 0.08 s (10 ms steps)
+        XCTAssertLessThan(standard,precise); XCTAssertLessThan(light,standard)
+        XCTAssertEqual(Double(standard),Double(precise)*0.8,accuracy:1.5)
+        XCTAssertEqual(Double(light),Double(precise)*0.6,accuracy:1.5)
+        XCTAssertEqual(ScrubFeedbackCadence().strength,.standard)
+        XCTAssertEqual(ScrubFeedbackCadence.frameInterval,0.08/0.8)
     }
 
     func testSameFrameAndDisabledFeedbackAreSilentAndFreshGestureResets() {

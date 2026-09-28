@@ -14,11 +14,21 @@ import FrameMedia
         if approvedClose && !sender.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) { return .terminateNow }
         guard let store else { return .terminateNow }
         if store.isExporting || store.isCapturingSnapshot {
-            let alert = NSAlert(); alert.messageText = "An output is being saved"
-            alert.informativeText = store.isCapturingSnapshot ? "Wait for the snapshot to finish saving before quitting." : "Cancel the export before quitting."
+            let alert = NSAlert(); alert.messageText = String(localized:"An output is being saved")
+            alert.informativeText = store.isCapturingSnapshot ? String(localized:"Wait for the snapshot to finish saving before quitting.") : String(localized:"Cancel the export before quitting.")
             alert.runModal(); return .terminateCancel
         }
         return store.confirmDiscard() ? .terminateNow : .terminateCancel
+    }
+    /// Set while quitting to start Ara again (a language change); cleared if the quit is cancelled.
+    static var relaunchOnQuit = false
+    func applicationWillTerminate(_ notification: Notification) {
+        guard Self.relaunchOnQuit else { return }
+        // A helper waits for this copy to exit, then opens the app again.
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath:"/bin/sh")
+        task.arguments = ["-c","while /bin/kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$0\"",Bundle.main.bundlePath]
+        try? task.run()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -39,6 +49,7 @@ import FrameMedia
 @main struct AraApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var store = EditorStore()
+    @StateObject private var shortcuts = ShortcutSettings.shared
     @State private var launched = false
     var body: some Scene {
         WindowGroup("Ara", id:"editor") {
@@ -63,45 +74,51 @@ import FrameMedia
         .restorationBehavior(.disabled)
         .commands {
             CommandGroup(replacing:.newItem) {
-                Button("New Project") { store.newProject() }.keyboardShortcut("n").disabled(store.showNewProjectSheet)
-                Button("Open Project…") { store.chooseOpen() }.keyboardShortcut("o").disabled(store.showNewProjectSheet)
-                Button("Start Screen") { store.showStartScreen() }.keyboardShortcut("1",modifiers:[.command,.shift])
+                Button("New Project") { store.newProject() }.keyboardShortcut(shortcuts.keyboardShortcut(.newProject)).disabled(store.showNewProjectSheet)
+                Button("Open Project…") { store.chooseOpen() }.keyboardShortcut(shortcuts.keyboardShortcut(.openProject)).disabled(store.showNewProjectSheet)
+                Button("Start Screen") { store.showStartScreen() }.keyboardShortcut(shortcuts.keyboardShortcut(.startScreen))
                     .disabled(store.showLauncher || store.showNewProjectSheet || store.isExporting || store.isCapturingSnapshot)
                 Divider()
                 // Everything below acts on the open project, which is hidden behind the start screen.
                 Group {
-                    Button("Save Project") { store.save() }.keyboardShortcut("s")
-                    Button("Save Project As…") { store.save(as:true) }.keyboardShortcut("s",modifiers:[.command,.shift])
+                    Button("Save Project") { store.save() }.keyboardShortcut(shortcuts.keyboardShortcut(.save))
+                    Button("Save Project As…") { store.save(as:true) }.keyboardShortcut(shortcuts.keyboardShortcut(.saveAs))
                     Divider()
-                    Button("Import Media…") { store.chooseImport() }.keyboardShortcut("i")
+                    Button("Import Media…") { store.chooseImport() }.keyboardShortcut(shortcuts.keyboardShortcut(.importMedia))
                     Button("Add Fonts…") { store.chooseFonts() }.disabled(store.isAddingFonts)
-                    Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut("e").disabled(store.isExporting || store.isCapturingSnapshot)
-                    Button("Save Timeline Snapshot…") { store.chooseSnapshot() }.keyboardShortcut("e",modifiers:[.command,.shift]).disabled(!store.canCaptureSnapshot)
+                    Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut(shortcuts.keyboardShortcut(.exportMovie)).disabled(store.isExporting || store.isCapturingSnapshot)
+                    Button("Save Timeline Snapshot…") { store.chooseSnapshot() }.keyboardShortcut(shortcuts.keyboardShortcut(.snapshot)).disabled(!store.canCaptureSnapshot)
                 }.disabled(store.showLauncher || store.showNewProjectSheet)
             }
             CommandGroup(replacing:.undoRedo) {
-                Button("Undo \(store.undoName)") { store.undo() }.keyboardShortcut("z").disabled(!store.canUndo || store.showLauncher || store.showNewProjectSheet)
-                Button("Redo \(store.history.redoName)") { store.redo() }.keyboardShortcut("z",modifiers:[.command,.shift]).disabled(!store.canRedo || store.showLauncher || store.showNewProjectSheet)
+                Button("Undo \(EditorStore.localizedAction(store.undoName))") { store.undo() }.keyboardShortcut(shortcuts.keyboardShortcut(.undo)).disabled(!store.canUndo || store.showLauncher || store.showNewProjectSheet)
+                Button("Redo \(EditorStore.localizedAction(store.history.redoName))") { store.redo() }.keyboardShortcut(shortcuts.keyboardShortcut(.redo)).disabled(!store.canRedo || store.showLauncher || store.showNewProjectSheet)
+            }
+            CommandGroup(before:.help) {
+                Button("Show Tips") { store.showHelp.toggle() }.disabled(store.showLauncher || store.showNewProjectSheet)
             }
             CommandMenu("Timeline") {
                 // Unmodified keys (Space, arrows, Delete, N) must not reach a project the user cannot see,
                 // and must not steal typing from the start screen's search field.
                 Group {
-                Button("Play / Pause") { store.togglePlayback() }.keyboardShortcut(.space,modifiers:[])
+                Button("Play / Pause") { store.togglePlayback() }.keyboardShortcut(shortcuts.keyboardShortcut(.playPause))
                 // Arrow equivalents win over any focused text view, so they yield while a title is edited.
-                Button("Previous Frame") { store.step(-1) }.keyboardShortcut(.leftArrow,modifiers:[]).disabled(store.isEditingText)
-                Button("Next Frame") { store.step(1) }.keyboardShortcut(.rightArrow,modifiers:[]).disabled(store.isEditingText)
-                Button("Go to Selected Clip Start") { store.goToSelectedClipStart() }.keyboardShortcut(.leftArrow,modifiers:[.option]).disabled(store.selectedClip == nil || store.isEditingText)
-                Button("Go to Selected Clip End") { store.goToSelectedClipEnd() }.keyboardShortcut(.rightArrow,modifiers:[.option]).disabled(store.selectedClip == nil || store.isEditingText)
+                Button("Previous Frame") { store.step(-1) }.keyboardShortcut(shortcuts.keyboardShortcut(.previousFrame)).disabled(store.isEditingText)
+                Button("Next Frame") { store.step(1) }.keyboardShortcut(shortcuts.keyboardShortcut(.nextFrame)).disabled(store.isEditingText)
+                Button("Go to Selected Clip Start") { store.goToSelectedClipStart() }.keyboardShortcut(shortcuts.keyboardShortcut(.clipStart)).disabled(store.selectedClip == nil || store.isEditingText)
+                Button("Go to Selected Clip End") { store.goToSelectedClipEnd() }.keyboardShortcut(shortcuts.keyboardShortcut(.clipEnd)).disabled(store.selectedClip == nil || store.isEditingText)
                 Divider()
-                Button("Split at Playhead") { store.split() }.keyboardShortcut("b").disabled(store.selectedClip == nil)
-                Button("Delete Linked Selection") { store.deleteSelection() }.keyboardShortcut(.delete,modifiers:[]).disabled(store.selectedClip == nil && !store.hasMultipleSelection)
-                Button("Close Gap") { store.closeSelectedGap() }.keyboardShortcut(.delete,modifiers:[.command]).disabled(store.selectedGap == nil)
-                Button("Add Text Clip") { store.addText() }.keyboardShortcut("t",modifiers:[.command,.shift])
-                Toggle("Snapping",isOn:$store.snapping).keyboardShortcut("n",modifiers:[])
+                Button("Split at Playhead") { store.split() }.keyboardShortcut(shortcuts.keyboardShortcut(.split)).disabled(store.selectedClip == nil)
+                Button("Delete Linked Selection") { store.deleteSelection() }.keyboardShortcut(shortcuts.keyboardShortcut(.delete)).disabled(store.selectedClip == nil && !store.hasMultipleSelection)
+                Button("Close Gap") { store.closeSelectedGap() }.keyboardShortcut(shortcuts.keyboardShortcut(.closeGap)).disabled(store.selectedGap == nil)
+                Button("Add Text Clip") { store.addText() }.keyboardShortcut(shortcuts.keyboardShortcut(.addText))
+                Toggle("Snapping",isOn:$store.snapping).keyboardShortcut(shortcuts.keyboardShortcut(.snapping))
                 Toggle("Trackpad Haptics",isOn:$store.scrubHaptics)
                 }.disabled(store.showLauncher || store.showNewProjectSheet)
             }
+        }
+        Settings {
+            SettingsView(store:store)
         }
     }
 }
