@@ -37,9 +37,9 @@ public extension Project {
 public struct ScrubFeedbackCadence: Sendable {
     public enum Cue: Equatable, Sendable { case frame, clipEnd }
     /// The shortest time between two frame pulses while skimming. macOS offers no haptic
-    /// strength, so the skim is made gentler by pulsing 30 % less often than the original
-    /// 0.08 s (at most about 8.7 pulses a second instead of 12.5). A clip-end cue is not throttled.
-    public static let frameInterval: TimeInterval = 0.08/0.7
+    /// strength, so the skim is made gentler by pulsing 10 % less often than the original
+    /// 0.08 s (at most about 11.2 pulses a second instead of 12.5). A clip-end cue is not throttled.
+    public static let frameInterval: TimeInterval = 0.08/0.9
     private var previous: ScrubPosition?
     private var lastCueAt = -Double.infinity
     private var lastEnd: MediaTime?
