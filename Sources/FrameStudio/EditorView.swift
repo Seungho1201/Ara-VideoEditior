@@ -223,6 +223,7 @@ struct LibraryPanel: View {
                 }
             }
             if store.isImporting { HStack { ProgressView().controlSize(.small); Text("Reading media…").font(.system(size:11)) }.padding(12) }
+            if store.isAddingFonts { HStack { ProgressView().controlSize(.small); Text("Adding fonts…").font(.system(size:11)) }.padding(12) }
         }.background(targeted ? Theme.accent.opacity(0.12) : Theme.panel)
             .onDrop(of:[UTType.fileURL],isTargeted:$targeted) { providers in
                 Task { @MainActor in

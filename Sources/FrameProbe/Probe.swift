@@ -19,12 +19,13 @@ actor ProgressFlag {
             let source = args[2] == "--chart" ? try snapshotColorChart(output:output) : URL(fileURLWithPath:args[2])
             try await snapshotRoundTrip(source:source,output:output); return
         }
-        guard args.count >= 4, ["smoke","snapshot","video-settings"].contains(args[1]) else {
-            print("Usage: FrameProbe <smoke|snapshot|video-settings> <fixture-directory> <output-directory>\n       FrameProbe snapshot-roundtrip <media-file|--chart> <output-directory>"); return
+        guard args.count >= 4, ["smoke","snapshot","video-settings","fonts"].contains(args[1]) else {
+            print("Usage: FrameProbe <smoke|snapshot|video-settings> <fixture-directory> <output-directory>\n       FrameProbe fonts <fixture-directory> <output-directory> [font files or ZIPs…]\n       FrameProbe snapshot-roundtrip <media-file|--chart> <output-directory>"); return
         }
         let fixtures = URL(fileURLWithPath:args[2],isDirectory:true), output = URL(fileURLWithPath:args[3],isDirectory:true)
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
         if args[1] == "video-settings" { try await videoSettingsSmoke(fixtures:fixtures,output:output); return }
+        if args[1] == "fonts" { try await fontSmoke(fonts:args.dropFirst(4).map { URL(fileURLWithPath:$0) },fixtures:fixtures,output:output); return }
         if args[1] == "snapshot" { try await snapshotSmoke(fixtures:fixtures,output:output); return }
         let library = MediaLibrary(), builder = CompositionBuilder(), exporter = MovieExporter()
         var project = Project(); project.name = "Frame Studio Validation"
@@ -456,6 +457,7 @@ actor ProgressFlag {
         let exportedMiddle = pixels(try await exportedGenerator.image(at:CMTime(seconds:3.0,preferredTimescale:600)).image)
         try require(isRed(rgb(exportedMiddle,30)) && isGreen(rgb(exportedMiddle,130)),"the exported push is mid-way at the cut, got \(rgb(exportedMiddle,30)) / \(rgb(exportedMiddle,130))")
         print("PASS transitions: \(TransitionKind.allCases.count) kinds (\(expectations.count) with directions) at their midpoints, gamma blends, picture-in-picture dissolve, held last frames, equal-power crossfade, fade in, export")
+        try await fontSmoke(fonts:[],fixtures:fixtures,output:output.appendingPathComponent("fonts",isDirectory:true))
         var fractional = Project(); fractional.frameRate = .init(30000,1001); fractional.media = [project.media[2]]
         let fractionalID = try Editing.add(mediaID:project.media[2].id,lane:.v1,at:.zero,to:&fractional)
         try Editing.trim(fractionalID,leading:false,to:.init(ticks:fractional.frameRate.frame.ticks*31),in:&fractional)

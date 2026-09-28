@@ -151,15 +151,26 @@ public enum FrameRenderer {
             .applyingFilter("CIColorMatrix",parameters:["inputAVector":CIVector(x:0,y:0,z:0,w:s.opacity)])
     }
     public static func textImage(_ style: ClipStyle) throws -> CIImage {
-        let font = CTFontCreateWithName("HelveticaNeue-Bold" as CFString,style.fontSize,nil)
+        let font = FontLibrary.font(style.fontName,size:style.fontSize)       // the default when not available here
         let color = CGColor(colorSpace:CGColorSpace(name:CGColorSpace.sRGB)!,components:[style.red,style.green,style.blue,1])!
         let text = NSAttributedString(string:style.text.isEmpty ? " " : style.text,attributes:[NSAttributedString.Key(kCTFontAttributeName as String):font,NSAttributedString.Key(kCTForegroundColorAttributeName as String):color])
         let framesetter = CTFramesetterCreateWithAttributedString(text)
         let suggested = CTFramesetterSuggestFrameSizeWithConstraints(framesetter,CFRange(location:0,length:0),nil,CGSize(width:1700,height:4000),nil)
-        let width = max(8,Int(ceil(suggested.width))+24), height = max(8,Int(ceil(suggested.height))+24)
+        let box = CGRect(x:0,y:0,width:ceil(suggested.width),height:ceil(suggested.height))
+        let frame = CTFramesetterCreateFrame(framesetter,CFRange(location:0,length:0),CGPath(rect:box,transform:nil),nil)
+        // Some fonts draw past their line metrics (Gmarket Sans descenders reach 0.35 em below a
+        // 0.2 em descent). Widen the 12 px margin, on every side so the title stays centred, only
+        // when the ink needs it: titles that fit keep exactly the raster they always had.
+        let lines = CTFrameGetLines(frame) as? [CTLine] ?? []
+        var origins = [CGPoint](repeating:.zero,count:lines.count)
+        CTFrameGetLineOrigins(frame,CFRange(location:0,length:0),&origins)
+        let ink = zip(lines,origins).reduce(CGRect.null) { $0.union(CTLineGetImageBounds($1.0,nil).offsetBy(dx:$1.1.x,dy:$1.1.y)) }
+        let overhang = ink.isNull ? 0 : max(0,-ink.minX,-ink.minY,ink.maxX-box.maxX,ink.maxY-box.maxY)
+        let pad = overhang > 10 ? Int(ceil(overhang))+2 : 12
+        let width = max(8,Int(box.width)+2*pad), height = max(8,Int(box.height)+2*pad)
         guard let context = CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { throw EditError("Cannot render text.") }
-        let path = CGPath(rect:CGRect(x:12,y:12,width:width-24,height:height-24),transform:nil)
-        CTFrameDraw(CTFramesetterCreateFrame(framesetter,CFRange(location:0,length:0),path,nil),context)
+        context.translateBy(x:CGFloat(pad),y:CGFloat(pad))
+        CTFrameDraw(frame,context)
         guard let image = context.makeImage() else { throw EditError("Cannot create text image.") }
         return CIImage(cgImage:image)
     }

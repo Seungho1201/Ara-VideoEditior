@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import FrameCore
+import FrameMedia
 
 /// The start screen: every project the user has opened or saved, most recent first.
 struct LauncherView: View {
@@ -38,7 +39,11 @@ struct LauncherView: View {
                             }
                             if let url { urls.append(url) }
                         }
-                        store.addProjects(urls)
+                        // Fonts dropped here go to the font library; the rest are looked through for projects.
+                        let fonts = urls.filter(FontLibrary.accepts)
+                        if !fonts.isEmpty { store.addFonts(fonts,applyToSelection:false) }
+                        let others = urls.filter { !FontLibrary.accepts($0) }
+                        if !others.isEmpty { store.addProjects(others) }
                     }
                     return true
                 }

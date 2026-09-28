@@ -68,12 +68,32 @@ public struct ClipStyle: Codable, Hashable, Sendable {
     public var volume: Double = 1
     public var muted = false
     public var text = "Your story starts here"
+    /// PostScript name of the title's font (a face, not a family: "GmarketSansBold").
+    public var fontName = ClipStyle.defaultFontName
     /// Font size relative to a 1080-pixel short edge, scales proportionally for 4K.
     public var fontSize: Double = 72
     public var red: Double = 1
     public var green: Double = 1
     public var blue: Double = 1
+    public static let defaultFontName = "HelveticaNeue-Bold"
     public init() {}
+    private enum CodingKeys: String, CodingKey {
+        case x, y, scale, rotation, opacity, brightness, contrast, saturation, volume, muted, text, fontName, fontSize, red, green, blue
+    }
+    /// Documents from before fonts could be chosen have no font name: they keep the font they
+    /// were made with.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy:CodingKeys.self)
+        x = try c.decode(Double.self,forKey:.x); y = try c.decode(Double.self,forKey:.y)
+        scale = try c.decode(Double.self,forKey:.scale); rotation = try c.decode(Double.self,forKey:.rotation)
+        opacity = try c.decode(Double.self,forKey:.opacity); brightness = try c.decode(Double.self,forKey:.brightness)
+        contrast = try c.decode(Double.self,forKey:.contrast); saturation = try c.decode(Double.self,forKey:.saturation)
+        volume = try c.decode(Double.self,forKey:.volume); muted = try c.decode(Bool.self,forKey:.muted)
+        text = try c.decode(String.self,forKey:.text)
+        fontName = try c.decodeIfPresent(String.self,forKey:.fontName) ?? Self.defaultFontName
+        fontSize = try c.decode(Double.self,forKey:.fontSize)
+        red = try c.decode(Double.self,forKey:.red); green = try c.decode(Double.self,forKey:.green); blue = try c.decode(Double.self,forKey:.blue)
+    }
 }
 
 public struct Clip: Codable, Hashable, Sendable, Identifiable {
@@ -207,7 +227,8 @@ public struct Project: Codable, Hashable, Sendable {
             guard [s.x,s.y,s.scale,s.rotation,s.opacity,s.brightness,s.contrast,s.saturation,s.volume,s.fontSize,s.red,s.green,s.blue].allSatisfy(\.isFinite),
                   (0.05...4).contains(s.scale), (0...1).contains(s.opacity), (0...4).contains(s.volume),
                   (-1...1).contains(s.brightness), (0...3).contains(s.contrast), (0...3).contains(s.saturation),
-                  (8...300).contains(s.fontSize), s.text.count <= 2000 else { throw EditError("Invalid clip properties.") }
+                  (8...300).contains(s.fontSize), s.text.count <= 2000,
+                  !s.fontName.isEmpty, s.fontName.count <= 255, !s.fontName.contains(where: \.isNewline) else { throw EditError("Invalid clip properties.") }
             guard (-2...2).contains(s.x), (-2...2).contains(s.y), (-360...360).contains(s.rotation),
                   [s.red,s.green,s.blue].allSatisfy({ (0...1).contains($0) }) else { throw EditError("Invalid transform or text color.") }
         }

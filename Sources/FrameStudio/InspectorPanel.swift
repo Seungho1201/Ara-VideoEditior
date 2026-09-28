@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import FrameCore
+import FrameMedia
 
 struct InspectorPanel: View {
     @ObservedObject var store: EditorStore
@@ -88,6 +89,9 @@ struct InspectorPanel: View {
                                         if !focused { flushTextCommit(); store.endLiveEdit() }
                                     }
                                     .onDisappear { store.isEditingText = false; flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
+                                TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
+                                                  isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
+                                                  addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable()
                                 control("Font size",\.fontSize,range:8...300,suffix:" pt")
                                 ColorPicker("Text colour",selection:Binding(get:{Color(red:clip.style.red,green:clip.style.green,blue:clip.style.blue)},set:{color in
                                     guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
@@ -244,5 +248,90 @@ struct InspectorPanel: View {
             }
             Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in store.updateStyle { $0[keyPath:key] = v } }),in:range,onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } }).controlSize(.mini).accessibilityLabel(label)
         }
+    }
+}
+
+
+/// Family and style menus for a title, the font file button, and a note when the title's font is
+/// not on this Mac (it is drawn in the default font until the font is added). Equatable on what it
+/// shows, so the inspector's many unrelated updates do not rebuild its ~250-item family menu.
+struct TitleFontControls: View, Equatable {
+    let fontName: String
+    let revision: Int
+    let addedFolder: URL
+    let isAdding: Bool
+    let apply: (String) -> Void
+    let addFonts: () -> Void
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.fontName == b.fontName && a.revision == b.revision && a.addedFolder == b.addedFolder && a.isAdding == b.isAdding
+    }
+    var body: some View {
+        let current = FontLibrary.face(fontName)
+        let menu = FontMenu.families(revision,addedIn:addedFolder)
+        let listed = Set((menu.added+menu.system).map(\.name))
+        VStack(alignment:.leading,spacing:10) {
+            HStack {
+                Text("Font").foregroundStyle(Theme.muted); Spacer()
+                Picker("",selection:Binding(get:{ current?.family ?? FontMenu.missingTag },set:{ family in
+                    guard family != FontMenu.missingTag, family != current?.family,
+                          let face = FontLibrary.closestFace(inFamily:family,toWeight:current?.weight ?? 0.4,italic:current?.isItalic ?? false) else { return }
+                    apply(face.postScriptName)
+                })) {
+                    if current == nil { Text("\(fontName) (missing)").tag(FontMenu.missingTag) }
+                    // A family installed since the list was made (Font Book) still has an entry.
+                    if let current, !listed.contains(current.family) { Text(current.familyDisplayName).tag(current.family) }
+                    if !menu.added.isEmpty {
+                        Section("Added") { ForEach(menu.added) { Text($0.displayName).tag($0.name) } }
+                    }
+                    Section("System") { ForEach(menu.system) { Text($0.displayName).tag($0.name) } }
+                }.labelsHidden().controlSize(.small).frame(maxWidth:170).accessibilityLabel("Font family")
+            }
+            if let current {
+                let faces = FontLibrary.faces(ofFamily:current.family)
+                let repeated = Dictionary(grouping:faces,by:\.style).filter { $0.value.count > 1 }.keys
+                if faces.count > 1 {
+                    HStack {
+                        Text("Style").foregroundStyle(Theme.muted); Spacer()
+                        Picker("",selection:Binding(get:{ current.postScriptName },set:{ name in
+                            if name != current.postScriptName { apply(name) }
+                        })) {
+                            // Two faces with one style name (a static file and a variable font of the
+                            // same family) are told apart by their PostScript names.
+                            ForEach(faces) { Text(repeated.contains($0.style) ? "\($0.style) · \($0.postScriptName)" : $0.style).tag($0.postScriptName) }
+                        }.labelsHidden().controlSize(.small).frame(maxWidth:170).accessibilityLabel("Font style")
+                    }
+                }
+            } else {
+                Text("“\(fontName)” isn't on this Mac, so the title is shown in Helvetica Neue Bold. Add the font to use it again.")
+                    .font(.system(size:9)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
+            }
+            HStack(spacing:8) {
+                Button("Add Font…",action:addFonts).controlSize(.small).disabled(isAdding)
+                    .help("TTF, OTF or TTC files, or the ZIP they came in. Ara keeps its own copy, and the new font is put on this title.")
+                if isAdding { ProgressView().controlSize(.mini).accessibilityLabel("Adding fonts") }
+            }
+        }
+    }
+}
+
+/// Font families for the title font menu, split into the fonts added to Ara and the Mac's own.
+/// Listing every family takes a moment, so it is done once per set of fonts, not per redraw.
+@MainActor enum FontMenu {
+    static let missingTag = "\u{0}missing"
+    private static var cache: (revision: Int, added: [FontLibrary.Family], system: [FontLibrary.Family])?
+    /// Lists the families off the main thread ahead of time (at launch, after fonts change), so
+    /// the first title selected does not wait for it.
+    static func warm(_ revision: Int, addedIn folder: URL) async {
+        if let cache, cache.revision == revision { return }
+        let all = await Task.detached(priority:.utility) { FontLibrary.families() }.value
+        let added = Set(FontLibrary.addedFaces(in:folder).map(\.family))
+        cache = (revision,all.filter { added.contains($0.name) },all.filter { !added.contains($0.name) })
+    }
+    static func families(_ revision: Int, addedIn folder: URL) -> (added: [FontLibrary.Family], system: [FontLibrary.Family]) {
+        if let cache, cache.revision == revision { return (cache.added,cache.system) }
+        let all = FontLibrary.families(), added = Set(FontLibrary.addedFaces(in:folder).map(\.family))
+        let split = (all.filter { added.contains($0.name) },all.filter { !added.contains($0.name) })
+        cache = (revision,split.0,split.1)
+        return split
     }
 }

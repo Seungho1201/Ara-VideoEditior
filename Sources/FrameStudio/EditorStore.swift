@@ -52,6 +52,11 @@ import FrameMedia
     @Published var exportProgress: Double = 0
     @Published var showExportSheet = false
     @Published var showNewProjectSheet = false
+    /// Bumped when fonts are added, so font menus list them.
+    @Published private(set) var fontsRevision = 0
+    @Published private(set) var isAddingFonts = false
+    /// Where added fonts are kept (tests point it elsewhere).
+    var fontFolder = FontLibrary.folder
     var exportHeight: Int { project.outputResolution }
     @Published var message: String?
     @Published var status = "Import media to start editing"
@@ -110,6 +115,7 @@ import FrameMedia
     /// supersedes the first, which would otherwise read "not playing" and leave playback stopped.
     private var resumeAfterBuild = false
     private var rateObservation: NSKeyValueObservation?
+    private var fontsObserver: NSObjectProtocol?
     private var proxySwapDeferred = false
     private var periodic: Any?
     private var itemObservation: NSKeyValueObservation?
@@ -132,6 +138,21 @@ import FrameMedia
         saved = project
         player.actionAtItemEnd = .pause
         Task.detached(priority:.background) { ProxyMaker.prune() }
+        // Before anything renders a title: added fonts are registered for this process only.
+        FontLibrary.registerAddedFonts()
+        // Fonts installed or removed while Ara runs (Font Book, or Ara adding its own): refresh the
+        // font menus and redraw titles set in a font other than the default.
+        let startRevision = fontsRevision, startFolder = fontFolder
+        Task { await FontMenu.warm(startRevision,addedIn:startFolder) }
+        fontsObserver = NotificationCenter.default.addObserver(forName:Notification.Name(kCTFontManagerRegisteredFontsChangedNotification as String),object:nil,queue:.main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.fontsRevision += 1
+                self.redrawTitles { $0.style.fontName != ClipStyle.defaultFontName }
+                let revision = self.fontsRevision, folder = self.fontFolder
+                Task { await FontMenu.warm(revision,addedIn:folder) }
+            }
+        }
         periodic = player.addPeriodicTimeObserver(forInterval:CMTime(value:1,timescale:30),queue:.main) { [weak self] time in
             Task { @MainActor in
                 guard let self else { return }
@@ -500,10 +521,82 @@ import FrameMedia
         panel.allowedContentTypes = [.movie,.audio,.png,.jpeg,.tiff]
         if panel.runModal() == .OK { importFiles(panel.urls) }
     }
+    /// `applyToSelection` for a title's own Add Font… button; File > Add Fonts… only adds.
+    func chooseFonts(applyToSelection: Bool = false) {
+        let panel = NSOpenPanel(); panel.title = "Add fonts"; panel.prompt = "Add"; panel.allowsMultipleSelection = true
+        panel.message = "Choose font files (TTF, OTF, TTC) or the ZIP archive they came in."
+        panel.allowedContentTypes = [.zip] + FontLibrary.fileExtensions.sorted().compactMap { UTType(filenameExtension:$0) }
+        if panel.runModal() == .OK { addFonts(panel.urls,applyToSelection:applyToSelection) }
+    }
+    /// Copies fonts into Ara's font folder and makes them available to titles. Titles that were
+    /// waiting for one of these fonts (drawn in the default font) are redrawn in it. With a title
+    /// selected from its inspector's Add Font…, a new family is put on it straight away: the face
+    /// closest to the title's weight and slant.
+    func addFonts(_ urls: [URL], applyToSelection: Bool) {
+        guard !urls.isEmpty else { return }
+        guard !isAddingFonts else { message = "Fonts are still being added. Add these again when that finishes."; return }
+        isAddingFonts = true; status = "Adding fonts…"
+        let target = applyToSelection ? selectedClip.flatMap { $0.kind == .text ? $0.id : nil } : nil
+        let folder = fontFolder, session = session
+        Task { [weak self] in
+            let result = await Task.detached(priority:.userInitiated) { Result { try FontLibrary.importFonts(urls,into:folder) } }.value
+            guard let self else { return }
+            isAddingFonts = false
+            switch result {
+            case .failure(let error): report(error)
+            case .success(let imported):
+                fontsRevision += 1
+                let names = Set(imported.added.map(\.postScriptName)), count = imported.added.count
+                let families = Array(NSOrderedSet(array:imported.added.map(\.familyDisplayName))) as? [String] ?? []
+                status = "Added \(count) font\(count == 1 ? "" : "s") · \(families.joined(separator:", "))"
+                redrawTitles { names.contains($0.style.fontName) }
+                var applied = false
+                // Only in the document the font was asked for, and not when the title was already
+                // waiting for one of these fonts (it now shows it).
+                if session == self.session, let target, let clip = project.clips.first(where: { $0.id == target }),
+                   !names.contains(clip.style.fontName), let family = imported.added.first?.family {
+                    let current = FontLibrary.face(clip.style.fontName)
+                    if let face = FontLibrary.closestFace(inFamily:family,toWeight:current?.weight ?? 0.4,italic:current?.isItalic ?? false) {
+                        applyFont(face.postScriptName,to:target); applied = true
+                    }
+                } else if session == self.session, let target, let clip = project.clips.first(where: { $0.id == target }), names.contains(clip.style.fontName) {
+                    applied = true
+                }
+                var notes: [String] = []
+                if !applied { notes.append("Added \(families.joined(separator:", ")) (\(count) style\(count == 1 ? "" : "s")). Choose it from a title's Font menu.") }
+                if !imported.skipped.isEmpty { notes.append("Some files were not added:\n" + imported.skipped.joined(separator:"\n")) }
+                if !notes.isEmpty { message = notes.joined(separator:"\n\n") }
+            }
+        }
+    }
+    /// Puts a font on a title: one undo step, redrawn in place like typing.
+    func applyFont(_ postScriptName: String, to id: UUID? = nil) {
+        guard let id = id ?? selectedClipID, project.clips.first(where: { $0.id == id })?.kind == .text else { return }
+        commitPendingEdits(); endLiveEdit()
+        updateStyleLive(id,name:"Font",closesWhenIdle:false) { $0.fontName = postScriptName }
+        endLiveEdit()
+    }
+    /// Titles are drawn into images when the preview is built. When the fonts on this Mac change
+    /// (added in Ara or installed in Font Book), titles whose font may now resolve differently are
+    /// drawn again, in place when possible.
+    private func redrawTitles(where needsIt: (Clip) -> Bool) {
+        for clip in project.clips where clip.kind == .text && needsIt(clip) {
+            if !refreshPreviewLayer(clip) { rebuild(); return }
+        }
+    }
+    /// Fonts named by titles that this Mac does not have; those titles are drawn in the default font.
+    var missingFonts: [String] {
+        Array(Set(project.clips.filter { $0.kind == .text }.map(\.style.fontName))).filter { !FontLibrary.isAvailable($0) }.sorted()
+    }
     private func hold(_ url: URL) {
         if scopes[url] == nil { scopes[url] = url.startAccessingSecurityScopedResource() }
     }
     func importFiles(_ files: [URL]) {
+        // Fonts dropped on the window (or opened with Ara) go to the font library, not the media.
+        let fonts = files.filter(FontLibrary.accepts)
+        if !fonts.isEmpty { addFonts(fonts,applyToSelection:false) }
+        let files = files.filter { !FontLibrary.accepts($0) }
+        guard !files.isEmpty else { return }
         guard !isImporting else { message = "An import is already running. Wait for it to finish."; return }
         showLauncher = false
         for url in files { hold(url) }
@@ -762,6 +855,10 @@ import FrameMedia
             let loaded = try ProjectFile.decode(Data(contentsOf:url))
             resetSession(); project = loaded; documentURL = url; restoreAccess(); saved = project
             if missing.isEmpty { rebuild() } else { status = "\(missing.count) sources need relinking · Use Relink in the library" }
+            let fonts = missingFonts
+            if !fonts.isEmpty {
+                message = "This project uses fonts that aren't on this Mac: \(fonts.joined(separator:", ")). Titles in them are shown in Helvetica Neue Bold until you add the fonts (Add Font… in a title's inspector)."
+            }
             NSDocumentController.shared.noteNewRecentDocumentURL(url); registry.record(url)
             showLauncher = false
         } catch { report(error) }

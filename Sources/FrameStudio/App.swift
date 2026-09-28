@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import FrameMedia
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     weak var store: EditorStore?
@@ -25,9 +26,13 @@ import AppKit
         return approvedClose
     }
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard store != nil else { pendingURLs.append(contentsOf:urls); return }
-        if let url = urls.first(where: { $0.pathExtension == "framestudio" }) { store?.openProject(url) }
-        else { store?.importFiles(urls) }
+        guard let store else { pendingURLs.append(contentsOf:urls); return }
+        // Fonts always go to the font library, also when a project is opened with them.
+        let fonts = urls.filter(FontLibrary.accepts)
+        if !fonts.isEmpty { store.addFonts(fonts,applyToSelection:false) }
+        let urls = urls.filter { !FontLibrary.accepts($0) }
+        if let url = urls.first(where: { $0.pathExtension == "framestudio" }) { store.openProject(url) }
+        else if !urls.isEmpty { store.importFiles(urls) }
     }
 }
 
@@ -69,6 +74,7 @@ import AppKit
                     Button("Save Project As…") { store.save(as:true) }.keyboardShortcut("s",modifiers:[.command,.shift])
                     Divider()
                     Button("Import Media…") { store.chooseImport() }.keyboardShortcut("i")
+                    Button("Add Fonts…") { store.chooseFonts() }.disabled(store.isAddingFonts)
                     Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut("e").disabled(store.isExporting || store.isCapturingSnapshot)
                     Button("Save Timeline Snapshot…") { store.chooseSnapshot() }.keyboardShortcut("e",modifiers:[.command,.shift]).disabled(!store.canCaptureSnapshot)
                 }.disabled(store.showLauncher || store.showNewProjectSheet)
