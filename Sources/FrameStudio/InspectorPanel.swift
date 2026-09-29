@@ -19,6 +19,34 @@ struct InspectorPanel: View {
     @FocusState private var textFocused: Bool
     /// The title whose appearance slider is being dragged: its edits stay one undo step until release.
     @State private var titleDrag: UUID?
+    /// The characters a title keeps (Project.validated): the text field holds no more.
+    static let textLimit = 2000
+    /// `draft` cut to `textLimit` where it differs from `old`: what was typed or pasted is shortened,
+    /// never the text around it, so a key pressed in a full title changes nothing.
+    static func fitted(_ draft: String, after old: String) -> String { fitting(draft,after:old).text }
+    /// `fitted`, with where the caret goes: after what was kept of the typing or paste (in UTF-16
+    /// units, as the text view counts).
+    static func fitting(_ draft: String, after old: String) -> (text: String, caret: Int) {
+        guard draft.count > textLimit else { return (draft,draft.utf16.count) }
+        let new = Array(draft), was = Array(old)
+        var head = 0, tail = 0
+        while head < min(new.count,was.count), new[head] == was[head] { head += 1 }
+        while tail < min(new.count,was.count)-head, new[new.count-1-tail] == was[was.count-1-tail] { tail += 1 }
+        guard head+tail <= textLimit else { let text = String(draft.prefix(textLimit)); return (text,text.utf16.count) }
+        let kept = String(new[..<head]+new[head..<new.count-tail].prefix(textLimit-head-tail))
+        return (kept+String(new[(new.count-tail)...]),kept.utf16.count)
+    }
+    /// Puts the caret back at `caret` in the text view showing `text` once it shows it: writing the
+    /// fitted text back puts the caret at its end, and the next key would act there, out of sight.
+    private static func placeCaret(_ caret: Int, in text: String, tries: Int = 5) {
+        DispatchQueue.main.async {
+            guard let field = NSApp.windows.lazy.compactMap({ $0.firstResponder as? NSTextView }).first(where: { $0.string == text }) else {
+                if tries > 1 { placeCaret(caret,in:text,tries:tries-1) }
+                return
+            }
+            field.setSelectedRange(NSRange(location:caret,length:0)); field.scrollRangeToVisible(field.selectedRange())
+        }
+    }
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
             if let transition = store.selectedTransition {
@@ -26,10 +54,7 @@ struct InspectorPanel: View {
             } else if let clip = store.selectedClip {
                 ScrollView {
                     VStack(alignment:.leading,spacing:18) {
-                        VStack(alignment:.leading,spacing:6) {
-                            Text(clip.name).font(.system(size:13,weight:.semibold)).lineLimit(2)
-                            HStack { Text("\(clip.lane.rawValue) · \(clip.kind.rawValue.capitalized)"); if clip.linkID != nil { Image(systemName:"link"); Text("Linked A/V") } }.font(.system(size:10)).foregroundStyle(Theme.accent)
-                        }
+                        ClipHeader(store:store,clip:clip)
                         // A title's own settings come first: what it says and how it looks.
                         if clip.kind == .text {
                             section("TEXT") {
@@ -39,12 +64,29 @@ struct InspectorPanel: View {
                                     .onChange(of:clip.id) { _,_ in syncDraft(from:clip,force:true) }
                                     // Undo/redo or Reset changed the text: follow it even while focused.
                                     .onChange(of:clip.style.text) { _,now in followOutsideChange(now) }
-                                    .onChange(of:textDraft) { _,draft in scheduleTextCommit(draft) }
+                                    // Also when an undo lands on the text last drawn: typing flushed and undone
+                                    // in one call never shows the text change above.
+                                    .onChange(of:store.textRevision) { _,_ in
+                                        if let now = store.project.clips.first(where: { $0.id == draftClipID })?.style.text { followOutsideChange(now) }
+                                    }
+                                    .onChange(of:textDraft) { old,draft in
+                                        // The field holds no more than the title keeps: a longer paste is cut here, in
+                                        // view, and the caret stays after what was kept.
+                                        if draft.count > Self.textLimit {
+                                            let fitted = Self.fitting(draft,after:old)
+                                            textDraft = fitted.text; Self.placeCaret(fitted.caret,in:fitted.text); return
+                                        }
+                                        scheduleTextCommit(draft)
+                                    }
                                     .onChange(of:textFocused) { _,focused in
                                         store.isEditingText = focused
                                         if !focused { flushTextCommit(); store.endLiveEdit() }
                                     }
                                     .onDisappear { store.isEditingText = false; flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
+                                if textDraft.count >= Self.textLimit {
+                                    Text("A title holds up to \(Self.textLimit) characters.")
+                                        .font(.system(size:9)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
+                                }
                                 TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
                                                   isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
                                                   addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable()
@@ -53,11 +95,11 @@ struct InspectorPanel: View {
                             }
                             // Width and opacity switch the effect on; the rest wait until it is.
                             section("OUTLINE") {
-                                titleControl("Width",\.outlineWidth,range:0...20,suffix:" pt",clip:clip,undoName:"Outline")
+                                titleControl("Width",\.outlineWidth,range:0...20,suffix:" pt",clip:clip,undoName:"Outline",switches:true)
                                 titleColor("Outline colour",\.outlineRed,\.outlineGreen,\.outlineBlue,clip:clip).disabled(!clip.style.hasOutline)
                             }
                             section("SHADOW") {
-                                titleControl("Opacity",\.shadowOpacity,range:0...1,multiplier:100,suffix:"%",clip:clip,undoName:"Shadow")
+                                titleControl("Opacity",\.shadowOpacity,range:0...1,multiplier:100,suffix:"%",clip:clip,undoName:"Shadow",switches:true)
                                 Group {
                                     titleControl("Distance",\.shadowDistance,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
                                     titleControl("Angle",\.shadowAngle,range:-180...180,suffix:"°",clip:clip,undoName:"Shadow")
@@ -149,7 +191,7 @@ struct InspectorPanel: View {
     @ViewBuilder private func transitionInspector(_ transition: FrameCore.Transition) -> some View {
         let project = store.project
         let lane = (transition.from ?? transition.to).flatMap(project.clip)?.lane.rawValue ?? "V"
-        let placement = transition.isCut ? "Across a cut" : transition.to != nil ? "Fade in" : "Fade out"
+        let placement = transition.isCut ? String(localized:"Across a cut") : transition.to != nil ? String(localized:"Fade in") : String(localized:"Fade out")
         var others = project
         let _ = others.transitions.removeAll { $0.id == transition.id }
         let longest = max(project.frameRate.frame.seconds,others.longestTransition(from:transition.from,to:transition.to).seconds)
@@ -157,7 +199,7 @@ struct InspectorPanel: View {
             VStack(alignment:.leading,spacing:18) {
                 VStack(alignment:.leading,spacing:6) {
                     Text(transition.kind.displayName).font(.system(size:13,weight:.semibold))
-                    Text("\(lane) · \(placement)").font(.system(size:10)).foregroundStyle(Theme.accent)
+                    Text(verbatim:"\(lane) · \(placement)").font(.system(size:10)).foregroundStyle(Theme.accent).lineLimit(1)
                 }
                 Image(nsImage:TransitionPreviews.image(transition.kind,direction:transition.direction)).resizable().aspectRatio(16/9,contentMode:.fit)
                     .clipShape(RoundedRectangle(cornerRadius:4)).frame(maxWidth:220)
@@ -177,14 +219,14 @@ struct InspectorPanel: View {
                             Text("Direction").foregroundStyle(Theme.muted); Spacer()
                             Picker("",selection:Binding(get:{store.selectedTransition?.direction ?? transition.direction},set:{ store.updateSelectedTransition(direction:$0) })) {
                                 ForEach(TransitionDirection.allCases) { direction in
-                                    Image(systemName:"arrow.\(direction.rawValue)").tag(direction).accessibilityLabel(direction.rawValue.capitalized)
+                                    Image(systemName:"arrow.\(direction.rawValue)").tag(direction).accessibilityLabel(direction.displayName)
                                 }
                             }.pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(maxWidth:150)
                         }
                     }
                     HStack {
                         Text("Duration").foregroundStyle(Theme.muted); Spacer()
-                        Text(String(format:"%.2f s",(store.selectedTransition?.duration ?? transition.duration).seconds)).font(.system(size:10,design:.monospaced))
+                        Text(String(format:String(localized:"%.2f s"),(store.selectedTransition?.duration ?? transition.duration).seconds)).font(.system(size:10,design:.monospaced))
                     }
                     Slider(value:Binding(get:{store.selectedTransition?.duration.seconds ?? transition.duration.seconds},
                                          set:{ store.updateSelectedTransition(duration:MediaTime(seconds:$0)) }),
@@ -199,7 +241,8 @@ struct InspectorPanel: View {
                          : "Centred on the cut: out of the first clip, into the next. Needs no footage beyond the cut.")
                         .font(.system(size:9)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
                 }
-                Button("Remove transition  ⌫") { store.removeSelectedTransition() }.controlSize(.small)
+                // Names the key Delete is set to now (none when it has no shortcut).
+                Button("Remove transition  \(shortcuts.label(.delete))") { store.removeSelectedTransition() }.controlSize(.small)
             }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
         }
     }
@@ -243,7 +286,7 @@ struct InspectorPanel: View {
         let visible = String(String.UnicodeScalarView(draft.unicodeScalars.filter {
             $0 == "\n" || $0 == "\t" || $0.properties.generalCategory != .control
         }))
-        let text = String(visible.prefix(2000))
+        let text = String(visible.prefix(Self.textLimit))
         guard draftSession == store.session,
               store.project.clips.first(where: { $0.id == id })?.style.text != text else { return }
         if id == draftClipID { lastCommitted = text }
@@ -284,17 +327,51 @@ struct InspectorPanel: View {
     private func info(_ key:String,_ value:String) -> some View {
         HStack { Text(LocalizedStringKey(key)).foregroundStyle(Theme.muted); Spacer(); Text(value).font(.system(size:10,design:.monospaced)) }
     }
+    /// What an appearance slider does with a value: one live edit of the clip, kept in `range`.
+    /// Turning and scaling go about the clip's alignment point, as the preview's handle and pinch
+    /// do; the frame in 1080 units stands in for the viewer, as the point lands alike at any size.
+    /// A value that switches a title's effect on (`switches`) and reads 0 is 0: the effect is off,
+    /// as its label says.
+    static func slide(_ key: WritableKeyPath<ClipStyle,Double>, to value: Double, range: ClosedRange<Double>, multiplier: Double = 1, switches: Bool = false,
+                      of id: UUID, name: String, closesWhenIdle: Bool, in store: EditorStore) {
+        guard let clip = store.project.clips.first(where: { $0.id == id }) else { return }
+        var kept = min(range.upperBound,max(range.lowerBound,value))
+        if switches, (kept*multiplier).rounded() == 0 { kept = 0 }
+        let turns = key == \ClipStyle.rotation || key == \ClipStyle.scale
+        let geometry = turns ? (store.previewSourceSize(for:clip) ?? letters(of:clip)).map {
+            VisualGeometry(sourceSize:$0,canvasSize:store.project.aspectRatio.size(),style:clip.style,isText:clip.kind == .text)
+        } : nil
+        store.updateStyleLive(id,name:name,closesWhenIdle:closesWhenIdle) { style in
+            style[keyPath:key] = kept
+            if let geometry { style = geometry.keepingAnchor(style) }
+        }
+    }
+    /// A title's letters' box drawn here, for when the preview has no picture of it (not built
+    /// yet, or stopped by a missing source), measured as `previewSourceSize` measures it.
+    private static func letters(of clip: Clip) -> CGSize? {
+        guard clip.kind == .text, let image = try? FrameRenderer.textImage(clip.style) else { return nil }
+        let margin = FrameRenderer.effectMargin(clip.style)
+        return CGSize(width:max(1,image.extent.width-2*margin),height:max(1,image.extent.height-2*margin))
+    }
+    /// A title slider's value as its label reads it: whole steps, rounded as `slide` rounds (+ 0
+    /// turns −0 into 0). An effect that is on never reads 0: one saved below a step by an earlier
+    /// Ara shows its tenths.
+    static func reading(_ value: Double, multiplier: Double = 1, switches: Bool = false) -> String {
+        let shown = value*multiplier
+        if switches, shown > 0, shown.rounded() == 0 { return String(format:"%.1f",max(0.1,(shown*10).rounded()/10)) }
+        return String(format:"%.0f",shown.rounded()+0)
+    }
     /// A slider for how a title is drawn. It redraws the title in the preview without rebuilding
     /// the composition, and one drag is one undo step.
-    private func titleControl(_ label:String,_ key:WritableKeyPath<ClipStyle,Double>,range:ClosedRange<Double>,multiplier:Double = 1,suffix:String = "",clip:Clip,undoName:String? = nil) -> some View {
+    private func titleControl(_ label:String,_ key:WritableKeyPath<ClipStyle,Double>,range:ClosedRange<Double>,multiplier:Double = 1,suffix:String = "",clip:Clip,undoName:String? = nil,switches:Bool = false) -> some View {
         VStack(spacing:5) {
             HStack {
                 Text(LocalizedStringKey(label)).foregroundStyle(Theme.muted); Spacer()
-                Text(String(format:"%.0f",clip.style[keyPath:key]*multiplier)+suffix).font(.system(size:10,design:.monospaced))
+                Text(Self.reading(clip.style[keyPath:key],multiplier:multiplier,switches:switches)+suffix).font(.system(size:10,design:.monospaced))
             }
             Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in
                        // Keyboard steps have no drag around them: those close after a pause.
-                       store.updateStyleLive(clip.id,name:undoName ?? label,closesWhenIdle:titleDrag != clip.id) { $0[keyPath:key] = min(range.upperBound,max(range.lowerBound,v)) }
+                       Self.slide(key,to:v,range:range,multiplier:multiplier,switches:switches,of:clip.id,name:undoName ?? label,closesWhenIdle:titleDrag != clip.id,in:store)
                    }),in:range,onEditingChanged:{ active in
                        // The title's typed text lands first, as its own step.
                        if active { store.commitPendingEdits(); titleDrag = clip.id } else { titleDrag = nil; store.endLiveEdit() }
@@ -324,11 +401,59 @@ struct InspectorPanel: View {
                 // step at once, without rebuilding the composition, and one drag is one undo step.
                 Slider(value:Binding(get:{store.selectedClip?.style[keyPath:key] ?? range.lowerBound},set:{v in
                            guard let id = store.selectedClipID else { return }
-                           store.updateStyleLive(id,name:"Adjust clip",closesWhenIdle:titleDrag != id) { $0[keyPath:key] = min(range.upperBound,max(range.lowerBound,v)) }
+                           Self.slide(key,to:v,range:range,of:id,name:"Adjust clip",closesWhenIdle:titleDrag != id,in:store)
                        }),in:range,onEditingChanged:{ active in
                            if active { store.commitPendingEdits(); titleDrag = store.selectedClipID } else { titleDrag = nil; store.endLiveEdit() }
                        }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(label)))
             }
+        }
+    }
+}
+
+/// The selected clip's name, its track and kind, and for a picture the buttons that place its
+/// alignment point, on a row of their own so the name and track keep the panel's width.
+struct ClipHeader: View {
+    @ObservedObject var store: EditorStore
+    let clip: Clip
+    private var placing: Bool { store.anchorEditID == clip.id }
+    var body: some View {
+        VStack(alignment:.leading,spacing:6) {
+            Text(clip.name).font(.system(size:13,weight:.semibold)).lineLimit(2)
+            // One line: a narrow panel shortens it rather than break "V1 · Video" in two.
+            HStack { Text(verbatim:"\(clip.lane.rawValue) · \(clip.kind.displayName)"); if clip.linkID != nil { Image(systemName:"link"); Text("Linked A/V") } }
+                .font(.system(size:10)).foregroundStyle(Theme.accent).lineLimit(1)
+            // Where the clip's alignment point is: turning and scaling go about it, and moving lines
+            // it up with the frame's centre and other clips' points. Side by side while they fit.
+            if clip.lane.isVideo {
+                ViewThatFits(in:.horizontal) {
+                    HStack(spacing:6) { adjustButton; resetButton }
+                    VStack(alignment:.leading,spacing:5) { adjustButton; resetButton }
+                }.padding(.top,4)
+            }
+        }
+    }
+    private var adjustButton: some View {
+        Button { withAnimation(.snappy(duration:0.2)) { store.editAnchor(clip) } } label: {
+            Label(placing ? "Done" : "Adjust alignment point",systemImage:placing ? "checkmark.circle.fill" : "scope")
+                .font(.system(size:10,weight:.semibold)).lineLimit(1).fixedSize().padding(.horizontal,8).padding(.vertical,5)
+                .foregroundStyle(placing ? Theme.background : Color.primary)
+                .background(placing ? Theme.accent : Theme.raised,in:RoundedRectangle(cornerRadius:5))
+        }
+        .buttonStyle(.plain).disabled(store.isExporting || store.isCapturingSnapshot)
+        .help("Click, then click or drag in the preview to place the alignment point. It catches the centre, corners and edges.")
+    }
+    /// Only while placing the point. With nothing to reset it is dimmed once, as disabled, and not
+    /// again on top, so it stays legible.
+    @ViewBuilder private var resetButton: some View {
+        if placing {
+            Button { store.resetAnchor(clip) } label: {
+                Label("Reset alignment point",systemImage:"arrow.counterclockwise")
+                    .font(.system(size:10,weight:.semibold)).lineLimit(1).fixedSize().padding(.horizontal,8).padding(.vertical,5)
+                    .background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+            }
+            .buttonStyle(.plain).disabled(!clip.style.hasAnchor || store.isExporting)
+            .help("Put the alignment point back in the middle of the clip")
+            .transition(.opacity)
         }
     }
 }
@@ -347,18 +472,21 @@ struct TitleFontControls: View, Equatable {
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.fontName == b.fontName && a.revision == b.revision && a.addedFolder == b.addedFolder && a.isAdding == b.isAdding
     }
+    /// The font's name marked as not on this Mac, for the menu and its button.
+    private var missingTitle: String { String(localized:"\(fontName) (missing)") }
     private func familyEntries(current: FontLibrary.Face?, menu: (added: [FontLibrary.Family], system: [FontLibrary.Family]), listed: Set<String>) -> [FontPopUp.Entry] {
         var entries: [FontPopUp.Entry] = []
-        if current == nil { entries.append(.item(tag:FontMenu.missingTag,title:"\(fontName) (missing)",face:nil)) }
+        if current == nil { entries.append(.item(tag:FontMenu.missingTag,title:missingTitle,face:nil)) }
         // A family installed since the list was made (Font Book) still has an entry.
         if let current, !listed.contains(current.family) {
             entries.append(.item(tag:current.family,title:current.familyDisplayName,face:FontMenu.previewFace(of:FontLibrary.Family(name:current.family,displayName:current.familyDisplayName))))
         }
+        // AppKit draws the headers as given: they are looked up here.
         if !menu.added.isEmpty {
-            entries.append(.header("Added"))
+            entries.append(.header(String(localized:"Added")))
             entries += menu.added.map { .family($0) }
         }
-        entries.append(.header("System"))
+        entries.append(.header(String(localized:"System")))
         entries += menu.system.map { .family($0) }
         return entries
     }
@@ -371,7 +499,7 @@ struct TitleFontControls: View, Equatable {
                 Text("Font").foregroundStyle(Theme.muted); Spacer()
                 // Each family in its own face, so the menu shows what it offers.
                 FontPopUp(entries:familyEntries(current:current,menu:menu,listed:listed),selected:current?.family ?? FontMenu.missingTag,
-                          title:current?.familyDisplayName ?? "\(fontName) (missing)",label:"Font family") { family in
+                          title:current?.familyDisplayName ?? missingTitle,label:String(localized:"Font family")) { family in
                     guard family != FontMenu.missingTag, family != current?.family,
                           let face = FontLibrary.closestFace(inFamily:family,toWeight:current?.weight ?? 0.4,italic:current?.isItalic ?? false) else { return }
                     apply(face.postScriptName)
@@ -390,7 +518,7 @@ struct TitleFontControls: View, Equatable {
                             FontPopUp.Entry.item(tag:face.postScriptName,title:repeated.contains(face.style) ? "\(face.style) · \(face.postScriptName)" : face.style,
                                                  face:readable ? face.postScriptName : nil)
                         }
-                        FontPopUp(entries:entries,selected:current.postScriptName,title:current.style,label:"Font style") { name in
+                        FontPopUp(entries:entries,selected:current.postScriptName,title:current.style,label:String(localized:"Font style")) { name in
                             if name != current.postScriptName { apply(name) }
                         }.frame(maxWidth:170)
                     }

@@ -47,7 +47,10 @@ public enum Editing {
         if lane.isVideo { candidate.videoTrackCount -= 1 } else { candidate.audioTrackCount -= 1 }
         let result: Project
         do { result = try candidate.validated() }
-        catch { throw EditError("\(lane.rawValue) cannot be removed here: linked \(lane.isVideo ? "audio" : "video") above it would move onto a busy \(lane.isVideo ? "A" : "V")\(lane.number).") }
+        catch {
+            throw lane.isVideo ? EditError("\(lane.rawValue) cannot be removed here: linked audio above it would move onto a busy \(lane.paired.rawValue).")
+                               : EditError("\(lane.rawValue) cannot be removed here: linked video above it would move onto a busy \(lane.paired.rawValue).")
+        }
         // Moving a linked partner can separate it from the clip it has a transition with.
         guard result.transitions.count == project.transitions.count else {
             throw EditError("\(lane.rawValue) cannot be removed: a transition above it would be lost when its clips move to different tracks.")
@@ -59,7 +62,10 @@ public enum Editing {
         let covering = project.clips.filter { $0.lane.isVideo && $0.start < start+duration && start < $0.end }.map(\.lane.number).max() ?? 0
         let lane = Lane(.video,max(2,covering+1))
         var candidate = project
-        guard lane.number <= Project.trackCounts.upperBound else { throw EditError("Every video track is in use here. Move the playhead to add a title.") }
+        // Lower tracks may be free: the top one being in use within the title's span is what stops it.
+        guard lane.number <= Project.trackCounts.upperBound else {
+            throw EditError("A title goes on a track above the video it covers, and \(Lane(.video,covering).rawValue), the top track, is in use here. Move the playhead to add a title.")
+        }
         try candidate.ensureLane(lane)
         let clip = Clip(name: "Title", kind: .text, lane: lane, start: start, duration: duration)
         candidate.clips.append(clip); project = try candidate.validated(); return clip.id
@@ -90,6 +96,12 @@ public enum Editing {
                 if candidate.clips[i].kind == .video || candidate.clips[i].kind == .audio { candidate.clips[i].sourceStart = candidate.clips[i].sourceStart + delta.scaled(by: candidate.clips[i].speed) }
                 candidate.clips[i].duration = candidate.clips[i].duration - delta
             } else { candidate.clips[i].duration = candidate.clips[i].duration + delta }
+            if delta != .zero { candidate.clips[i].retimedSourceLength = nil }     // a new source range
+            // Lengthened at its end, a clip stops at its source's end: only a frame rate change
+            // may end one a little past it (Project.fitsSource), and no trim takes it further.
+            let clip = candidate.clips[i]
+            if !leading, delta > .zero, clip.kind == .video || clip.kind == .audio, let asset = project.media(for: clip),
+               clip.sourceStart + clip.sourceLength > asset.duration { throw EditError("Clip exceeds its source duration.") }
         }
         project = try candidate.validated()
     }
@@ -104,7 +116,8 @@ public enum Editing {
             guard let i = candidate.clips.firstIndex(where: { $0.id == clip.id }) else { continue }
             let leftDuration = time - clip.start
             candidate.clips[i].duration = leftDuration
-            var right = clip; right.id = UUID(); right.linkID = newLink; right.start = time
+            candidate.clips[i].retimedSourceLength = nil                // each half has a new source range
+            var right = clip; right.id = UUID(); right.linkID = newLink; right.start = time; right.retimedSourceLength = nil
             // Pin the right half to the original source END. Head-anchoring instead
             // (sourceStart + round(L*speed)) can land a tick past the asset, because
             // round(L*s) + round(R*s) may exceed round((L+R)*s), and reject a legal split.
@@ -121,20 +134,34 @@ public enum Editing {
     /// `base` is the document a live drag started from. Resolving every sample against it keeps
     /// the operation idempotent: without it each slider sample re-quantises the previous sample's
     /// result and a 1x -> 4x -> 1x drag permanently eats source content.
+    /// A speed that would leave the clip less than a frame is refused; a live drag stops at the
+    /// fastest speed that leaves one instead, as it stops against the next clip.
     public static func setSpeed(_ id: UUID, to speed: Double, in project: inout Project, basedOn base: Project? = nil) throws {
         // A SwiftUI Slider lands on values like 1.0000000000000002, which defeats every `speed == 1`
         // fast path (Clip.sourceLength, the badge, the composition's no-scale branch).
-        let speed = (speed * 1000).rounded() / 1000
+        var speed = (speed * 1000).rounded() / 1000
         guard speed.isFinite, Clip.speedRange.contains(speed) else { throw EditError("Clip speed must be between 0.1x and 10x.") }
         let anchor = base ?? project
         guard let selected = anchor.clips.first(where: { $0.id == id }) else { return }
         guard selected.kind == .video || selected.kind == .audio else { throw EditError("Only video and audio clips can be retimed.") }
-        let frame = project.frameRate.frame
-        // floor, not quantize: floor(x) <= x, so the retimed clip can never round up past the source.
-        var duration = project.frameRate.floor(selected.sourceLength.scaled(by: 1 / speed))
-        if duration < frame { duration = frame }
-        if let asset = project.media(for: selected) {
-            while duration > frame, selected.sourceStart + duration.scaled(by: speed) > asset.duration { duration = duration - frame }
+        let frame = project.frameRate.frame, asset = project.media(for: selected)
+        // The source range the clip was given, not the whole frames an earlier speed left of it
+        // (preset and typed speeds, like the slider, return to the same frames), while the
+        // remembered length still describes this clip (Clip.wasGiven), or more where its source
+        // ran out at that speed.
+        let reachesEnd = asset.map { selected.sourceStart + selected.sourceLength >= $0.duration } ?? false
+        let given = selected.retimedSourceLength.flatMap { length in
+            selected.wasGiven(length) || reachesEnd && length >= selected.sourceLength ? length : nil
+        } ?? selected.sourceLength
+        if base != nil { speed = max(Clip.speedRange.lowerBound, min(speed, (Double(given.ticks) / Double(frame.ticks) * 1000).rounded(.down) / 1000)) }
+        // floor, not quantize: floor(x) <= x, so the retimed clip never reads past its out point.
+        var retimed = selected; retimed.speed = speed
+        retimed.duration = project.frameRate.floor(given.scaled(by: 1 / speed))
+        guard retimed.duration >= frame else { throw EditError("At this speed the clip would last less than one frame. Choose a slower speed or lengthen the clip first.") }
+        // A clip that already runs into its source's last frame (after a frame rate change) keeps
+        // within a frame of it at the new speed too.
+        if let asset {
+            while retimed.duration > frame, !project.fitsSource(retimed, of: asset) { retimed.duration = retimed.duration - frame }
         }
         let ids = Set(project.group(for: id).map(\.id))
         var candidate = project
@@ -143,8 +170,9 @@ public enum Editing {
         if let base { candidate.transitions = base.transitions }
         for i in candidate.clips.indices where ids.contains(candidate.clips[i].id) {
             candidate.clips[i].speed = speed
-            candidate.clips[i].duration = duration
+            candidate.clips[i].duration = retimed.duration
             candidate.clips[i].sourceStart = selected.sourceStart
+            candidate.clips[i].retimedSourceLength = candidate.clips[i].sourceLength == given ? nil : given
         }
         project = try candidate.validated()
     }
@@ -153,15 +181,13 @@ public enum Editing {
     }
     /// Deletes several clips, each with its linked partner.
     public static func delete(_ ids: Set<UUID>, from project: inout Project) {
-        var all = Set<UUID>()
-        for id in ids { all.formUnion(project.group(for: id).map(\.id)) }
+        let all = project.groupIDs(for: ids)
         project.clips.removeAll { all.contains($0.id) }
     }
     /// Moves several clips (each with its linked partner) together in time, on their own tracks.
     /// No earlier than the timeline's start: the earliest one stops at zero. Rejected as one unit.
     public static func move(_ ids: Set<UUID>, by delta: MediaTime, in project: inout Project) throws {
-        var all = Set<UUID>()
-        for id in ids { all.formUnion(project.group(for: id).map(\.id)) }
+        let all = project.groupIDs(for: ids)
         guard let earliest = project.clips.filter({ all.contains($0.id) }).map(\.start).min() else { return }
         let shift = max(project.frameRate.quantize(delta), .zero - earliest)
         guard shift != .zero else { return }
@@ -186,8 +212,7 @@ public enum Editing {
         guard gap.duration > .zero else { return }
         let following = project.clips.filter { $0.lane == gap.lane && $0.start >= gap.end }
         guard !following.isEmpty else { throw EditError("There is no clip after this gap to close up.") }
-        var ids: Set<UUID> = []
-        for clip in following { ids.formUnion(project.group(for: clip.id).map(\.id)) }
+        let ids = project.groupIDs(for: Set(following.map(\.id)))
         var candidate = project
         for i in candidate.clips.indices where ids.contains(candidate.clips[i].id) {
             candidate.clips[i].start = candidate.clips[i].start - gap.duration

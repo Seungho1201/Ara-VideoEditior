@@ -106,26 +106,26 @@ public enum FontLibrary {
                 do {
                     try unzip(url.resolvingSymlinksInPath(),to:target)
                     let found = fontFiles(in:target)
-                    if found.isEmpty { skipped.append("\(url.lastPathComponent): no fonts in the archive") }
+                    if found.isEmpty { skipped.append(String(localized:"\(url.lastPathComponent): no fonts in the archive")) }
                     candidates += found
                 } catch { skipped.append("\(url.lastPathComponent): \(error.localizedDescription)") }
-            } else { skipped.append("\(url.lastPathComponent): .\(ext) fonts are not supported (use TTF, OTF, TTC or a ZIP of them)") }
+            } else { skipped.append(String(localized:"\(url.lastPathComponent): .\(ext) fonts are not supported (use TTF, OTF, TTC or a ZIP of them)")) }
         }
         var added: [Face] = []
         var seen = Set(((try? FileManager.default.contentsOfDirectory(at:folder,includingPropertiesForKeys:nil)) ?? []).compactMap(digest))
         for file in candidates {
             let name = file.lastPathComponent
             let faces = descriptors(of:file).compactMap(face).filter { !$0.isHidden }
-            guard !faces.isEmpty else { skipped.append("\(name): not a font CoreText can read"); continue }
-            guard let hash = digest(file), !seen.contains(hash) else { skipped.append("\(name): already added"); continue }
+            guard !faces.isEmpty else { skipped.append(String(localized:"\(name): not a font CoreText can read")); continue }
+            guard let hash = digest(file), !seen.contains(hash) else { skipped.append(String(localized:"\(name): already added")); continue }
             let taken = faces.filter { isAvailable($0.postScriptName) }
             guard taken.count < faces.count else {
-                skipped.append("\(name): \(faces.map(\.postScriptName).joined(separator:", ")) is already available"); continue
+                skipped.append(String(localized:"\(name): \(faces.map(\.postScriptName).joined(separator:", ")) is already available")); continue
             }
             // Registering the whole file would make its copies of installed faces win over the
             // installed ones (every title in them, the default font included) until Ara quits.
             guard taken.isEmpty else {
-                skipped.append("\(name): has faces already on this Mac (\(taken.map(\.postScriptName).joined(separator:", "))), so it was not added"); continue
+                skipped.append(String(localized:"\(name): has faces already on this Mac (\(taken.map(\.postScriptName).joined(separator:", "))), so it was not added")); continue
             }
             let destination = uniqueURL(for:name,in:folder)
             do { try FileManager.default.copyItem(at:file,to:destination) }
@@ -133,12 +133,12 @@ public enum FontLibrary {
             let registeredFaces = register(destination,fresh:true)
             guard !registeredFaces.isEmpty else {
                 try? FileManager.default.removeItem(at:destination)
-                skipped.append("\(name): macOS did not accept this font"); continue
+                skipped.append(String(localized:"\(name): macOS did not accept this font")); continue
             }
             seen.insert(hash); added += registeredFaces
         }
         guard !added.isEmpty else {
-            throw EditError(skipped.isEmpty ? "No fonts were found." : "No new fonts were added.\n" + skipped.joined(separator:"\n"))
+            throw skipped.isEmpty ? EditError("No fonts were found.") : EditError(verbatim:String(localized:"No new fonts were added.")+"\n"+skipped.joined(separator:"\n"))
         }
         return ImportResult(added:added.sorted { ($0.familyDisplayName,$0.weight) < ($1.familyDisplayName,$1.weight) },skipped:skipped)
     }

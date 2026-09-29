@@ -21,6 +21,43 @@ public struct VisualGeometry {
             .concatenating(CGAffineTransform(translationX:canvasSize.width*(0.5+style.x),y:canvasSize.height*(0.5-style.y)))
     }
     public var center: CGPoint { CGPoint(x:canvasSize.width*(0.5+style.x),y:canvasSize.height*(0.5+style.y)) }
+    /// A point of the clip in viewer space, from its centre as a share of its size (right and
+    /// down positive): (−0.5, −0.5) is the top-left corner, wherever the clip is turned.
+    public func point(atShare share: CGPoint) -> CGPoint {
+        let p = CGPoint(x:sourceSize.width*(0.5+share.x),y:sourceSize.height*(0.5-share.y)).applying(renderTransform)
+        return CGPoint(x:p.x,y:canvasSize.height-p.y)
+    }
+    /// The alignment point (anchor) in viewer space; the centre unless it was moved.
+    public var anchor: CGPoint { style.hasAnchor ? point(atShare:CGPoint(x:style.anchorX,y:style.anchorY)) : center }
+    /// The nine places an anchor catches on: the centre, the corners and the middles of the edges.
+    public static let anchorStops: [CGPoint] = [-0.5,0,0.5].flatMap { y in [-0.5,0,0.5].map { CGPoint(x:$0,y:y) } }
+    /// `changed` moved so that its anchor stays where this geometry's anchor is: turning or
+    /// scaling about the anchor instead of the centre.
+    public func keepingAnchor(_ changed: ClipStyle) -> ClipStyle {
+        guard style.hasAnchor || changed.hasAnchor else { return changed }
+        let after = VisualGeometry(sourceSize:sourceSize,canvasSize:canvasSize,style:changed,isText:isText).anchor, before = anchor
+        var result = changed
+        result.x = min(2,max(-2,changed.x+(before.x-after.x)/canvasSize.width))
+        result.y = min(2,max(-2,changed.y+(before.y-after.y)/canvasSize.height))
+        return result
+    }
+    /// The anchor put at a viewer point, inside or outside the clip. Within `snap` points of one of the
+    /// nine stops it lands on it; also returns that stop's index in `anchorStops`.
+    public func anchorMoved(to point: CGPoint, snap: CGFloat? = nil) -> (style: ClipStyle, stop: Int?) {
+        let source = CGPoint(x:point.x,y:canvasSize.height-point.y).applying(renderTransform.inverted())
+        let reach = ClipStyle.anchorReach
+        var share = CGPoint(x:min(reach,max(-reach,source.x/sourceSize.width-0.5)),y:min(reach,max(-reach,0.5-source.y/sourceSize.height)))
+        var stop: Int?
+        if let snap {
+            let near = Self.anchorStops.enumerated().map { ($0.offset,hypot(self.point(atShare:$0.element).x-point.x,self.point(atShare:$0.element).y-point.y)) }
+                .filter { $0.1 <= snap }.min { $0.1 < $1.1 }
+            if let near { stop = near.0; share = Self.anchorStops[near.0] }
+        }
+        var result = style
+        result.anchorX = (share.x*1000).rounded()/1000; result.anchorY = (share.y*1000).rounded()/1000
+        if stop != nil { result.anchorX = share.x; result.anchorY = share.y }
+        return (result,stop)
+    }
     /// Clockwise from the top-left of the unrotated source.
     public var corners: [CGPoint] {
         [CGPoint(x:0,y:sourceSize.height),CGPoint(x:sourceSize.width,y:sourceSize.height),
@@ -58,12 +95,12 @@ public struct VisualGeometry {
         let inside = area.insetBy(dx:margin,dy:margin)
         return choices.first { inside.contains($0.1) } ?? choices[2]
     }
-    /// Turned about its centre by the angle the pointer has swept around it since `start`, kept
+    /// Turned about its anchor by the angle the pointer has swept around it since `start`, kept
     /// in −180…180. With `step` (degrees) the angle goes in steps; otherwise, within `magnet`
     /// degrees of a right angle it settles on it. Nil with the pointer (or the start) on the
     /// centre, where there is no angle to read: the caller keeps what it has.
     public func rotated(from start: CGPoint, to point: CGPoint, step: Double? = nil, magnet: Double = 0) -> ClipStyle? {
-        let c = center
+        let c = anchor
         guard hypot(point.x-c.x,point.y-c.y) > 2, hypot(start.x-c.x,start.y-c.y) > 2 else { return nil }
         var swept = (atan2(point.y-c.y,point.x-c.x)-atan2(start.y-c.y,start.x-c.x))*180 / .pi
         if swept > 180 { swept -= 360 } else if swept < -180 { swept += 360 }
@@ -74,18 +111,23 @@ public struct VisualGeometry {
         angle = angle.truncatingRemainder(dividingBy:360)
         if angle > 180 { angle -= 360 } else if angle <= -180 { angle += 360 }
         var result = style; result.rotation = angle
-        return result
+        return keepingAnchor(result)
     }
-    /// Centre alignment while moving: a centre within `threshold` points of one of `centers`
-    /// across or down lands exactly on it (each axis on its own). Also returns the guides it
-    /// lined up on: the x of a vertical line, the y of a horizontal one.
+    /// Alignment while moving: an anchor (the centre, unless moved) within `threshold` points of
+    /// one of `centers` across or down lands exactly on it (each axis on its own). Also returns
+    /// the guides it lined up on: the x of a vertical line, the y of a horizontal one.
     public func aligned(to centers: [CGPoint], threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
-        let c = center
+        let c = anchor
         let x = centers.map(\.x).filter { abs($0-c.x) <= threshold }.min { abs($0-c.x) < abs($1-c.x) }
         let y = centers.map(\.y).filter { abs($0-c.y) <= threshold }.min { abs($0-c.y) < abs($1-c.y) }
         var result = style
-        if let x { result.x = min(2,max(-2,x/canvasSize.width-0.5)) }
-        if let y { result.y = min(2,max(-2,y/canvasSize.height-0.5)) }
+        if style.hasAnchor {
+            if let x { result.x = min(2,max(-2,style.x+(x-c.x)/canvasSize.width)) }
+            if let y { result.y = min(2,max(-2,style.y+(y-c.y)/canvasSize.height)) }
+        } else {
+            if let x { result.x = min(2,max(-2,x/canvasSize.width-0.5)) }
+            if let y { result.y = min(2,max(-2,y/canvasSize.height-0.5)) }
+        }
         return (result,x,y)
     }
     public func moved(by delta: CGSize) -> ClipStyle {

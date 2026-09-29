@@ -10,9 +10,15 @@ public final class RenderBundle: @unchecked Sendable {
     public let duration: MediaTime
     public let size: CGSize
     public let frameRate: FrameRate
-    public init(composition: AVComposition, videoComposition: AVVideoComposition, audioMix: AVAudioMix, duration: MediaTime, size: CGSize, frameRate: FrameRate) {
+    /// The media files it reads, as they were when it was built: an export that fails can name
+    /// the one that has changed or gone since.
+    let sources: [URL:FileStamp]
+    public convenience init(composition: AVComposition, videoComposition: AVVideoComposition, audioMix: AVAudioMix, duration: MediaTime, size: CGSize, frameRate: FrameRate) {
+        self.init(composition:composition,videoComposition:videoComposition,audioMix:audioMix,duration:duration,size:size,frameRate:frameRate,sources:[:])
+    }
+    init(composition: AVComposition, videoComposition: AVVideoComposition, audioMix: AVAudioMix, duration: MediaTime, size: CGSize, frameRate: FrameRate, sources: [URL:FileStamp]) {
         self.composition = composition; self.videoComposition = videoComposition; self.audioMix = audioMix
-        self.duration = duration; self.size = size; self.frameRate = frameRate
+        self.duration = duration; self.size = size; self.frameRate = frameRate; self.sources = sources
     }
     @MainActor public func playerItem() -> AVPlayerItem {
         let item = AVPlayerItem(asset:composition); item.videoComposition = videoComposition; item.audioMix = audioMix
@@ -25,7 +31,10 @@ public final class RenderBundle: @unchecked Sendable {
 }
 
 public actor CompositionBuilder {
-    public init() {}
+    private let sentinels: SentinelStore
+    public init() { sentinels = .shared }
+    /// Clock and silence files kept somewhere else than the app's cache (tests).
+    init(sentinels: SentinelStore) { self.sentinels = sentinels }
     /// `videoURLs` replaces the picture (never the sound) of a source with a stand-in such as its
     /// FHD preview proxy. A stand-in must share the source's timing and aspect ratio; one that has
     /// gone missing (caches can be purged) falls back to the original.
@@ -37,7 +46,7 @@ public actor CompositionBuilder {
         for clip in project.clips where clip.kind != .text {
             guard let id = clip.mediaID, let url = urls[id], FileManager.default.isReadableFile(atPath:url.path) else { throw EditError("Missing media: \(clip.name). Relink it in the library.") }
         }
-        let seed = try await SentinelStore.shared.assets()
+        let seed = try await sentinels.assets()
         try Task.checkCancellation()
         let composition = AVMutableComposition()
         let clockAsset = AVURLAsset(url:seed.0)
@@ -78,7 +87,9 @@ public actor CompositionBuilder {
             let type: AVMediaType = clip.lane.isVideo ? .video : .audio
             let url = type == .video ? pictureURL(id,original) : original
             let asset = assetCache[url] ?? AVURLAsset(url:url); assetCache[url] = asset
-            guard let source = try await asset.loadTracks(withMediaType:type).first else { throw EditError("No \(type.rawValue) stream in \(clip.name).") }
+            guard let source = try await asset.loadTracks(withMediaType:type).first else {
+                throw type == .video ? EditError("No video stream in \(clip.name).") : EditError("No audio stream in \(clip.name).")
+            }
             sources[clip.id] = (source,try await source.load(.timeRange))
         }
         /// Timeline time the source has to spare before the clip's in-point, or after its out-point.
@@ -93,12 +104,15 @@ public actor CompositionBuilder {
         }
         // Transitions: how far past its edges each visual clip shows across a cut (head before its
         // start, tail after its end), its side of each transition, and what its linked sound does:
-        // an equal-power crossfade across a cut when both sources have sound beyond it, otherwise
-        // out before the cut and in after it.
+        // a crossfade across a cut when both sources have sound beyond it, otherwise out before
+        // the cut and in after it. The crossfade keeps constant power, except between the two
+        // halves of a split clip: they play the same sound there, which adds up in step (a
+        // constant-power one would be 3 dB louder in the middle), so theirs keeps constant gain.
         var head: [UUID:MediaTime] = [:], tail: [UUID:MediaTime] = [:]
         var sides: [UUID:[LayerTransition]] = [:]
         var fadeIn: [UUID:MediaTime] = [:], fadeOut: [UUID:MediaTime] = [:]
         var crossIn: [UUID:TransitionWindow] = [:], crossOut: [UUID:TransitionWindow] = [:]
+        var inStep = Set<UUID>()
         for transition in project.transitions {
             guard let window = project.window(of:transition) else { continue }
             // Both pictures at once across a cut; a dip shows one at a time and switches at the cut.
@@ -114,6 +128,9 @@ public actor CompositionBuilder {
             if paired, let outgoing, let incoming, outgoing.lane == incoming.lane, outgoing.end == cut, incoming.start == cut,
                room(outgoing,before:false) >= window.after, room(incoming,before:true) >= window.before {
                 crossOut[outgoing.id] = window; crossIn[incoming.id] = window
+                // One source carrying on across the cut (to a tick, at one speed): the same sound on both sides.
+                if outgoing.mediaID == incoming.mediaID, outgoing.speed == incoming.speed,
+                   abs((outgoing.sourceStart+outgoing.sourceLength-incoming.sourceStart).ticks) <= 1 { inStep.formUnion([outgoing.id,incoming.id]) }
             } else {
                 if let outgoing, window.before > .zero { fadeOut[outgoing.id] = window.before }
                 if let incoming, window.after > .zero { fadeIn[incoming.id] = window.after }
@@ -195,10 +212,10 @@ public actor CompositionBuilder {
                 } else {
                     let parameters = levels[slots[index]]
                     let volume: Float = clip.style.muted ? 0 : Float(clip.style.volume)
-                    if let window = crossIn[clip.id] { Self.equalPower(parameters,level:volume,over:window,rising:true) }
+                    if let window = crossIn[clip.id] { Self.crossfade(parameters,level:volume,over:window,rising:true,inStep:inStep.contains(clip.id)) }
                     else if let rampIn = fadeIn[clip.id] { parameters.setVolumeRamp(fromStartVolume:0,toEndVolume:volume,timeRange:CMTimeRange(start:clip.start.cmTime,duration:rampIn.cmTime)) }
                     else { parameters.setVolume(volume,at:clip.start.cmTime) }
-                    if let window = crossOut[clip.id] { Self.equalPower(parameters,level:volume,over:window,rising:false) }
+                    if let window = crossOut[clip.id] { Self.crossfade(parameters,level:volume,over:window,rising:false,inStep:inStep.contains(clip.id)) }
                     else if let rampOut = fadeOut[clip.id] { parameters.setVolumeRamp(fromStartVolume:volume,toEndVolume:0,timeRange:CMTimeRange(start:(clip.end-rampOut).cmTime,duration:rampOut.cmTime)) }
                     // The next clip on this track sets the level itself when it begins right here.
                     let audibleEnd = crossOut[clip.id]?.end ?? clip.end
@@ -208,12 +225,23 @@ public actor CompositionBuilder {
             }
             if lane.isVideo { videoIDs.append(contentsOf:tracks.map(\.trackID)) } else { mixes.append(contentsOf:levels) }
         }
-        // Held frames are decoded natively and converted exactly as the compositor converts the
-        // frames around them, so a held first or last frame matches in colour.
-        func held(_ clip: Clip, at time: CMTime) async -> CIImage? {
-            guard let id = clip.mediaID, let url = urls[id],
-                  let frame = await SourceFrameConverter.heldFrame(of:pictureURL(id,url),at:time) else { return nil }
-            return CIImage(cvPixelBuffer:frame)
+        // Each video clip's own first frame is decoded as a stand-in. HDR sources deliver nothing
+        // for roughly the first three frames of each segment while the decoder primes, and a
+        // still beats both a black flash and aborting the whole render. Held frames are decoded
+        // natively and converted exactly as the compositor converts the frames around them, so a
+        // held first or last frame matches in colour. They are gathered first and decoded a few
+        // at a time, skipping any an earlier build decoded (SourceFrameConverter.heldFrames).
+        var wanted: [(url: URL, time: CMTime)] = []
+        func picture(_ clip: Clip) -> URL? { clip.mediaID.flatMap { id in urls[id].map { pictureURL(id,$0) } } }
+        for clip in project.clips where clip.kind == .video {
+            guard let url = picture(clip) else { continue }
+            wanted += [clip.sourceStart.cmTime,headHold[clip.id],tailHold[clip.id]].compactMap { $0.map { (url,$0) } }
+        }
+        let decoded = await SourceFrameConverter.heldFrames(wanted)
+        try Task.checkCancellation()
+        func held(_ clip: Clip, at time: CMTime?) -> CIImage? {
+            guard let time, let url = picture(clip) else { return nil }
+            return decoded[HeldFrameRequest(url,time)]
         }
         var layers: [RenderLayer] = []
         // Bottom to top: each video track draws over the ones numbered below it.
@@ -227,14 +255,10 @@ public actor CompositionBuilder {
                     guard let id = clip.mediaID, let url = urls[id], let still = CIImage(contentsOf:url,options:[.applyOrientationProperty:true]) else { throw EditError("Cannot decode image \(clip.name).") }
                     image = still
                 }
-                // Decode the clip's own first frame as a stand-in. HDR sources deliver nothing for
-                // roughly the first three frames of each segment while the decoder primes, and a
-                // still beats both a black flash and aborting the whole render.
                 var fallback: CIImage?, headImage: CIImage?, tailImage: CIImage?
                 if clip.kind == .video {
-                    fallback = await held(clip,at:clip.sourceStart.cmTime)
-                    if let at = headHold[clip.id] { headImage = await held(clip,at:at) }
-                    if let at = tailHold[clip.id] { tailImage = await held(clip,at:at) }
+                    fallback = held(clip,at:clip.sourceStart.cmTime)
+                    headImage = held(clip,at:headHold[clip.id]); tailImage = held(clip,at:tailHold[clip.id])
                 }
                 layers.append(RenderLayer(clip:clip,trackID:layerTracks[clip.id],preferredTransform:transforms[clip.id] ?? .identity,image:image,fallbackImage:fallback,
                                           visibleStart:clip.start-(head[clip.id] ?? .zero),visibleEnd:clip.end+(tail[clip.id] ?? .zero),
@@ -254,11 +278,19 @@ public actor CompositionBuilder {
         // duration; covering the composition's own duration keeps any rounding from mattering.
         video.instructions = [FrameInstruction(duration:CMTimeMaximum(project.duration.cmTime,composition.duration),trackIDs:videoIDs,layers:layers)]
         let audio = AVMutableAudioMix(); audio.inputParameters = mixes
-        return RenderBundle(composition:composition.copy() as! AVComposition,videoComposition:video.copy() as! AVVideoComposition,audioMix:audio.copy() as! AVAudioMix,duration:project.duration,size:size,frameRate:project.frameRate)
+        let files = Set(project.clips.compactMap { clip in clip.mediaID.flatMap { id in urls[id].map { clip.kind == .video ? pictureURL(id,$0) : $0 } } })
+        return RenderBundle(composition:composition.copy() as! AVComposition,videoComposition:video.copy() as! AVVideoComposition,audioMix:audio.copy() as! AVAudioMix,
+                            duration:project.duration,size:size,frameRate:project.frameRate,sources:Dictionary(uniqueKeysWithValues:files.map { ($0,FileStamp($0)) }))
     }
     /// A sine (in) or cosine (out) gain curve across the window in eight straight pieces: the two
-    /// sides of a crossfade keep constant power, where a linear one dips about 3 dB in the middle.
-    private static func equalPower(_ parameters: AVMutableAudioMixInputParameters, level: Float, over window: TransitionWindow, rising: Bool) {
+    /// sides of a crossfade keep constant power, where a linear one dips about 3 dB in the middle
+    /// between different sounds. `inStep` sounds (one source on both sides) add as amplitudes,
+    /// so they fade in a straight line instead: the sum stays at `level` throughout.
+    private static func crossfade(_ parameters: AVMutableAudioMixInputParameters, level: Float, over window: TransitionWindow, rising: Bool, inStep: Bool) {
+        if inStep {
+            parameters.setVolumeRamp(fromStartVolume:rising ? 0 : level,toEndVolume:rising ? level : 0,timeRange:CMTimeRange(start:window.start.cmTime,duration:window.duration.cmTime))
+            return
+        }
         let steps: Int64 = 8
         func at(_ step: Int64) -> MediaTime { window.start+MediaTime(ticks:window.duration.ticks*step/steps) }
         func gain(_ step: Int64) -> Float {
@@ -272,19 +304,32 @@ public actor CompositionBuilder {
 }
 
 /// Small reusable clock tracks make image-only, text-only, audio-only and gap playback work.
-private actor SentinelStore {
-    static let shared = SentinelStore()
+actor SentinelStore {
+    static let shared = SentinelStore { MediaPaths.cache }
+    /// Where the two files live, asked each time: the folder itself may have been deleted.
+    private let folder: @Sendable () -> URL
     private var pending: Task<(URL,URL),Error>?
+    init(folder: @escaping @Sendable () -> URL) { self.folder = folder }
+    /// The files are checked before every use: the cache folder can be emptied while Ara runs
+    /// (by the user, a cleaner app or the system), and whichever file is missing is made again.
     func assets() async throws -> (URL,URL) {
-        if let pending { return try await pending.value }
-        let task = Task { try await self.create() }; pending = task
-        do { return try await task.value } catch { pending = nil; throw error }
+        while true {
+            if let current = pending {
+                if let urls = try? await current.value, FileManager.default.fileExists(atPath:urls.0.path), FileManager.default.fileExists(atPath:urls.1.path) { return urls }
+                // Another build may have started making them while this one waited.
+                guard pending == current else { continue }
+            }
+            let task = Task { try await self.create() }; pending = task
+            do { return try await task.value } catch { if pending == task { pending = nil }; throw error }
+        }
     }
     private func create() async throws -> (URL,URL) {
-        let videoURL = MediaPaths.cache.appendingPathComponent("clock-v1.mov")
-        let audioURL = MediaPaths.cache.appendingPathComponent("silence-v1.caf")
+        let folder = folder()
+        try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+        let videoURL = folder.appendingPathComponent("clock-v1.mov")
+        let audioURL = folder.appendingPathComponent("silence-v1.caf")
         if !FileManager.default.fileExists(atPath:videoURL.path) {
-            let temporary = MediaPaths.cache.appendingPathComponent(UUID().uuidString+".mov")
+            let temporary = folder.appendingPathComponent(UUID().uuidString+".mov")
             defer { try? FileManager.default.removeItem(at:temporary) }
             let writer = try AVAssetWriter(outputURL:temporary,fileType:.mov)
             let input = AVAssetWriterInput(mediaType:.video,outputSettings:[AVVideoCodecKey:AVVideoCodecType.h264,AVVideoWidthKey:64,AVVideoHeightKey:64])
@@ -304,15 +349,22 @@ private actor SentinelStore {
             }
             input.markAsFinished(); writer.endSession(atSourceTime:CMTime(value:1,timescale:1)); await writer.finishWriting()
             guard writer.status == .completed else { throw writer.error ?? EditError("Cannot finish clock video.") }
-            try FileManager.default.moveItem(at:temporary,to:videoURL)
+            // Made while another build waited on the writer: keep that one.
+            if !FileManager.default.fileExists(atPath:videoURL.path) { try FileManager.default.moveItem(at:temporary,to:videoURL) }
         }
         if !FileManager.default.fileExists(atPath:audioURL.path) {
+            // Written aside and moved into place, so a build never finds half a file.
+            let temporary = folder.appendingPathComponent(UUID().uuidString+".caf")
+            defer { try? FileManager.default.removeItem(at:temporary) }
             let format = AVAudioFormat(standardFormatWithSampleRate:48000,channels:2)!
-            let file = try AVAudioFile(forWriting:audioURL,settings:format.settings)
-            let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:48000)!
-            buffer.frameLength = 48000
-            for channel in 0..<2 { memset(buffer.floatChannelData![channel],0,48000*MemoryLayout<Float>.size) }
-            try file.write(from:buffer)
+            do {                                                   // the file is finished when it goes
+                let file = try AVAudioFile(forWriting:temporary,settings:format.settings)
+                let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:48000)!
+                buffer.frameLength = 48000
+                for channel in 0..<2 { memset(buffer.floatChannelData![channel],0,48000*MemoryLayout<Float>.size) }
+                try file.write(from:buffer)
+            }
+            try FileManager.default.moveItem(at:temporary,to:audioURL)
         }
         return (videoURL,audioURL)
     }

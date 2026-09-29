@@ -95,7 +95,9 @@ public struct TransitionWindow: Hashable, Sendable {
 public extension Project {
     /// Centred on a cut (the extra frame, for an odd length, falls after the cut); inside the
     /// clip for a fade in or out.
-    func window(of transition: Transition) -> TransitionWindow? {
+    func window(of transition: Transition) -> TransitionWindow? { window(of:transition,clip:clip) }
+    /// `clip` finds a clip by id: a dictionary when many windows are worked out together.
+    private func window(of transition: Transition, clip: (UUID) -> Clip?) -> TransitionWindow? {
         let d = frameRate.quantize(transition.duration)
         if let a = transition.from.flatMap(clip), let b = transition.to.flatMap(clip) {
             guard a.lane == b.lane, a.end == b.start else { return nil }
@@ -138,13 +140,17 @@ public extension Project {
     func reconcilingTransitions() -> Project {
         var result = self
         let frame = frameRate.frame
+        // Clips found by id once (the first of a duplicate, as `clip(_:)` finds it), not by a
+        // search of the timeline for every transition and clip: validation runs on every edit.
+        let byID = Dictionary(clips.map { ($0.id,$0) },uniquingKeysWith:{ first,_ in first })
+        let lookup = { (id: UUID) in byID[id] }
         // 1. Keep transitions whose clips exist, are visual and still meet; one per clip edge; a
         //    fresh id for any id seen twice (only a damaged document has one).
         var kept: [Transition] = []
         var seenIn = Set<UUID>(), seenOut = Set<UUID>(), seenIDs = Set<UUID>()
         for var transition in transitions {
             guard transition.from != nil || transition.to != nil else { continue }
-            let a = transition.from.flatMap(clip), b = transition.to.flatMap(clip)
+            let a = transition.from.flatMap(lookup), b = transition.to.flatMap(lookup)
             if transition.from != nil && a == nil { continue }
             if transition.to != nil && b == nil { continue }
             if let a, !a.lane.isVideo { continue }
@@ -165,15 +171,18 @@ public extension Project {
         // 2. Fit: each clip must hold its share of both of its transitions. Shrink by the tightest
         //    clip's ratio, a few rounds (a cut shares two clips), then drop what cannot hold a frame.
         for _ in 0..<4 {
-            result.transitions = kept
+            // Step 1 left at most one transition per clip edge.
+            let into = Dictionary(kept.compactMap { t in t.to.map { ($0,t) } },uniquingKeysWith:{ first,_ in first })
+            let outOf = Dictionary(kept.compactMap { t in t.from.map { ($0,t) } },uniquingKeysWith:{ first,_ in first })
             var worst: [UUID:Double] = [:]
             for clip in clips where clip.lane.isVideo {
                 var used = MediaTime.zero
-                if let t = result.transition(into:clip.id), let w = result.window(of:t) { used = used+w.after }
-                if let t = result.transition(outOf:clip.id), let w = result.window(of:t) { used = used+w.before }
+                let incoming = into[clip.id], outgoing = outOf[clip.id]
+                if let t = incoming, let w = window(of:t,clip:lookup) { used = used+w.after }
+                if let t = outgoing, let w = window(of:t,clip:lookup) { used = used+w.before }
                 guard used > clip.duration, used.ticks > 0 else { continue }
                 let ratio = Double(clip.duration.ticks)/Double(used.ticks)
-                for t in [result.transition(into:clip.id),result.transition(outOf:clip.id)].compactMap({ $0 }) { worst[t.id] = min(worst[t.id] ?? 1,ratio) }
+                for t in [incoming,outgoing].compactMap({ $0 }) { worst[t.id] = min(worst[t.id] ?? 1,ratio) }
             }
             guard !worst.isEmpty else { break }
             for i in kept.indices {
@@ -233,7 +242,15 @@ public extension Editing {
         var transition = Transition(kind: kind, direction: direction, duration: duration, from: from, to: to)
         if let existing { transition.id = project.transitions[existing].id }
         transition.duration = min(candidate.frameRate.quantize(duration), candidate.longestTransition(from: from, to: to))
-        guard transition.duration >= candidate.frameRate.frame else { throw EditError("These clips are too short for a transition.") }
+        guard transition.duration >= candidate.frameRate.frame else {
+            // Say why: a clip long enough on its own can be taken up by its other transition.
+            var bare = candidate; bare.transitions = []
+            if bare.longestTransition(from: from, to: to) >= candidate.frameRate.frame {
+                throw from != nil && to != nil ? EditError("Another transition on one of these clips leaves no room here. Shorten that transition first.")
+                                               : EditError("Another transition on this clip leaves no room here. Shorten that transition first.")
+            }
+            throw EditError("These clips are too short for a transition.")
+        }
         candidate.transitions.append(transition)
         project = try candidate.validated()
         return transition.id

@@ -30,7 +30,7 @@ import FrameMedia
     override func hitTest(_ point: NSPoint) -> NSView? {
         // No blanket capture while dragging or zooming: AppKit already sends mouseDragged/mouseUp to
         // the view that took mouseDown, and capturing everything would swallow unrelated clicks.
-        guard let overlay, overlay.isTransforming else { return nil }
+        guard let overlay, overlay.showsChrome else { return nil }
         let local = convert(point,from:superview)
         return overlay.chromeAccepts(overlay.convert(local,from:self)) ? self : nil
     }

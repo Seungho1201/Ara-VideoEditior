@@ -2,7 +2,8 @@ import SwiftUI
 import AppKit
 
 /// Help mode: callouts over the editor naming what each control does, shown with the timeline's
-/// ? button (or Help ▸ Show Tips) and closed by a click anywhere or Esc.
+/// ? button (or Help ▸ Show Tips) and closed by a click anywhere or Esc. Meanwhile other keys typed
+/// in the editor do nothing.
 ///
 /// Each control marks itself with `.helpTip(…)`: a small AppKit view in its background that the
 /// overlay measures. The panels live in split views (separate hosting views), where SwiftUI
@@ -32,17 +33,36 @@ enum HelpTips {
         let target: CGRect
         let placement: HelpTipPlacement
     }
-    /// The visible anchors in `view`'s window, in `view`'s (flipped) coordinates.
+    /// The anchors in `view`'s window that show, in `view`'s (flipped) coordinates. A control is
+    /// named only while it shows whole: a control scrolled or clipped out of sight keeps its
+    /// place, and its tip would point at whatever is there. An area is named where it shows.
     @MainActor static func tips(in view: NSView) -> [Tip] {
         guard let window = view.window else { return [] }
         return anchors.compactMap { anchor in
-            guard let anchorView = anchor.view, anchorView.window === window, !anchorView.isHiddenOrHasHiddenAncestor else { return nil }
-            // Bounds, not visibleRect: inside SwiftUI's hosting views visibleRect is the whole
-            // panel. A control scrolled out of sight lies outside the overlay and is left out.
-            let rect = view.convert(anchorView.bounds,from:anchorView)
-            guard rect.width > 0, rect.height > 0, view.bounds.insetBy(dx:-1,dy:-1).contains(rect) else { return nil }
+            guard let anchorView = anchor.view, anchorView.window === window, let shown = shownPart(of:anchorView) else { return nil }
+            let rect = view.convert(anchorView.bounds,from:anchorView), part = view.convert(shown,from:anchorView).intersection(view.bounds)
+            if anchorView.placement == .inside {
+                guard part.width >= 40, part.height >= 30 else { return nil }
+                return Tip(id:ObjectIdentifier(anchorView),text:anchorView.text,target:part,placement:.inside)
+            }
+            guard rect.width > 0, rect.height > 0, part.insetBy(dx:-1,dy:-1).contains(rect) else { return nil }
             return Tip(id:ObjectIdentifier(anchorView),text:anchorView.text,target:rect,placement:anchorView.placement)
         }
+    }
+    /// The part of `view` its ancestors let show, in its own coordinates; nil when one of them is
+    /// hidden or see-through, or clips it away. Bounds, not visibleRect: inside SwiftUI's hosting
+    /// views visibleRect is the whole panel. What clips is a scroll view, a split pane or a
+    /// `.clipped()` SwiftUI view, each an AppKit view that clips to its bounds.
+    @MainActor static func shownPart(of view: NSView) -> CGRect? {
+        var shown = view.bounds, ancestor: NSView? = view
+        while let current = ancestor {
+            if current.isHidden || current.alphaValue < 0.01 { return nil }
+            if current !== view, current.clipsToBounds || current.layer?.masksToBounds == true {
+                shown = shown.intersection(view.convert(current.bounds,from:current))
+            }
+            ancestor = current.superview
+        }
+        return shown.isEmpty ? nil : shown
     }
 }
 
@@ -87,18 +107,18 @@ struct HelpOverlay: View {
             let placed = HelpTips.layout(tips,in:geometry.size)
             ZStack(alignment:.topLeading) {
                 Color.black.opacity(0.38)
-                // Outlines and pointers first, so no line crosses a bubble.
+                // Outlines and lines first, under the bubbles.
                 ForEach(placed) { item in
-                    if item.tip.placement != .inside {
+                    if let line = item.pointer {
                         RoundedRectangle(cornerRadius:4).stroke(Theme.accent.opacity(0.9),lineWidth:1)
                             .frame(width:item.tip.target.width+4,height:item.tip.target.height+4)
                             .position(x:item.tip.target.midX,y:item.tip.target.midY)
-                        pointer(item)
+                        Rectangle().fill(Theme.accent).frame(width:line.width,height:line.height).position(x:line.midX,y:line.midY)
                     }
                 }
                 ForEach(placed) { item in
                     Text(verbatim:item.tip.text).font(HelpTips.swiftUIFont).foregroundStyle(Theme.background)
-                        .lineLimit(item.tip.placement == .inside ? 3 : 1).multilineTextAlignment(.center)
+                        .lineLimit(HelpTips.lines(item.tip)).multilineTextAlignment(.center)
                         .frame(width:item.bubble.width-2*HelpTips.padding,height:item.bubble.height)
                         .padding(.horizontal,HelpTips.padding)
                         .background(Theme.accent,in:RoundedRectangle(cornerRadius:5))
@@ -110,20 +130,36 @@ struct HelpOverlay: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { isShown = false }
-        .overlay { Button("") { isShown = false }.keyboardShortcut(.cancelAction).opacity(0).allowsHitTesting(false) }
+        .background(HelpKeys { isShown = false })
         .accessibilityElement(children:.contain)
         .accessibilityLabel("Tips. Click anywhere to close.")
         .transition(.opacity)
     }
-    /// A line from the bubble to the control, down (or up) from wherever the bubble ended up.
-    private func pointer(_ item: HelpTips.Placed) -> some View {
-        let target = item.tip.target, bubble = item.bubble
-        let above = bubble.midY < target.midY
-        let from = above ? bubble.maxY : bubble.minY, to = above ? target.minY-2 : target.maxY+2
-        let x = min(max(target.midX,bubble.minX+6),bubble.maxX-6)
-        return Rectangle().fill(Theme.accent).frame(width:1.5,height:max(0,abs(to-from)))
-            .position(x:x,y:(from+to)/2)
+}
+
+/// While help is shown, keys typed in its window do nothing but Esc, which closes it: the tips are
+/// read over a dimmed editor that must not change underneath, whatever has the keyboard (the
+/// timeline, the preview, a text field) and whatever the menus would do with the key. Quit,
+/// Hide, Minimise, Close, Settings and the like still answer.
+struct HelpKeys: NSViewRepresentable {
+    let close: () -> Void
+    final class Guard: NSView {
+        var close: (() -> Void)?
+        private var monitor: Any?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = window == nil ? nil : NSEvent.addLocalMonitorForEvents(matching:.keyDown) { [weak self] event in self?.handle(event) ?? event }
+        }
+        func handle(_ event: NSEvent) -> NSEvent? {
+            guard let window, event.window === window else { return event }
+            if event.keyCode == 53 { close?(); return nil }
+            return Shortcut(event:event)?.isAppKey == true ? event : nil
+        }
     }
+    func makeNSView(context: Context) -> Guard { let view = Guard(); view.close = close; return view }
+    func updateNSView(_ view: Guard, context: Context) { view.close = close }
 }
 
 extension HelpTips {
@@ -134,60 +170,198 @@ extension HelpTips {
     struct Placed: Identifiable {
         let tip: Tip
         let bubble: CGRect
+        /// The line from the bubble to its control; none for an area's note.
+        let pointer: CGRect?
         var id: ObjectIdentifier { tip.id }
     }
-    /// The bubble's size: one line beside a control, up to three over an area.
+    /// The most lines a bubble shows: two beside a control, three over an area.
+    static func lines(_ tip: Tip) -> Int { tip.placement == .inside ? 3 : 2 }
+    /// The bubble's size. A control's note takes one line up to 300 pt, or else two about as even
+    /// as its words allow; an area's note up to three lines 380 pt wide. The lines are measured a
+    /// little narrower than the bubble gives them, as SwiftUI sets symbols such as ⌘ and ⇧ slightly
+    /// wider than AppKit measures them, so it never needs more lines than counted here.
     @MainActor static func size(of tip: Tip) -> CGSize {
-        let inside = tip.placement == .inside
-        let text = tip.text as NSString
-        // A little slack: SwiftUI sets symbols such as ⌘ and ⇧ slightly wider than AppKit measures.
-        let width = min(inside ? 380 : 300,ceil(text.size(withAttributes:[.font:font]).width)+2*padding+8)
-        guard inside else { return CGSize(width:width,height:lineHeight) }
-        let height = ceil(text.boundingRect(with:CGSize(width:width-2*padding,height:.greatestFiniteMagnitude),
-                                            options:[.usesLineFragmentOrigin],attributes:[.font:font]).height)
-        return CGSize(width:width,height:max(lineHeight,height+10))
+        let slack: CGFloat = 8, inside = tip.placement == .inside, widest: CGFloat = inside ? 380 : 300
+        let text = tip.text as NSString, attributes: [NSAttributedString.Key:Any] = [.font:font]
+        let natural = ceil(text.size(withAttributes:attributes).width)+2*padding+slack
+        if !inside && natural <= widest { return CGSize(width:natural,height:lineHeight) }
+        func height(_ width: CGFloat) -> CGFloat {
+            ceil(text.boundingRect(with:CGSize(width:width-2*padding-slack,height:.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:attributes).height)
+        }
+        let most = CGFloat(lines(tip))*height(.greatestFiniteMagnitude)
+        var width = min(widest,natural)
+        if !inside {
+            width = ceil(natural/2+padding+slack/2)
+            while width < widest && height(width) > most { width += 4 }
+            width = min(width,widest)
+        }
+        return CGSize(width:width,height:max(lineHeight,min(height(width),most)+10))
     }
-    /// Where each bubble goes. A bubble starts next to its control, on the side asked for, and
-    /// moves away from it step by step until it covers no other bubble and no other control;
-    /// if that side runs out of room it tries the other. Area notes go first, in the middle of
-    /// their area, and the rest keep clear of them.
+    /// The line from `bubble` to `target` through `at`: its x from a bubble above or below the
+    /// control, its y from one beside it.
+    static func pointer(from bubble: CGRect, to target: CGRect, at position: CGFloat) -> CGRect {
+        if bubble.minX >= target.maxX || bubble.maxX <= target.minX {
+            let (left,right) = bubble.minX >= target.maxX ? (target.maxX+2,bubble.minX) : (bubble.maxX,target.minX-2)
+            return CGRect(x:left,y:position-0.75,width:max(0,right-left),height:1.5)
+        }
+        let (top,bottom) = bubble.midY < target.midY ? (bubble.maxY,target.minY-2) : (target.maxY+2,bubble.minY)
+        return CGRect(x:position-0.75,y:top,width:1.5,height:max(0,bottom-top))
+    }
+    /// Where each bubble goes, and the line from it to its control. Area notes go first, in the
+    /// middle of their area. A control's bubble starts next to it on the side asked for and moves
+    /// away step by step, centred on its line or leaning to either side, until it covers no other
+    /// bubble, control or line and its own line runs under no bubble; then it tries the other
+    /// side, and last beside the control. The spot taken first also keeps its line off other
+    /// controls and leaves each control still to come a way out to its own bubble; where no spot
+    /// does, the line may cross a control, then another control may be hemmed in, and last lines
+    /// may run under bubbles, which still never cover each other.
     @MainActor static func layout(_ tips: [Tip], in size: CGSize, measure: @MainActor (Tip) -> CGSize = HelpTips.size) -> [Placed] {
         let bounds = CGRect(origin:.zero,size:size).insetBy(dx:4,dy:4)
         let controls = tips.filter { $0.placement != .inside }
         var placed: [Placed] = []
-        func clear(_ rect: CGRect, of tip: Tip) -> Bool {
-            guard bounds.contains(rect) else { return false }
-            let padded = rect.insetBy(dx:-3,dy:-3)
-            if placed.contains(where: { $0.bubble.intersects(padded) }) { return false }
-            return !controls.contains { $0.id != tip.id && $0.target.intersects(padded) }
+        /// Covers no bubble or other control and, with `lines`, no line, while its own line runs
+        /// under no bubble.
+        func clear(_ bubble: CGRect, _ line: CGRect?, of tip: Tip, lines: Bool = true) -> Bool {
+            guard bounds.contains(bubble) else { return false }
+            let padded = bubble.insetBy(dx:-3,dy:-3)
+            if placed.contains(where: { $0.bubble.intersects(padded) || lines && $0.pointer?.intersects(padded) == true }) { return false }
+            if controls.contains(where: { $0.id != tip.id && $0.target.intersects(padded) }) { return false }
+            guard lines, let line else { return true }
+            return !placed.contains { $0.bubble.intersects(line.insetBy(dx:-2,dy:-2)) }
         }
-        let ordered = tips.filter { $0.placement == .inside }
-            + controls.sorted { ($0.target.minY,$0.target.minX) < ($1.target.minY,$1.target.minX) }
-        for tip in ordered {
+        for tip in tips where tip.placement == .inside {
             let measured = measure(tip)
-            func rect(centreY: CGFloat) -> CGRect {
-                let x = min(max(tip.target.midX-measured.width/2,bounds.minX),bounds.maxX-measured.width)
-                return CGRect(x:x,y:centreY-measured.height/2,width:measured.width,height:measured.height)
+            let x = min(max(tip.target.midX-measured.width/2,bounds.minX),bounds.maxX-measured.width)
+            var spot = CGRect(x:x,y:tip.target.midY-measured.height/2,width:measured.width,height:measured.height)
+            // Nudged down past any bubble already there.
+            while !clear(spot,nil,of:tip), spot.maxY < min(tip.target.maxY,bounds.maxY) { spot.origin.y += 6 }
+            placed.append(Placed(tip:tip,bubble:spot,pointer:nil))
+        }
+        // A row at a time, top down: controls level with each other, with bubbles on the same side.
+        // A group of controls close together goes from both ends inward: the outer bubbles lean
+        // outward as they step away and those in the middle go on top, each clear of the lines
+        // before it. It goes from one end only where the other has no room to lean out.
+        var rows: [[Tip]] = []
+        for tip in controls.sorted(by: { ($0.target.minY,$0.target.minX) < ($1.target.minY,$1.target.minX) }) {
+            if let last = rows.last?.last, last.placement == tip.placement, tip.target.minY < last.target.maxY { rows[rows.count-1].append(tip) }
+            else { rows.append([tip]) }
+        }
+        var groups: [[Tip]] = [], group: [ObjectIdentifier:Int] = [:]
+        for row in rows {
+            var members: [Tip] = []
+            func close() {
+                guard let first = members.first, let last = members.last else { return }
+                for tip in members { group[tip.id] = groups.count }
+                let left = first.target.midX+6-measure(first).width >= bounds.minX, right = last.target.midX-6+measure(last).width <= bounds.maxX
+                var order: [Tip] = []
+                if left != right { order = right ? members.reversed() : members }
+                else { while !members.isEmpty { order.append(members.removeFirst()); if let last = members.popLast() { order.append(last) } } }
+                groups.append(order); members = []
             }
-            if tip.placement == .inside {
-                var spot = rect(centreY:tip.target.midY)
-                // Nudged down past any bubble already there.
-                while !clear(spot,of:tip), spot.maxY < min(tip.target.maxY,bounds.maxY) { spot.origin.y += 6 }
-                placed.append(Placed(tip:tip,bubble:spot)); continue
+            for tip in row.sorted(by: { $0.target.midX < $1.target.midX }) {
+                if let last = members.last, tip.target.minX-last.target.maxX > 60 { close() }
+                members.append(tip)
             }
-            func spot(on above: Bool, gap: CGFloat) -> CGRect {
-                rect(centreY:above ? tip.target.minY-gap-measured.height/2 : tip.target.maxY+gap+measured.height/2)
+            close()
+        }
+        /// Where the line of a control still to come runs on the side it asks for: 120 pt, or for a
+        /// control in the same group as far as `bubble` if that is farther (its own bubble will
+        /// stack beyond it).
+        func lane(_ other: Tip, near tip: Tip, for bubble: CGRect) -> CGRect {
+            let target = other.target, above = other.placement == .above
+            let reach = max(120,group[other.id] == group[tip.id] ? above ? target.minY-bubble.minY : bubble.maxY-target.maxY : 0)
+            return CGRect(x:target.minX,y:above ? target.minY-reach : target.maxY,width:target.width,height:reach)
+        }
+        /// Whether a control keeps a way out along `lane`, `extra` added: some part of it from
+        /// which a line runs clear of bubbles and other controls.
+        func wayOut(_ other: Tip, along lane: CGRect, adding extra: CGRect?) -> Bool {
+            let target = other.target
+            let blocking = (placed.map(\.bubble)+(extra.map { [$0] } ?? [])).filter { $0.intersects(lane) }.map { $0.insetBy(dx:-3,dy:0) }
+                + controls.filter { $0.id != other.id && $0.target.intersects(lane) }.map { $0.target.insetBy(dx:-2,dy:0) }
+            let inset = min(3,target.width/2)
+            return stride(from:target.minX+inset,through:target.maxX-inset,by:1).contains { x in !blocking.contains { x > $0.minX && x < $0.maxX } }
+        }
+        /// The spot for `tip` with `later` still to come, and how much it gave up (0: nothing).
+        func place(_ tip: Tip, before later: [Tip]) -> (Placed,Int) {
+            let measured = measure(tip), target = tip.target, preferAbove = tip.placement == .above
+            let inset = (x:min(3,target.width/2),y:min(3,target.height/2))
+            // Where a way between the bubbles and controls about opens: just past their edges.
+            let obstacles = placed.map(\.bubble)+controls.filter { $0.id != tip.id }.map(\.target)
+            let edges = (x:obstacles.flatMap { [$0.minX-3,$0.maxX+3] },y:obstacles.flatMap { [$0.minY-3,$0.maxY+3] })
+            /// Where along `low...high` the line may meet the control: the middle first, then the
+            /// edges nearest to it.
+            func positions(_ middle: CGFloat, _ low: CGFloat, _ high: CGFloat, _ edges: [CGFloat]) -> [CGFloat] {
+                guard low <= high else { return [] }
+                let middle = min(max(middle,low),high)
+                return [middle]+Set(edges+[low,high]).filter { $0 >= low && $0 <= high && $0 != middle }.sorted { abs($0-middle) < abs($1-middle) }
             }
-            let preferAbove = tip.placement == .above
-            var chosen: CGRect?
-            search: for side in [preferAbove,!preferAbove] {
-                for step in 0..<60 {
-                    let candidate = spot(on:side,gap:12+CGFloat(step)*6)
-                    if !bounds.contains(candidate) { break }
-                    if clear(candidate,of:tip) { chosen = candidate; break search }
+            /// The first spot, nearest first, that `fits`.
+            func search(_ fits: (CGRect,CGRect) -> Bool) -> Placed? {
+                for above in [preferAbove,!preferAbove] {
+                    for step in 0..<60 {
+                        let gap = 12+CGFloat(step)*6
+                        let y = above ? target.minY-gap-measured.height : target.maxY+gap
+                        guard y >= bounds.minY, y+measured.height <= bounds.maxY else { break }
+                        // The bubble is centred on its line, or leans left or right of it.
+                        for x in positions(target.midX,target.minX+inset.x,target.maxX-inset.x,edges.x) {
+                            for left in [x-measured.width/2,x+6-measured.width,x-6] {
+                                let bubble = CGRect(x:min(max(left,bounds.minX),bounds.maxX-measured.width),y:y,width:measured.width,height:measured.height)
+                                guard x >= bubble.minX+6, x <= bubble.maxX-6 else { continue }
+                                let line = pointer(from:bubble,to:target,at:x)
+                                if fits(bubble,line) { return Placed(tip:tip,bubble:bubble,pointer:line) }
+                            }
+                        }
+                    }
+                }
+                // Beside it, right then left, level with it.
+                for right in [true,false] {
+                    for step in 0..<10 {
+                        let gap = 12+CGFloat(step)*6
+                        let y = min(max(target.midY-measured.height/2,bounds.minY),bounds.maxY-measured.height)
+                        let bubble = CGRect(x:right ? target.maxX+gap : target.minX-gap-measured.width,y:y,width:measured.width,height:measured.height)
+                        guard bounds.contains(bubble) else { break }
+                        for y in positions(target.midY,max(target.minY+inset.y,bubble.minY+4),min(target.maxY-inset.y,bubble.maxY-4),edges.y) {
+                            let line = pointer(from:bubble,to:target,at:y)
+                            if fits(bubble,line) { return Placed(tip:tip,bubble:bubble,pointer:line) }
+                        }
+                    }
+                }
+                return nil
+            }
+            let offControls = { (line: CGRect) in !controls.contains { $0.id != tip.id && $0.target.insetBy(dx:-2,dy:-2).intersects(line) } }
+            /// Takes no way out that a control still to come had.
+            let leavesWays = { (bubble: CGRect) in
+                later.allSatisfy { other in
+                    let lane = lane(other,near:tip,for:bubble)
+                    return !bubble.intersects(lane) || wayOut(other,along:lane,adding:bubble) || !wayOut(other,along:lane,adding:nil)
                 }
             }
-            placed.append(Placed(tip:tip,bubble:chosen ?? spot(on:preferAbove,gap:12)))
+            if let spot = search({ clear($0,$1,of:tip) && offControls($1) && leavesWays($0) }) { return (spot,0) }
+            if let spot = search({ clear($0,$1,of:tip) && leavesWays($0) }) { return (spot,1) }
+            if let spot = search({ clear($0,$1,of:tip) }) { return (spot,2) }
+            if let spot = search({ clear($0,$1,of:tip,lines:false) }) { return (spot,5) }
+            // Nowhere clear: next to the control, as asked.
+            let y = preferAbove ? target.minY-12-measured.height : target.maxY+12
+            let bubble = CGRect(x:min(max(target.midX-measured.width/2,bounds.minX),bounds.maxX-measured.width),y:y,width:measured.width,height:measured.height)
+            return (Placed(tip:tip,bubble:bubble,pointer:pointer(from:bubble,to:target,at:min(max(target.midX,bubble.minX+6),bubble.maxX-6))),20)
+        }
+        // Where a group leaves a bubble short, it is placed again with that control first, as it
+        // has the fewest ways to go, and the better layout of the group is kept.
+        for (index,members) in groups.enumerated() {
+            let after = groups[(index+1)...].flatMap { $0 }, before = placed
+            var order = members, best: (placed: [Placed],cost: Int)?
+            for _ in 0..<min(members.count,4) {
+                var cost = 0, short: Tip?
+                for (position,tip) in order.enumerated() {
+                    let (spot,given) = place(tip,before:Array(order[(position+1)...])+after)
+                    placed.append(spot); cost += given
+                    if given > 0, short == nil { short = tip }
+                }
+                if cost < best?.cost ?? .max { best = (placed,cost) }
+                guard let short, short.id != order[0].id else { break }
+                placed = before; order = [short]+order.filter { $0.id != short.id }
+            }
+            placed = best?.placed ?? placed
         }
         return placed
     }

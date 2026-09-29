@@ -3,7 +3,7 @@
 - Removed the frame-rate footer from Media. Settings now live in Export (⌘E), alongside HD/4K resolution; the temporary TIMELINE gear has been removed.
 - Presets: 16:9, 9:16, 1:1, 4:3, 4:5; 23.976, 24, 25, 29.970, 30, 50, 59.940, 60 fps (NDF).
 - Preview, transform hit-testing, PNG snapshots and H.264/AAC export use the saved aspect ratio. HD has a 1080-pixel short edge; the 4K preset doubles both dimensions.
-- Frame-rate changes keep clip IDs, source in-points, speed, linked A/V and shared cut boundaries. Cuts are aligned once to the destination grid; source-limited ends round down. Changes that would lose a clip or move a boundary by a full output frame are rejected atomically.
+- Frame-rate changes keep clip IDs, source in-points, speed, linked A/V and shared cut boundaries. Cuts are aligned once to the destination grid (since 2026-09-29: source-limited ends used to round down, and the loss added up until ordinary timelines of whole clips were refused). On a first change every cut goes to its nearest frame. A whole clip may end less than one destination frame past its source; it holds its last frame and is silent for that remainder. On a later change, a whole clip whose nearest end would be a frame or more past its source ends on its source's last frame instead, so that cut (and the next clip's start) can land up to about two frames from its nearest frame, without a message. Changes that would lose a clip are rejected atomically. A remembered source length of a retimed clip is kept through the change while it still describes the clip, so 1x afterwards gives back its range (to the new grid).
 - Applying both values records one Undo step. Version 1 projects load as 16:9 and migrate in memory; new saves use version 2 so old apps reject unsupported canvas formats instead of silently rendering them as 16:9.
 
 ## Verified
@@ -29,7 +29,7 @@ Release app compiled for ARM64 and passed code-sign verification. In the running
 
 ## Limits
 
-The frame-rate change resamples the timeline; it does not create interpolated motion or change source media. Cuts can shift by less than one destination frame. Very short clips or constrained source ranges may require a higher frame rate. Custom pixel dimensions and HDR output are outside this change. Audio stream timing was measured; subjective listening and long-project performance were not re-tested here. macOS 15 remains the deployment target; these checks ran on the available Apple Silicon Mac.
+The frame-rate change resamples the timeline; it does not create interpolated motion or change source media. Each cut moves once for all clips that share it. On a first conversion that is the nearest destination frame (at most half a frame away). On later conversions a whole clip that would end a frame or more past its source is pulled back to its source's last frame, which moves its cut, and the start of the clip after it, up to about two frames from the nearest frame (common after two conversions of whole clips; measured: 30 → 29.97 → 60 moved 30 of 40 cuts, at most 1.99 frames). A conversion is refused when a clip would be shorter than one destination frame, or when a cut on another track lies in the way of such a pull-back (trimming the clip's end by a frame then allows it). Custom pixel dimensions and HDR output are outside this change. Audio stream timing was measured; subjective listening and long-project performance were not re-tested here. macOS 15 remains the deployment target; these checks ran on the available Apple Silicon Mac.
 
 ## Export integration — 2026-09-26
 

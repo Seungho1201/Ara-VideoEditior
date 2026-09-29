@@ -28,6 +28,23 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
     /// The language this running copy of Ara is showing.
     static var running: String { Bundle.main.preferredLocalizations.first ?? "en" }
+    /// The Mac's own list, which System default follows (every app's, not this one's choice).
+    static var macLanguages: [String] {
+        UserDefaults.standard.persistentDomain(forName:UserDefaults.globalDomain)?["AppleLanguages"] as? [String] ?? []
+    }
+    /// The language Ara starts in with this choice: the one chosen, or for System default the
+    /// first of the Mac's languages that Ara has (English when it has none of them).
+    func resolved(macLanguages: [String] = AppLanguage.macLanguages) -> String {
+        switch self {
+        case .english: "en"
+        case .korean: "ko"
+        case .system: Bundle.preferredLocalizations(from:["en","ko"],forPreferences:macLanguages).first ?? "en"
+        }
+    }
+    /// Whether a copy showing `running` has to start again to show this choice.
+    func needsRestart(running: String = AppLanguage.running, macLanguages: [String] = AppLanguage.macLanguages) -> Bool {
+        !running.hasPrefix(resolved(macLanguages:macLanguages))
+    }
 }
 
 // MARK: - Shortcuts
@@ -97,20 +114,35 @@ struct Shortcut: Codable, Hashable {
         if flags.contains(.control) { modifiers.insert(.control) }
         return KeyboardShortcut(keyEquivalent,modifiers:modifiers)
     }
-    /// As macOS menus show it: ⌃⌥⇧⌘ then the key.
+    /// As macOS menus show it: ⌃⌥⇧⌘ then the key. Space, the one key written out, is in Ara's
+    /// language, as the menus write it.
     var display: String {
         var text = ""
         if flags.contains(.control) { text += "⌃" }
         if flags.contains(.option) { text += "⌥" }
         if flags.contains(.shift) { text += "⇧" }
         if flags.contains(.command) { text += "⌘" }
-        let glyphs = ["space":"Space","left":"←","right":"→","up":"↑","down":"↓","delete":"⌫","forwardDelete":"⌦","return":"↩",
+        let glyphs = ["space":String(localized:"Space"),"left":"←","right":"→","up":"↑","down":"↓","delete":"⌫","forwardDelete":"⌦","return":"↩",
                       "escape":"⎋","tab":"⇥","home":"↖","end":"↘","pageUp":"⇞","pageDown":"⇟"]
         return text+(glyphs[key] ?? key.uppercased())
     }
-    /// Kept by macOS or Ara itself (Quit, Close, Hide, Settings, Minimise, copy and paste).
+    /// Keys for the app and its windows rather than what is in them: Quit, Hide (and Hide Others),
+    /// Minimise (All), Close (All), Settings, Full Screen, cycling windows and Help.
+    static let appKeys: Set<Shortcut> = [Shortcut("q",.command),Shortcut("h",.command),Shortcut("h",[.command,.option]),
+        Shortcut("m",.command),Shortcut("m",[.command,.option]),Shortcut("w",.command),Shortcut("w",[.command,.option]),
+        Shortcut(",",.command),Shortcut("f",[.command,.control]),Shortcut("`",.command),Shortcut("/",[.command,.shift])]
+    var isAppKey: Bool { Self.appKeys.contains(self) }
+    /// Kept by macOS or Ara itself: the app keys, copy and paste (Paste and Match Style included),
+    /// Select All, Emoji & Symbols, Spotlight, the app switcher, and Tab moving the keyboard focus.
     var isReserved: Bool {
-        flags == [.command] && ["q","w","h","m",",","c","v","x","a"].contains(key) || flags == [.command,.option] && key == "h"
+        isAppKey || flags == [.command] && ["c","v","x","a","space","tab"].contains(key)
+            || self == Shortcut("v",[.command,.option,.shift]) || self == Shortcut("space",[.command,.control])
+            || key == "tab" && (flags.isEmpty || flags == [.shift])
+    }
+    /// Kept by the timeline and preview whatever the shortcuts are: Shift-arrows step ten frames,
+    /// Return (or Enter) finishes and Esc, with any modifier, cancels.
+    var isFixed: Bool {
+        key == "escape" || key == "return" && flags.isEmpty || ["left","right"].contains(key) && flags == [.shift]
     }
 }
 
@@ -190,7 +222,18 @@ enum AppCommand: String, CaseIterable, Identifiable {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         if let data = defaults.data(forKey:Self.storageKey), let stored = try? JSONDecoder().decode([String:Shortcut?].self,from:data) {
-            for (id,value) in stored { if let command = AppCommand(rawValue:id) { changes[command] = .some(value) } }
+            var refused: [AppCommand] = []
+            for (id,value) in stored {
+                guard let command = AppCommand(rawValue:id), value != command.standard else { continue }
+                // A key kept for the timeline and preview (or macOS) that an earlier Ara let be
+                // recorded is not used: it would take over Return or Esc from the menus.
+                if let key = value, key.isFixed || key.isReserved { refused.append(command); continue }
+                changes[command] = .some(value)
+            }
+            // Such a command gets its default back, or none if another command has that key now.
+            for command in refused where AppCommand.allCases.contains(where: { $0 != command && shortcut($0) == command.standard }) {
+                changes[command] = .some(nil)
+            }
         }
     }
     func shortcut(_ command: AppCommand) -> Shortcut? {
@@ -210,22 +253,29 @@ enum AppCommand: String, CaseIterable, Identifiable {
     func command(matching event: NSEvent) -> AppCommand? {
         AppCommand.allCases.first { shortcut($0)?.matches(event) == true }
     }
-    /// Sets (or clears) a shortcut. A command that had it gives it up; it is returned.
+    /// Sets (or clears) a shortcut. A command that had it gives it up; it is returned. A command's
+    /// own default is no change, so Restore Defaults has nothing to do after it.
     @discardableResult func set(_ shortcut: Shortcut?, for command: AppCommand) -> AppCommand? {
         var taken: AppCommand?
-        if let shortcut, let other = AppCommand.allCases.first(where: { $0 != command && self.shortcut($0) == shortcut }) {
-            changes[other] = .some(nil); taken = other
+        if let shortcut {
+            for other in AppCommand.allCases where other != command && self.shortcut(other) == shortcut {
+                changes[other] = .some(nil); taken = taken ?? other
+            }
         }
-        changes[command] = .some(shortcut)
+        if shortcut == command.standard { changes[command] = nil } else { changes[command] = .some(shortcut) }
         persist(); return taken
     }
-    func reset(_ command: AppCommand) {
-        changes[command] = nil
-        // A default another command took over goes back to its owner only if that key is free.
-        persist()
-    }
+    /// Brings back a command's default. A command that has that key now gives it up, as with
+    /// set(), so two commands never keep one key; it is returned.
+    @discardableResult func reset(_ command: AppCommand) -> AppCommand? { set(command.standard,for:command) }
     func resetAll() { changes.removeAll(); persist() }
-    /// Commands whose shortcuts clash (a default brought back where another command now has it).
+    /// The other command set to the same key, if any.
+    func sharing(_ command: AppCommand) -> AppCommand? {
+        guard let shortcut = shortcut(command) else { return nil }
+        return AppCommand.allCases.first { $0 != command && self.shortcut($0) == shortcut }
+    }
+    /// Commands whose shortcuts clash: only from settings kept by an earlier Ara, or a new default
+    /// another command already has. Restore default on either row resolves it.
     var clashes: Set<AppCommand> {
         var seen: [Shortcut:AppCommand] = [:], clashing = Set<AppCommand>()
         for command in AppCommand.allCases {
@@ -266,7 +316,8 @@ private struct GeneralSettings: View {
                     ForEach(AppLanguage.allCases) { Text(verbatim:$0.title).tag($0) }
                 }
                 .onChange(of:language) { _,chosen in chosen.apply() }
-                if language != AppLanguage.current(in:.standard) || needsRestart {
+                // Compared with what this copy shows, System default by the Mac's languages.
+                if language.needsRestart() {
                     HStack {
                         Text("Ara shows the new language after it starts again.").font(.system(size:11)).foregroundStyle(.secondary)
                         Spacer()
@@ -281,14 +332,6 @@ private struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
-    }
-    /// The running copy shows another language than the one chosen.
-    private var needsRestart: Bool {
-        switch language {
-        case .system: false
-        case .english: !AppLanguage.running.hasPrefix("en")
-        case .korean: !AppLanguage.running.hasPrefix("ko")
-        }
     }
 }
 
@@ -311,7 +354,7 @@ enum HapticKind: String, CaseIterable, Identifiable {
         case .snapping: "When a moved or trimmed clip catches a clip edge, the playhead or the start."
         case .mediaDrop: "When media dragged from the library finds a place, and when it lands."
         case .transitions: "When a transition finds a cut or clip edge, and when it is applied."
-        case .alignment: "When a clip's centre lines up with another in the preview."
+        case .alignment: "When a clip's alignment point lines up with the centre or another clip's in the preview, or catches the centre, a corner or an edge as you place it."
         }
     }
 }
@@ -352,77 +395,138 @@ private struct HapticSettings: View {
     }
 }
 
-private struct ShortcutSettingsView: View {
-    @ObservedObject private var shortcuts = ShortcutSettings.shared
-    @State private var recording: AppCommand?
-    @State private var note: String?
+/// Takes the next key pressed in the Settings window as a command's shortcut. Recording stops
+/// when that window stops being key or closes, and keys for other windows pass on, so a key typed
+/// in the editor is never taken for a shortcut.
+@MainActor final class ShortcutRecorder: ObservableObject {
+    let shortcuts: ShortcutSettings
+    /// The command waiting for its keys.
+    @Published private(set) var recording: AppCommand?
+    /// What the last key did, when that needs saying: taken from another command, or refused.
+    @Published var note: String?
+    /// The Settings window, which the keys are pressed in.
+    weak var window: NSWindow? { didSet { if window !== oldValue { stop() } } }
+    private var monitor: Any?
+    private var observers: [NSObjectProtocol] = []
+    init(shortcuts: ShortcutSettings = .shared) { self.shortcuts = shortcuts }
+
+    func toggle(_ command: AppCommand) { if recording == command { stop() } else { start(command) } }
+    func start(_ command: AppCommand) {
+        stop()
+        guard let window else { return }
+        recording = command; note = nil
+        monitor = NSEvent.addLocalMonitorForEvents(matching:.keyDown) { [weak self] event in self?.record(event) ?? event }
+        observers = [NSWindow.didResignKeyNotification,NSWindow.willCloseNotification].map { name in
+            NotificationCenter.default.addObserver(forName:name,object:window,queue:.main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.stop() }
+            }
+        }
+    }
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        observers = []
+        if recording != nil { recording = nil }
+    }
+    /// A key pressed while recording: the new shortcut, or a note saying why it can't be, or with
+    /// Esc the end of recording. Nil when it was taken.
+    func record(_ event: NSEvent) -> NSEvent? {
+        guard let command = recording, let window, event.window === window else { return event }
+        if event.keyCode == 53, event.modifierFlags.intersection(Shortcut.modifierMask).isEmpty { stop(); return nil }
+        guard let shortcut = Shortcut(event:event) else {
+            note = String(localized:"This key can't be used for a shortcut. Choose another."); return nil
+        }
+        if shortcut.isReserved { note = String(localized:"\(shortcut.display) is kept for macOS or copy and paste. Choose another."); return nil }
+        if shortcut.isFixed { note = String(localized:"\(shortcut.display) is kept for the timeline and preview. Choose another."); return nil }
+        let taken = shortcuts.set(shortcut,for:command)
+        note = taken.map { String(localized:"\(shortcut.display) moved here from “\($0.title)”, which now has none.") }
+        stop(); return nil
+    }
+    /// Brings back a command's default, taking it from a command that has it now, as recording does.
+    func restore(_ command: AppCommand) {
+        let taken = shortcuts.reset(command)
+        note = taken.flatMap { other in command.standard.map { String(localized:"\($0.display) moved here from “\(other.title)”, which now has none.") } }
+    }
+    /// The row's shortcut as shown: what is set, or that keys are awaited.
+    func shown(_ command: AppCommand) -> String {
+        recording == command ? String(localized:"Type a shortcut…") : shortcuts.shortcut(command)?.display ?? String(localized:"None")
+    }
+    /// The same for VoiceOver, with the clash that orange shows.
+    func spoken(_ command: AppCommand) -> String {
+        guard recording != command, let other = shortcuts.sharing(command) else { return shown(command) }
+        return "\(shown(command)) · \(String(localized:"Also set for “\(other.title)”"))"
+    }
+}
+
+struct ShortcutSettingsView: View {
+    @ObservedObject var shortcuts: ShortcutSettings
+    @StateObject private var recorder: ShortcutRecorder
+    init(shortcuts: ShortcutSettings = .shared) {
+        self.shortcuts = shortcuts
+        _recorder = StateObject(wrappedValue:ShortcutRecorder(shortcuts:shortcuts))
+    }
     var body: some View {
         VStack(alignment:.leading,spacing:10) {
             Form {
                 ForEach(AppCommand.Group.allCases,id:\.self) { group in
                     Section(LocalizedStringKey(group.rawValue)) {
                         ForEach(AppCommand.allCases.filter { $0.group == group }) { command in
-                            ShortcutRow(command:command,shortcuts:shortcuts,recording:$recording,note:$note)
+                            ShortcutRow(command:command,shortcuts:shortcuts,recorder:recorder)
                         }
                     }
                 }
             }
             .formStyle(.grouped)
             HStack {
-                Text(verbatim:note ?? String(localized:"Click a shortcut, then press the new keys. Esc cancels.")).font(.system(size:11))
-                    .foregroundStyle(note == nil ? .secondary : Color.orange).lineLimit(2)
+                Text(verbatim:recorder.note ?? String(localized:"Click a shortcut, then press the new keys. Esc cancels.")).font(.system(size:11))
+                    .foregroundStyle(recorder.note == nil ? .secondary : Color.orange).lineLimit(2)
                 Spacer()
-                Button("Restore Defaults") { shortcuts.resetAll(); note = nil }.disabled(shortcuts.changes.isEmpty)
+                Button("Restore Defaults") { shortcuts.resetAll(); recorder.note = nil }.disabled(shortcuts.changes.isEmpty)
             }.padding(.horizontal,20).padding(.bottom,14)
         }
+        .background(SettingsWindowProbe(recorder:recorder))
+        .onDisappear { recorder.stop() }
     }
+}
+
+/// Tells the recorder which window the Shortcuts tab is in.
+private struct SettingsWindowProbe: NSViewRepresentable {
+    let recorder: ShortcutRecorder
+    final class Probe: NSView {
+        weak var recorder: ShortcutRecorder?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); recorder?.window = window }
+    }
+    func makeNSView(context: Context) -> Probe { let probe = Probe(); probe.recorder = recorder; return probe }
+    func updateNSView(_ probe: Probe, context: Context) { probe.recorder = recorder; recorder.window = probe.window }
 }
 
 private struct ShortcutRow: View {
     let command: AppCommand
     @ObservedObject var shortcuts: ShortcutSettings
-    @Binding var recording: AppCommand?
-    @Binding var note: String?
-    @State private var monitor: Any?
+    @ObservedObject var recorder: ShortcutRecorder
     var body: some View {
+        let sharing = shortcuts.sharing(command)
         HStack {
             Text(verbatim:command.title)
             Spacer()
-            Button {
-                if recording == command { stop() } else { start() }
-            } label: {
-                Text(verbatim:recording == command ? String(localized:"Type a shortcut…") : (shortcuts.shortcut(command)?.display ?? String(localized:"None")))
+            Button { recorder.toggle(command) } label: {
+                Text(verbatim:recorder.shown(command))
                     .font(.system(size:12,design:.rounded)).frame(minWidth:110)
-                    .foregroundStyle(shortcuts.clashes.contains(command) ? Color.orange : recording == command ? Theme.accent : Color.primary)
+                    .foregroundStyle(sharing != nil ? Color.orange : recorder.recording == command ? Theme.accent : Color.primary)
             }
-            .accessibilityLabel(Text(verbatim:"\(command.title) \(shortcuts.label(command))"))
-            Button { shortcuts.set(nil,for:command); note = nil } label: { Image(systemName:"xmark.circle") }
-                .buttonStyle(.borderless).help("Remove shortcut").disabled(shortcuts.shortcut(command) == nil)
-            Button { shortcuts.reset(command); note = nil } label: { Image(systemName:"arrow.uturn.backward") }
-                .buttonStyle(.borderless).help("Restore default").disabled(!shortcuts.isChanged(command) && !shortcuts.clashes.contains(command))
+            .help(sharing.map { String(localized:"Also set for “\($0.title)”") } ?? "")
+            .accessibilityLabel(Text(verbatim:command.title))
+            .accessibilityValue(Text(verbatim:recorder.spoken(command)))
+            Button { shortcuts.set(nil,for:command); recorder.note = nil } label: { Image(systemName:"xmark.circle") }
+                .buttonStyle(.borderless).help("Remove shortcut").accessibilityLabel(Text("Remove shortcut for \(command.title)"))
+                .disabled(shortcuts.shortcut(command) == nil)
+            // Also on a clash: bringing the default back takes the key from the other command.
+            Button { recorder.restore(command) } label: { Image(systemName:"arrow.uturn.backward") }
+                .buttonStyle(.borderless).help("Restore default").accessibilityLabel(Text("Restore default for \(command.title)"))
+                .disabled(!shortcuts.isChanged(command) && sharing == nil)
         }
-        .onDisappear { stop() }
-    }
-    private func start() {
-        stop(); recording = command; note = nil
-        monitor = NSEvent.addLocalMonitorForEvents(matching:.keyDown) { event in
-            guard recording == command else { return event }
-            if event.keyCode == 53, event.modifierFlags.intersection(Shortcut.modifierMask).isEmpty { stop(); return nil }
-            guard let shortcut = Shortcut(event:event) else { return nil }
-            if shortcut.isReserved {
-                note = String(localized:"\(shortcut.display) is kept for macOS or copy and paste. Choose another.")
-                return nil
-            }
-            if let taken = shortcuts.set(shortcut,for:command) {
-                note = String(localized:"\(shortcut.display) moved here from “\(taken.title)”, which now has none.")
-            } else { note = nil }
-            stop(); return nil
-        }
-    }
-    private func stop() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
-        if recording == command { recording = nil }
     }
 }
 

@@ -62,38 +62,49 @@ public enum VideoAspectRatio: String, Codable, CaseIterable, Hashable, Sendable,
 }
 
 public extension Editing {
-    /// Preserve speed, source in-points and linked A/V. Quantize shared cut boundaries once,
-    /// rather than rounding each duration independently and accumulating gaps or overlaps.
-    /// Source-limited ends round down. Refuse a conversion that loses a clip or moves an edge
-    /// by a full frame; the original project remains untouched on failure.
+    /// Preserve speed, source in-points and linked A/V. Each cut goes to the nearest frame of the
+    /// new grid, once for every clip that shares it, so clips that met still meet and the tracks
+    /// stay in sync (rounding each duration on its own would accumulate gaps or overlaps). A
+    /// whole clip's end can round past its source's end by less than a frame: its last frame is
+    /// held there (`Project.fitsSource`). One that would overrun by more, after earlier rate
+    /// changes, ends on the last frame its source reaches instead. Refuse a conversion that
+    /// leaves a clip shorter than a frame; the original project remains untouched on failure.
     static func setVideoSettings(aspectRatio: VideoAspectRatio, frameRate: FrameRate, resolution: Int? = nil, in project: inout Project) throws {
         guard FrameRate.supported.contains(frameRate) else { throw EditError("Unsupported project frame rate.") }
         var candidate = try project.validated()
         if frameRate != candidate.frameRate {
             let clips = candidate.clips
+            var converted = candidate; converted.frameRate = frameRate
+            let assets = Dictionary(uniqueKeysWithValues:candidate.media.map { ($0.id,$0) })
             let ending = Dictionary(grouping:clips,by:\.end)
-            let boundaries = Set(clips.flatMap { [$0.start,$0.end] }).sorted()
             var mapped: [MediaTime:MediaTime] = [:]
             var previous = MediaTime.zero
-            let failure = EditError("This frame rate cannot preserve these cuts within one frame. Use a higher frame rate or lengthen the shortest clips first.")
-            for boundary in boundaries {
+            for boundary in Set(clips.flatMap { [$0.start,$0.end] }).sorted() {
                 var time = frameRate.quantize(boundary)
                 for clip in ending[boundary] ?? [] where clip.kind == .video || clip.kind == .audio {
-                    guard let source = candidate.media(for:clip), let start = mapped[clip.start] else { throw failure }
-                    let available = source.duration-clip.sourceStart
-                    var limit = frameRate.floor(available.scaled(by:1/clip.speed))
-                    // Inverse-speed rounding must never consume a tick beyond the source.
-                    if limit.scaled(by:clip.speed) > available { limit -= frameRate.frame }
-                    time = min(time,start+limit)
+                    guard let asset = clip.mediaID.flatMap({ assets[$0] }), let start = mapped[clip.start] else { continue }
+                    var fitted = clip; fitted.start = start; fitted.duration = time-start
+                    while fitted.duration > frameRate.frame, !converted.fitsSource(fitted,of:asset) { fitted.duration = fitted.duration-frameRate.frame }
+                    time = min(time,fitted.end)
                 }
-                guard time >= previous, abs(time.ticks-boundary.ticks) < frameRate.frame.ticks else { throw failure }
+                // Never before an earlier cut: clips that did not overlap still do not.
+                time = max(time,previous)
                 mapped[boundary] = time; previous = time
             }
             for i in candidate.clips.indices {
                 let clip = clips[i], start = mapped[clip.start]!, end = mapped[clip.end]!
-                guard end-start >= frameRate.frame else { throw failure }
+                guard end-start >= frameRate.frame else {
+                    throw EditError("At \(frameRate.label) fps “\(clip.name)” would be shorter than one frame. Lengthen it or choose another frame rate.")
+                }
                 candidate.clips[i].start = start
                 candidate.clips[i].duration = end-start
+                // A length remembered for the next speed change stays while it still describes the
+                // clip, so 1x gives back the range it was given; rounded past it or too far from it,
+                // the clip has a new source range.
+                if let length = clip.retimedSourceLength, !candidate.clips[i].wasGiven(length) { candidate.clips[i].retimedSourceLength = nil }
+                if clip.kind == .video || clip.kind == .audio, let asset = clip.mediaID.flatMap({ assets[$0] }), !converted.fitsSource(candidate.clips[i],of:asset) {
+                    throw EditError("At \(frameRate.label) fps “\(clip.name)” would end more than a frame after its source. Trim its end by a frame, then change the frame rate.")
+                }
             }
             candidate.frameRate = frameRate
         }

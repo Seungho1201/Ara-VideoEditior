@@ -75,7 +75,7 @@ struct EditorView: View {
             toolbarButton("Open",icon:"folder",action:store.chooseOpen).helpTip("Open project",.below,shortcut:shortcuts.label(.openProject))
             toolbarButton("Save",icon:"square.and.arrow.down") { store.save() }.helpTip("Save project",.below,shortcut:shortcuts.label(.save))
             Rectangle().fill(.white.opacity(0.1)).frame(width:1,height:24)
-            toolbarButton("Import",icon:"plus",action:store.chooseImport).helpTip("Import media",.below,shortcut:shortcuts.label(.importMedia))
+            toolbarButton("Import",icon:"plus",action:store.chooseImport).disabled(store.isExporting).helpTip("Import media",.below,shortcut:shortcuts.label(.importMedia))
             Button { store.showExportSheet = true } label: { Label("Export",systemImage:"arrow.up.right").font(.system(size:12,weight:.semibold)).padding(.horizontal,13).padding(.vertical,8) }
                 .buttonStyle(.plain).background(Theme.accent,in:RoundedRectangle(cornerRadius:6)).foregroundStyle(Theme.background).disabled(store.isExporting || store.isCapturingSnapshot)
                 .helpTip("Export movie",.below,shortcut:shortcuts.label(.exportMovie))
@@ -109,7 +109,7 @@ struct EditorView: View {
     private func speedPresets<Label:View>(@ViewBuilder label: () -> Label) -> some View {
         Menu {
             ForEach(EditorStore.speedPresets,id:\.self) { preset in
-                Button(preset == 1 ? "1x · Normal" : String(format:"%gx",preset)) { store.setSpeed(preset) }
+                Button { store.setSpeed(preset) } label: { preset == 1 ? Text("1x · Normal") : Text(verbatim:String(format:"%gx",preset)) }
             }
             Divider()
             Button("Custom…") { customSpeed = true }
@@ -117,7 +117,7 @@ struct EditorView: View {
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         // A borderless menu draws in the accent colour; match the white toolbar icons instead.
         .tint(.primary)
-        .disabled(!store.canRetimeSelection)
+        .disabled(!store.canRetimeSelection || store.isExporting)
     }
     private func toolbarButton(_ name: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action:action) { Label(LocalizedStringKey(name),systemImage:icon).font(.system(size:12,weight:.medium)) }.buttonStyle(.plain).padding(.horizontal,5).help(LocalizedStringKey(name)).accessibilityLabel(Text(LocalizedStringKey(name)))
@@ -127,11 +127,14 @@ struct EditorView: View {
             HStack { panelTitle("PROGRAM"); Spacer(); Text(store.project.aspectRatio.dimensions()).font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted) }.padding(14)
             ZStack {
                 Color.black
-                if store.project.clips.isEmpty || !store.missing.isEmpty {
+                // Only a missing source the timeline uses stops playback; an unused one is just
+                // marked in the library.
+                let blocked = !store.missingInUse.isEmpty
+                if store.project.clips.isEmpty || blocked {
                     VStack(spacing:14) {
-                        Image(systemName:store.missing.isEmpty ? "play.rectangle" : "link.badge.plus").font(.system(size:38,weight:.ultraLight))
-                        Text(store.missing.isEmpty ? "A blank frame. A new story." : "Reconnect your source media").font(.system(size:16,weight:.medium))
-                        Text(store.missing.isEmpty ? "Import a file, then drag it onto the timeline." : "Use Relink in the media library to restore playback.").font(.system(size:12)).foregroundStyle(Theme.muted)
+                        Image(systemName:blocked ? "link.badge.plus" : "play.rectangle").font(.system(size:38,weight:.ultraLight))
+                        Text(blocked ? "Reconnect your source media" : "A blank frame. A new story.").font(.system(size:16,weight:.medium))
+                        Text(blocked ? "Use Relink in the media library to restore playback." : "Import a file, then drag it onto the timeline.").font(.system(size:12)).foregroundStyle(Theme.muted)
                     }.foregroundStyle(.white.opacity(0.8))
                 } else { PreviewSurface(store:store).helpTip("Double-click a clip to move, resize and rotate it",.inside) }
                 if store.isBuilding { VStack { Spacer(); HStack(spacing:8) { ProgressView().controlSize(.mini); Text("Updating preview").font(.system(size:11)) }.padding(9).background(.black.opacity(0.7),in:Capsule()).padding(12) } }
@@ -160,10 +163,11 @@ struct EditorView: View {
         VStack(spacing:0) {
             HStack(spacing:16) {
                 panelTitle("TIMELINE")
-                Button { store.undo() } label:{Image(systemName:"arrow.uturn.backward")}.disabled(!store.canUndo).help("Undo \(shortcuts.label(.undo))").helpTip("Undo",shortcut:shortcuts.label(.undo))
-                Button { store.redo() } label:{Image(systemName:"arrow.uturn.forward")}.disabled(!store.canRedo).help("Redo \(shortcuts.label(.redo))").helpTip("Redo",shortcut:shortcuts.label(.redo))
+                // What changes the project waits while an export reads it.
+                Button { store.undo() } label:{Image(systemName:"arrow.uturn.backward")}.disabled(!store.canUndo || store.isExporting).help("Undo \(shortcuts.label(.undo))").helpTip("Undo",shortcut:shortcuts.label(.undo))
+                Button { store.redo() } label:{Image(systemName:"arrow.uturn.forward")}.disabled(!store.canRedo || store.isExporting).help("Redo \(shortcuts.label(.redo))").helpTip("Redo",shortcut:shortcuts.label(.redo))
                 Divider().frame(height:18)
-                Button { store.split() } label:{Image(systemName:"scissors")}.disabled(store.selectedClip == nil).help("Split at playhead \(shortcuts.label(.split))").accessibilityLabel("Split at playhead").helpTip("Split at playhead",shortcut:shortcuts.label(.split))
+                Button { store.split() } label:{Image(systemName:"scissors")}.disabled(store.selectedClip == nil || store.isExporting).help("Split at playhead \(shortcuts.label(.split))").accessibilityLabel("Split at playhead").helpTip("Split at playhead",shortcut:shortcuts.label(.split))
                 Button(action:store.chooseSnapshot) {
                     if store.isCapturingSnapshot { ProgressView().controlSize(.mini).frame(width:16,height:16) }
                     else { Image(systemName:"camera").frame(width:16,height:16) }
@@ -171,7 +175,7 @@ struct EditorView: View {
                 speedMenu
                 Button { store.addText() } label:{
                     CaptionsGlyph(lineWidth:1).stroke(style:StrokeStyle(lineWidth:1,lineCap:.round,lineJoin:.round)).frame(width:17,height:12.6)
-                }.help("Add a title above the clips at the playhead \(shortcuts.label(.addText))").accessibilityLabel("Add text clip").helpTip("Add title",shortcut:shortcuts.label(.addText))
+                }.disabled(store.isExporting).help("Add a title above the clips at the playhead \(shortcuts.label(.addText))").accessibilityLabel("Add text clip").helpTip("Add title",shortcut:shortcuts.label(.addText))
                 // Rectangle select, once: the next drag across the tracks selects what it covers.
                 Button { store.dragSelectArmed.toggle() } label:{
                     DragSelectGlyph().frame(width:15,height:15)
@@ -180,7 +184,8 @@ struct EditorView: View {
                 }.padding(-3).disabled(store.project.clips.isEmpty)
                  .help(store.dragSelectArmed ? LocalizedStringKey("Drag across the timeline to select clips · Esc to cancel") : LocalizedStringKey("Select clips with a rectangle: the next drag across the timeline, no Shift needed"))
                  .accessibilityLabel("Rectangle select").accessibilityAddTraits(store.dragSelectArmed ? .isSelected : []).helpTip("Rectangle select")
-                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(store.selectedClip == nil && !store.hasMultipleSelection).help("Delete selected clips").helpTip("Delete",shortcut:shortcuts.label(.delete))
+                Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(!store.canDeleteSelection || store.isExporting)
+                    .help(store.selectedTransition != nil ? LocalizedStringKey("Remove transition") : LocalizedStringKey("Delete selected clips")).helpTip("Delete",shortcut:shortcuts.label(.delete))
                 Spacer(minLength:4)
                 Toggle(isOn:$store.snapping) { Image(systemName:"magnifyingglass") }.toggleStyle(.button).help("Snap to clip edges and playhead \(shortcuts.label(.snapping))").accessibilityLabel("Snapping").helpTip("Snapping",shortcut:shortcuts.label(.snapping))
                 Text("−").foregroundStyle(Theme.muted)
@@ -213,6 +218,18 @@ struct EditorView: View {
 
 @MainActor func panelTitle(_ text: String) -> some View { Text(LocalizedStringKey(text)).font(.system(size:10,weight:.bold)).tracking(1.7).foregroundStyle(Theme.muted) }
 
+extension MediaKind {
+    /// The kind as the panels name it, in Ara's language (the raw value is the saved one).
+    var displayName: String {
+        switch self {
+        case .video: String(localized:"Video")
+        case .audio: String(localized:"Audio")
+        case .image: String(localized:"Image")
+        case .text: String(localized:"Text")
+        }
+    }
+}
+
 struct LibraryPanel: View {
     @ObservedObject var store: EditorStore
     @State private var targeted = false
@@ -228,7 +245,7 @@ struct LibraryPanel: View {
                         Text("Preview \(Int(proxy.fraction*100))%").monospacedDigit()
                     }
                     .font(.system(size:10)).foregroundStyle(Theme.muted)
-                    .help("Preparing preview · \(proxy.name)" + (proxy.remaining > 1 ? " · \(proxy.remaining-1) more" : ""))
+                    .help(proxy.remaining > 1 ? String(localized:"Preparing preview · \(proxy.name) · \(proxy.remaining-1) more") : String(localized:"Preparing preview · \(proxy.name)"))
                     .accessibilityElement(children:.ignore)
                     .accessibilityLabel("Preparing preview for \(proxy.name)")
                     .accessibilityValue("\(Int(proxy.fraction*100)) percent")
@@ -285,12 +302,16 @@ struct LibraryPanel: View {
                 if let image = store.thumbnails[media.id] { Image(nsImage:image).resizable().aspectRatio(contentMode:.fit) }
                 else if media.kind == .audio { Image(systemName:"waveform").font(.system(size:30,weight:.light)).foregroundStyle(Theme.accent) }
                 else { Image(systemName:"film").foregroundStyle(Theme.muted) }
-                VStack { Spacer(); HStack { Text(media.kind.rawValue.uppercased()).font(.system(size:8,weight:.bold)).tracking(1); Spacer(); Text(media.kind == .image ? "STILL" : store.project.frameRate.timecode(media.duration)).font(.system(size:9,design:.monospaced)) }.padding(5).background(.black.opacity(0.7)) }
+                VStack { Spacer(); HStack {
+                    Text(media.kind.displayName.uppercased()).font(.system(size:8,weight:.bold)).tracking(1); Spacer()
+                    Group { if media.kind == .image { Text("STILL") } else { Text(store.project.frameRate.timecode(media.duration)) } }.font(.system(size:9,design:.monospaced))
+                }.padding(5).background(.black.opacity(0.7)) }
             }.aspectRatio(16.0/9,contentMode:.fit).clipShape(RoundedRectangle(cornerRadius:4))
                 .overlay { LibraryDragHandle(id:media.id,thumbnail:store.thumbnails[media.id],select:{store.selectedMediaID = media.id},append:{store.addMedia(media.id)}) }
             Text(media.name).font(.system(size:11,weight:.medium)).lineLimit(1).truncationMode(.middle).help(media.name)
             HStack {
-                Text(media.kind == .audio ? "Audio · Source waveform" : "\(media.width) × \(media.height)" )
+                // Sizes plain, as PROGRAM and the sheets show them: 2560 × 1440, never 2,560 × 1,440.
+                if media.kind == .audio { Text("Audio · Source waveform") } else { Text(verbatim:"\(media.width) × \(media.height)") }
                 Spacer()
                 if media.frameRate > 0 { Text(String(format:"%.2f fps",media.frameRate)) }
             }.font(.system(size:9)).foregroundStyle(Theme.muted).lineLimit(1)

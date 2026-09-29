@@ -7,6 +7,8 @@ struct TimelineView: View {
     @ObservedObject var store: EditorStore
     /// The canvas's vertical scroll position, so the track names stay beside their rows.
     @StateObject private var scroll = TimelineScroll()
+    /// How tall the names column shows below its header, to tell whether a "+" is in view.
+    @State private var namesHeight: CGFloat = .infinity
     var body: some View {
         HStack(spacing:0) {
             VStack(spacing:0) {
@@ -38,6 +40,7 @@ struct TimelineView: View {
                 // minHeight 0: the names are as tall as all the tracks; the panel shows what fits
                 // and scrolls the rest with the canvas, instead of the column growing the panel.
                 .frame(minHeight:0,maxHeight:.infinity,alignment:.top).clipped()
+                .onGeometryChange(for:CGFloat.self) { $0.size.height } action: { namesHeight = $0 }
                 // Clipping only hides: without this, a "+" scrolled out of view still takes clicks
                 // on the TRACKS header and the toolbar above it.
                 .contentShape(Rectangle())
@@ -53,18 +56,27 @@ struct TimelineView: View {
     /// "+" above the top video track and below the bottom audio track.
     private func addTrackButton(_ kind: Lane.Kind) -> some View {
         let count = kind == .video ? store.project.videoTrackCount : store.project.audioTrackCount
-        let atLimit = count >= Project.trackCounts.upperBound
+        let limit = Project.trackCounts.upperBound, atLimit = count >= limit
+        let tip: LocalizedStringKey = atLimit ? (kind == .video ? "A timeline has at most \(limit) video tracks" : "A timeline has at most \(limit) audio tracks")
+                                              : kind == .video ? "Add a video track above V\(count)" : "Add an audio track below A\(count)"
         return Button { store.addTrack(kind) } label: {
             HStack(spacing:5) { Image(systemName:"plus"); Text(kind == .video ? "Video" : "Audio") }
                 .font(.system(size:9,weight:.semibold)).foregroundStyle(Theme.muted)
                 .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.leading).padding(.leading,12).contentShape(Rectangle())
         }
         .buttonStyle(.plain).frame(height:TimelineCanvas.addBand)
-        .helpTip(kind == .video ? "Add a video track" : "Add an audio track",kind == .video ? .above : .below)
+        // Help mode names a "+" only while it is in view: scrolled out of the column it is still
+        // laid out, just clipped, and its tip would point at the panel above or below.
+        .background { if inView(kind) { Color.clear.helpTip(kind == .video ? "Add a video track" : "Add an audio track",kind == .video ? .above : .below) } }
         .disabled(atLimit || store.isExporting)
-        .help(atLimit ? "A timeline has at most \(Project.trackCounts.upperBound) \(kind == .video ? "video" : "audio") tracks"
-                      : kind == .video ? "Add a video track above V\(count)" : "Add an audio track below A\(count)")
+        .help(tip)
         .accessibilityLabel(kind == .video ? "Add video track" : "Add audio track")
+    }
+    /// Whether the "+ Video" (top of the column) or "+ Audio" (below the last track) button shows
+    /// whole at the column's scroll position.
+    private func inView(_ kind: Lane.Kind) -> Bool {
+        let top = kind == .video ? 0 : TimelineCanvas.addBand+Double(store.project.displayLanes.count)*TimelineCanvas.rowHeight
+        return top-scroll.offset >= -0.5 && top+TimelineCanvas.addBand-scroll.offset <= namesHeight+0.5
     }
 }
 
@@ -143,6 +155,11 @@ struct TimelineSurface: NSViewRepresentable {
     private let ruler = TimelineCanvas.ruler, rowHeight = TimelineCanvas.rowHeight, band = TimelineCanvas.addBand
     /// Top to bottom: V(n) … V1, A1 … A(n).
     private var lanes: [Lane] { store?.project.displayLanes ?? [] }
+    /// A track's place in `lanes`, worked out rather than searched for: every clip drawn asks.
+    private func row(_ lane: Lane) -> Int? {
+        guard let project = store?.project, project.hasLane(lane) else { return nil }
+        return lane.isVideo ? project.videoTrackCount-lane.number : project.videoTrackCount+lane.number-1
+    }
     private func rowTop(_ index: Int) -> Double { ruler+band+Double(index)*rowHeight }
     /// Ruler, the "+ Video" band, every track, the "+ Audio" band.
     var contentHeight: Double { ruler+band*2+Double(lanes.count)*rowHeight }
@@ -150,8 +167,20 @@ struct TimelineSurface: NSViewRepresentable {
     private var rulerTop: Double { visibleRect.minY }
     private enum DragMode { case move, start, end, scrub, marquee }
     private var mode: DragMode?
+    /// The project a move, trim or marquee started from. Should its timeline change under the
+    /// gesture (an undo mid-drag), the gesture is dropped: its clips may be gone or elsewhere by then.
+    private var gestureBase: Project?
+    /// Whether a drag started on `base` still describes `project`: its clips, transitions, tracks
+    /// and frame grid are as they were. Media imported meanwhile changes none of them.
+    private static func sameTimeline(_ project: Project, _ base: Project?) -> Bool {
+        guard let base else { return false }
+        return project.clips == base.clips && project.transitions == base.transitions && project.frameRate == base.frameRate
+            && project.videoTrackCount == base.videoTrackCount && project.audioTrackCount == base.audioTrackCount
+    }
     /// A move of several selected clips together: the selection, where they would land, and by how much.
     private var group: Set<UUID>?
+    /// The selection with its linked partners, looked up once for the gesture.
+    private var groupMoving: Set<UUID> = []
     private var groupGhosts: [Clip] = []
     private var groupDelta: MediaTime?
     /// Pressed on one of several selected clips: if it is let go without moving, just that one is selected.
@@ -163,11 +192,16 @@ struct TimelineSurface: NSViewRepresentable {
     private var original: Clip?
     private var candidate: Clip?
     private var candidateValid = true
+    /// Where a trim dragged past a limit stopped, that way (-1 earlier, 1 later) and how many
+    /// frames from the edge: further that way it stays there without searching again.
+    private var trimStop: (way: Int64, frames: Int64, clip: Clip)?
     private struct TransitionResize {
         let base: Project
         let original: FrameCore.Transition
         let leading: Bool
         let edge: MediaTime
+        /// What the edge is dragged against: the cut, or a fade's anchored end.
+        let fixed: MediaTime
         var candidate: FrameCore.Transition
     }
     private var transitionResize: TransitionResize?
@@ -206,7 +240,8 @@ struct TimelineSurface: NSViewRepresentable {
     override init(frame:NSRect) {
         super.init(frame:frame)
         registerForDraggedTypes([TransitionDrag.pasteboardType,.string,.fileURL]); setAccessibilityElement(true)
-        setAccessibilityRole(.group); setAccessibilityLabel("Multitrack timeline. V2 above V1. A1 and A2 linked audio.")
+        setAccessibilityRole(.group)
+        setAccessibilityLabel(String(localized:"Multitrack timeline. Video tracks above audio tracks, up to \(Project.trackCounts.upperBound) of each. Linked audio is on the audio track numbered like its video."))
     }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func viewDidMoveToWindow() {
@@ -264,7 +299,19 @@ struct TimelineSurface: NSViewRepresentable {
     private func clearGroupGesture() {
         if marquee != nil, let store, store.dragSelectArmed { store.dragSelectArmed = false }
         guard group != nil || marquee != nil || clickedInGroup != nil else { return }
-        group = nil; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil; needsDisplay = true
+        group = nil; groupMoving = []; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil; needsDisplay = true
+    }
+    /// Drops a move, trim or marquee whose timeline changed under it, quietly: the change (an
+    /// undo, say) is what the user asked for, and the drag no longer describes the timeline.
+    private func dropGesture() {
+        mode = nil; original = nil; candidate = nil; candidateValid = true; moved = false; gestureBase = nil
+        clearGroupGesture(); needsDisplay = true; window?.invalidateCursorRects(for:self)
+    }
+    /// Esc: lets go of a move, trim, marquee, scrub or transition resize in progress, applying nothing.
+    private func cancelDrag() {
+        resetScrubbing(); transitionResize = nil
+        mode = nil; candidate = nil; original = nil; moved = false
+        clearGroupGesture(); needsDisplay = true; window?.invalidateCursorRects(for:self)
     }
     override func mouseMoved(with event: NSEvent) {
         // A menu or window change can swallow mouseUp. A subsequent button-free
@@ -333,7 +380,7 @@ struct TimelineSurface: NSViewRepresentable {
     private func rect(_ transition: FrameCore.Transition) -> NSRect? {
         guard let store, let window = store.project.window(of:transition),
               let clip = (transition.from ?? transition.to).flatMap(store.project.clip),
-              let index = lanes.firstIndex(of:clip.lane) else { return nil }
+              let index = row(clip.lane) else { return nil }
         let height = rowHeight-10
         return NSRect(x:window.start.seconds*pixelsPerSecond,y:rowTop(index)+5+height*0.4,width:max(8,window.duration.seconds*pixelsPerSecond),height:height*0.6)
     }
@@ -345,6 +392,19 @@ struct TimelineSurface: NSViewRepresentable {
         let reach = min(7,box.width/2)
         return NSRect(x:leading ? box.minX-3 : box.maxX-reach,y:box.minY,width:reach+3,height:box.height)
     }
+    /// The transitions on these clips. Placing a transition searches the clips for its own, so a
+    /// pass over many keeps to those on clips near what it draws or hits.
+    private func transitions(on clips: Set<UUID>) -> [FrameCore.Transition] {
+        store?.project.transitions.filter { $0.from.map(clips.contains) == true || $0.to.map(clips.contains) == true } ?? []
+    }
+    /// Where a clip lies whose transitions can show in `area`: a short transition's strip is
+    /// widened to 8 pt, past its clip.
+    private func transitionReach(_ area: NSRect) -> NSRect { area.insetBy(dx:-8,dy:-1) }
+    private func transitions(near area: NSRect) -> [FrameCore.Transition] {
+        guard let store else { return [] }
+        let reach = transitionReach(area)
+        return transitions(on:Set(store.project.clips.lazy.filter { self.rect($0).intersects(reach) }.map(\.id)))
+    }
     override func resetCursorRects() {
         super.resetCursorRects()
         guard let store, !store.isExporting else { return }
@@ -353,7 +413,7 @@ struct TimelineSurface: NSViewRepresentable {
             addCursorRect(tracks,cursor:.crosshair); return
         }
         let visible = NSRect(x:visibleRect.minX,y:rulerTop+ruler,width:visibleRect.width,height:max(0,visibleRect.height-ruler))
-        for transition in store.project.transitions {
+        for transition in transitions(near:visible) {
             for leading in [true,false] {
                 if let handle = resizeHandle(transition,leading:leading) {
                     let area = handle.intersection(visible)
@@ -368,7 +428,7 @@ struct TimelineSurface: NSViewRepresentable {
     private func transitionTarget(_ kind: TransitionKind, at point: NSPoint) -> TransitionDrop? {
         guard let store, !store.isExporting, let lane = lane(at:point), lane.isVideo else { return nil }
         let from: UUID?, to: UUID?, edgeTime: MediaTime
-        if let existing = store.project.transitions.first(where: { rect($0)?.contains(point) == true }) {
+        if let existing = transitions(near:NSRect(origin:point,size:.zero)).first(where: { rect($0)?.contains(point) == true }) {
             from = existing.from; to = existing.to
             guard let time = from.flatMap(store.project.clip)?.end ?? to.flatMap(store.project.clip)?.start else { return nil }
             edgeTime = time
@@ -389,7 +449,7 @@ struct TimelineSurface: NSViewRepresentable {
     }
     private func rect(_ clip:Clip) -> NSRect {
         let x = clip.start.seconds*pixelsPerSecond, width = max(2,clip.duration.seconds*pixelsPerSecond)
-        guard let index = lanes.firstIndex(of:clip.lane) else {
+        guard let index = row(clip.lane) else {
             // A track a move is about to add (linked audio following its video to A3): drawn in the
             // "+" band where that track will appear, never over an existing row.
             return NSRect(x:x,y:(clip.lane.isVideo ? ruler : rowTop(lanes.count))+3,width:width,height:band-6)
@@ -426,21 +486,23 @@ struct TimelineSurface: NSViewRepresentable {
             let x = second*pixelsPerSecond
             NSColor(white:0.22,alpha:1).setStroke(); let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:ruler)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 0.5; line.stroke()
         }
-        let linked = Set(store.selectedClipIDs.flatMap { store.project.group(for:$0).map(\.id) })
+        let linked = store.project.groupIDs(for:store.selectedClipIDs), reach = transitionReach(visible)
+        var near = Set<UUID>()
         for clip in store.project.clips {
             let box = rect(clip)
+            if box.intersects(reach) { near.insert(clip.id) }
             guard box.intersects(visible) else { continue }
             drawClip(clip,box:box,selected:linked.contains(clip.id),ghost:false,in:visible)
         }
-        let resizing = transitionResize.flatMap { $0.base == store.project ? $0 : nil }
-        for transition in store.project.transitions {
+        let resizing = transitionResize.flatMap { Self.sameTimeline(store.project,$0.base) ? $0 : nil }
+        for transition in transitions(on:near) {
             let displayed = resizing.flatMap { $0.original.id == transition.id ? $0.candidate : nil } ?? transition
             guard let box = rect(displayed), box.intersects(visible) else { continue }
             drawTransition(displayed,box:box,selected:store.selectedTransitionID == transition.id)
         }
         if let resizing, moved, let box = rect(resizing.candidate) {
             let duration = resizing.candidate.duration
-            let text = String(format:"%.2f s",duration.seconds)+" · \(duration.ticks/store.project.frameRate.frame.ticks)f"
+            let text = String(format:String(localized:"%.2f s · %lldf"),duration.seconds,duration.ticks/store.project.frameRate.frame.ticks)
             let attributes: [NSAttributedString.Key:Any] = [.font:NSFont.monospacedDigitSystemFont(ofSize:10,weight:.semibold),.foregroundColor:NSColor.black]
             let size = (text as NSString).size(withAttributes:attributes)
             let x = resizing.leading ? box.minX : box.maxX
@@ -458,7 +520,8 @@ struct TimelineSurface: NSViewRepresentable {
             Theme.accentNS.withAlphaComponent(0.3).setFill(); highlight.fill()
             Theme.accentNS.setStroke(); highlight.lineWidth = 2; highlight.stroke()
             Theme.accentNS.setFill(); NSRect(x:x-1.5,y:rowTop(index)+2,width:3,height:rowHeight-4).fill()
-            let text = transition.isCut ? transition.kind.name : transition.to != nil ? "\(transition.kind.name) · in" : "\(transition.kind.name) · out"
+            let name = transition.kind.displayName
+            let text = transition.isCut ? name : transition.to != nil ? String(localized:"\(name) · in") : String(localized:"\(name) · out")
             let attributes: [NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:10,weight:.semibold),.foregroundColor:NSColor.black]
             let size = (text as NSString).size(withAttributes:attributes)
             let left = max(visibleRect.minX+3,min(x-size.width/2-7,visibleRect.maxX-size.width-17))
@@ -473,12 +536,13 @@ struct TimelineSurface: NSViewRepresentable {
                 var linked = audio; linked.start = candidate.start; linked.duration = candidate.duration; linked.lane = candidate.lane.paired
                 drawClip(linked,box:rect(linked),selected:true,ghost:true,in:visible)
             }
-            label(candidateValid ? store.project.frameRate.timecode(candidate.start) : "Track occupied / source limit",at:NSPoint(x:max(visible.minX+5,rect(candidate).minX),y:rect(candidate).maxY-16),size:10,color:candidateValid ? .white : .systemRed)
+            // Only a move is refused (a trim stops at its limit): the place is taken.
+            label(candidateValid ? store.project.frameRate.timecode(candidate.start) : String(localized:"Track occupied"),at:NSPoint(x:max(visible.minX+5,rect(candidate).minX),y:rect(candidate).maxY-16),size:10,color:candidateValid ? .white : .systemRed)
         }
         if group != nil, moved, !groupGhosts.isEmpty {
             for ghost in groupGhosts { drawClip(ghost,box:rect(ghost),selected:true,ghost:true,in:visible) }
             if let first = groupGhosts.min(by: { $0.start < $1.start }) {
-                label(candidateValid ? store.project.frameRate.timecode(first.start) : "Track occupied",at:NSPoint(x:max(visible.minX+5,rect(first).minX),y:rect(first).maxY-16),size:10,color:candidateValid ? .white : .systemRed)
+                label(candidateValid ? store.project.frameRate.timecode(first.start) : String(localized:"Track occupied"),at:NSPoint(x:max(visible.minX+5,rect(first).minX),y:rect(first).maxY-16),size:10,color:candidateValid ? .white : .systemRed)
             }
         }
         if let marquee {
@@ -494,14 +558,19 @@ struct TimelineSurface: NSViewRepresentable {
                 let path = NSBezierPath(roundedRect:box.insetBy(dx:1,dy:1),xRadius:4,yRadius:4)
                 NSColor.white.withAlphaComponent(0.14).setFill(); path.fill()
                 NSColor.white.setStroke(); path.lineWidth = 2; path.stroke()
-                if box.width > 132 { label(String(localized:"\(ShortcutSettings.shared.label(.closeGap)) close gap · \(store.project.frameRate.timecode(gap.duration))"),at:NSPoint(x:box.minX+8,y:box.midY-6),size:9,color:.white) }
+                if box.width > 132 { label(String(localized:"\(store.shortcuts.label(.closeGap)) close gap · \(store.project.frameRate.timecode(gap.duration))"),at:NSPoint(x:box.minX+8,y:box.midY-6),size:9,color:.white) }
             }
         }
         if let (id,lane,time) = dropped, let media = store.project.media.first(where:{$0.id == id}) {
             let clip = Clip(mediaID:id,name:media.name,kind:media.kind,lane:lane,start:time,duration:media.duration)
             Theme.accentNS.withAlphaComponent(0.3).setFill(); NSBezierPath(roundedRect:rect(clip),xRadius:4,yRadius:4).fill()
         }
-        if store.project.clips.isEmpty { label("Drag media onto a video (V) or audio (A) track",at:NSPoint(x:visible.minX+24,y:rowTop(0)+57),size:13,color:NSColor(white:0.45,alpha:1)) }
+        if store.project.clips.isEmpty {
+            // In the middle of the first row below the ruler, clear of the lines between rows. Placed
+            // by the visible area, not the part repainted, so a playhead strip redraws its own piece.
+            let row = lanes.indices.first { rowTop($0) >= rulerTop+ruler } ?? 0
+            label(String(localized:"Drag media onto a video (V) or audio (A) track"),at:NSPoint(x:visibleRect.minX+24,y:rowTop(row)+rowHeight/2-8),size:13,color:NSColor(white:0.45,alpha:1))
+        }
         // The ruler is pinned to the top of the view; tracks scroll underneath it.
         let top = rulerTop
         NSColor(red:0.055,green:0.065,blue:0.085,alpha:1).setFill(); NSRect(x:visible.minX,y:top,width:visible.width,height:ruler).fill()
@@ -516,14 +585,16 @@ struct TimelineSurface: NSViewRepresentable {
             let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:top)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 1.5; line.stroke()
             let head = NSBezierPath(); head.move(to:NSPoint(x:x-5,y:top)); head.line(to:NSPoint(x:x+5,y:top)); head.line(to:NSPoint(x:x+5,y:top+8)); head.line(to:NSPoint(x:x,y:top+13)); head.line(to:NSPoint(x:x-5,y:top+8)); head.close(); head.fill()
             if scrubEnd == store.playhead && !store.isPlaying {
-                // Keep the ordinary playhead visible; a brighter, wider strip and a ruler
-                // label explain the magnetic jump even on hardware without haptics.
+                // Keep the ordinary playhead visible; a brighter, wider strip and a label just under
+                // the ruler (clear of its times) explain the magnetic jump even without haptics.
                 Theme.accentNS.withAlphaComponent(0.22).setFill()
                 NSRect(x:x-4,y:top+ruler,width:8,height:bounds.height-top-ruler).fill()
-                let left = max(visible.minX+2,min(x-22,visible.maxX-46))
-                let badge = NSRect(x:left,y:top+13,width:44,height:14)
+                let text = String(localized:"CLIP END")
+                let width = ceil((text as NSString).size(withAttributes:[.font:NSFont.monospacedDigitSystemFont(ofSize:8,weight:.medium)]).width)+6
+                let left = max(visibleRect.minX+2,min(x-width/2,visibleRect.maxX-width-2))
+                let badge = NSRect(x:left,y:top+ruler+3,width:width,height:14)
                 Theme.accentNS.setFill(); NSBezierPath(roundedRect:badge,xRadius:3,yRadius:3).fill()
-                label("CLIP END",at:NSPoint(x:left+3,y:top+15),size:8,color:.black)
+                label(text,at:NSPoint(x:left+3,y:badge.minY+2),size:8,color:.black)
             }
         }
     }
@@ -548,11 +619,12 @@ struct TimelineSurface: NSViewRepresentable {
             if transition.isCut || transition.from == nil { NSRect(x:box.maxX-4,y:box.midY-7,width:2,height:14).fill() }
         }
         if box.width > 76 {
+            let name = transition.kind.displayName as NSString
             let attributes: [NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:9,weight:.semibold),.foregroundColor:NSColor.white]
-            let size = (transition.kind.name as NSString).size(withAttributes:attributes)
+            let size = name.size(withAttributes:attributes)
             let label = NSRect(x:box.midX-size.width/2-4,y:box.midY-size.height/2-1,width:size.width+8,height:size.height+2)
             NSColor.black.withAlphaComponent(0.55).setFill(); NSBezierPath(roundedRect:label,xRadius:3,yRadius:3).fill()
-            (transition.kind.name as NSString).draw(at:NSPoint(x:label.minX+4,y:label.minY+1),withAttributes:attributes)
+            name.draw(at:NSPoint(x:label.minX+4,y:label.minY+1),withAttributes:attributes)
         }
     }
     /// A retimed clip's speed, top right: gauge and factor on a dark pill, like the toolbar's
@@ -635,10 +707,12 @@ struct TimelineSurface: NSViewRepresentable {
     override func mouseDown(with event:NSEvent) {
         guard let store else { return }
         resetScrubbing()
-        mode = nil; original = nil; candidate = nil; transitionResize = nil
-        group = nil; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil; snapFeedback = SnapFeedback()
+        mode = nil; original = nil; candidate = nil; transitionResize = nil; trimStop = nil
+        group = nil; groupMoving = []; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil; snapFeedback = SnapFeedback()
         window?.makeFirstResponder(self); origin = convert(event.locationInWindow,from:nil); moved = false
         if origin.y < rulerTop+ruler { mode = .scrub; store.pause(); scrub(at:origin,with:event); return }
+        // A title typed a moment ago lands first, so the gesture starts from the project as it stays.
+        store.commitPendingEdits(); gestureBase = store.project
         let shift = event.modifierFlags.intersection([.shift,.command,.option,.control]) == [.shift]
         // Rectangle select from the toolbar: this press starts a rectangle wherever it lands on the
         // tracks, clips included. It replaces the selection (with Shift, adds to it).
@@ -656,8 +730,8 @@ struct TimelineSurface: NSViewRepresentable {
             if let leading, !store.isExporting {
                 store.commitPendingEdits(); store.endInteraction(); store.pause()
                 if let window = store.project.window(of:transition) {
-                    transitionResize = TransitionResize(base:store.project,original:transition,leading:leading,
-                                                        edge:leading ? window.start : window.end,candidate:transition)
+                    transitionResize = TransitionResize(base:store.project,original:transition,leading:leading,edge:leading ? window.start : window.end,
+                                                        fixed:transition.isCut ? window.start+window.before : leading ? window.end : window.start,candidate:transition)
                     NSCursor.resizeLeftRight.set()
                 }
             }
@@ -676,7 +750,7 @@ struct TimelineSurface: NSViewRepresentable {
             let selection = store.selectionForEditing
             if selection.count > 1, selection.contains(where:grabbed.contains), edge == .move {
                 // Dragging one of several selected clips moves them all together.
-                group = selection; clickedInGroup = clip.id; original = clip; candidateValid = true; mode = .move
+                group = selection; groupMoving = store.project.groupIDs(for:selection); clickedInGroup = clip.id; original = clip; candidateValid = true; mode = .move
             } else {
                 store.selectedClipID = clip.id; store.selectedGap = nil
                 original = clip; candidate = clip; candidateValid = true
@@ -701,7 +775,7 @@ struct TimelineSurface: NSViewRepresentable {
     override func mouseDragged(with event:NSEvent) {
         guard let store else { return }
         if var resize = transitionResize {
-            guard store.project == resize.base, !store.isExporting else {
+            guard Self.sameTimeline(store.project,resize.base), !store.isExporting else {
                 transitionResize = nil; moved = false; needsDisplay = true; return
             }
             autoscrollHorizontally(with:event)
@@ -712,17 +786,22 @@ struct TimelineSurface: NSViewRepresentable {
             var target: MediaTime?
             if store.snapping && !event.modifierFlags.contains(.shift) {
                 target = Editing.snapTarget(position,excludingTransition:resize.original.id,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:resize.base)
+                // Its own cut or anchored end is no target: caught there it would shrink to one frame.
+                if target == resize.fixed { target = nil }
                 position = store.project.frameRate.quantize(target ?? position)
             }
             var preview = resize.base
             if (try? Editing.resizeTransition(resize.original.id,leading:resize.leading,to:position,in:&preview)) != nil,
                let updated = preview.transitions.first(where: { $0.id == resize.original.id }) {
                 resize.candidate = updated; transitionResize = resize
-                feelSnap(target,event)
+                // A tick only where the edge lands: a transition stops at its longest, or at room left.
+                let edge = preview.window(of:updated).map { resize.leading ? $0.start : $0.end }
+                feelSnap(edge == position ? target : nil,event)
             } else { feelSnap(nil,event) }
             NSCursor.resizeLeftRight.set(); needsDisplay = true; return
         }
         guard let mode else { return }
+        if mode != .scrub, !Self.sameTimeline(store.project,gestureBase) { dropGesture(); return }
         if mode == .marquee {
             autoscroll(with:event)
             let point = convert(event.locationInWindow,from:nil)
@@ -740,23 +819,24 @@ struct TimelineSurface: NSViewRepresentable {
             moved = true
             var position = original.start+MediaTime(seconds:(point.x-origin.x)/pixelsPerSecond)
             // The grabbed clip snaps to everything but the clips moving with it.
-            var others = store.project; Editing.delete(group,from:&others)
+            var others = store.project; others.clips.removeAll { groupMoving.contains($0.id) }
             var target: MediaTime?
             if store.snapping && !event.modifierFlags.contains(.shift) {
                 target = Editing.snapTarget(position,duration:original.duration,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:others)
             }
             position = store.project.frameRate.quantize(target ?? position)
             let delta = position-original.start
-            let moving = Set(group.flatMap { store.project.group(for:$0).map(\.id) })
             var copy = store.project
             do {
                 try Editing.move(group,by:delta,in:&copy)
-                groupGhosts = copy.clips.filter { moving.contains($0.id) }; candidateValid = true
-                groupDelta = (copy.clips.first { $0.id == original.id }?.start ?? position)-original.start
-                feelSnap(target,event)
+                groupGhosts = copy.clips.filter { groupMoving.contains($0.id) }; candidateValid = true
+                let landed = copy.clips.first { $0.id == original.id }?.start ?? position
+                groupDelta = landed-original.start
+                // The earliest clip stops the group at the timeline's start: no tick for a place not reached.
+                feelSnap(landed == position ? target : nil,event)
             } catch {
                 candidateValid = false; groupDelta = nil; feelSnap(nil,event)
-                groupGhosts = store.project.clips.filter { moving.contains($0.id) }.map { var ghost = $0; ghost.start = max(.zero,ghost.start+delta); return ghost }
+                groupGhosts = store.project.clips.filter { groupMoving.contains($0.id) }.map { var ghost = $0; ghost.start = max(.zero,ghost.start+delta); return ghost }
             }
             needsDisplay = true; return
         }
@@ -773,22 +853,50 @@ struct TimelineSurface: NSViewRepresentable {
             target = Editing.snapTarget(position,duration:mode == .move ? original.duration : .zero,excluding:original.id,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:store.project)
         }
         position = store.project.frameRate.quantize(target ?? position)
+        guard mode == .move else {
+            // A trim past what the clip allows (its source, the next clip, one frame) stops there.
+            let trimmed = trim(original,leading:mode == .start,toward:position)
+            candidate = trimmed; candidateValid = true
+            // Caught by a snap the edge reaches: a tick under the finger.
+            feelSnap((mode == .start ? trimmed.start : trimmed.end) == position ? target : nil,event)
+            needsDisplay = true; return
+        }
+        // Over a row of the other kind (or none) the clip keeps the track it is on; time still follows.
+        let lane = lane(at:point).flatMap { $0.isVideo == original.lane.isVideo ? $0 : nil } ?? candidate?.lane ?? original.lane
         var copy = store.project
         do {
-            if mode == .move { try Editing.move(original.id,to:position,lane:lane(at:point) ?? original.lane,in:&copy) }
-            else { try Editing.trim(original.id,leading:mode == .start,to:position,in:&copy) }
+            try Editing.move(original.id,to:position,lane:lane,in:&copy)
             candidate = copy.clips.first(where:{$0.id == original.id}); candidateValid = true
             // Caught by a snap where the clip can go: a tick under the finger.
             feelSnap(target,event)
         } catch {
             candidateValid = false; feelSnap(nil,event)
-            var ghost = original
-            if mode == .move { ghost.start = max(.zero,position); if let lane = lane(at:point), lane.isVideo == original.lane.isVideo { ghost.lane = lane } }
-            else if mode == .end { ghost.duration = max(store.project.frameRate.frame,position-original.start) }
-            else { ghost.start = max(.zero,min(position,original.end-store.project.frameRate.frame)); ghost.duration = original.end-ghost.start }
+            var ghost = original; ghost.start = max(.zero,position); ghost.lane = lane
             candidate = ghost
         }
         needsDisplay = true
+    }
+    /// The clip trimmed toward `time`, as far as it goes: past a limit (its source's first or last
+    /// frame, the next clip, one frame of length) the edge stops at the last frame that fits.
+    private func trim(_ clip: Clip, leading: Bool, toward time: MediaTime) -> Clip {
+        guard let store else { return clip }
+        let project = store.project, frame = project.frameRate.frame.ticks
+        let edge = leading ? clip.start : clip.end, frames = (time-edge).ticks/frame, way = frames.signum()
+        func trimmed(_ count: Int64) -> Clip? {
+            var copy = project
+            guard (try? Editing.trim(clip.id,leading:leading,to:edge+MediaTime(ticks:count*frame),in:&copy)) != nil else { return nil }
+            return copy.clips.first { $0.id == clip.id }
+        }
+        if let stop = trimStop, stop.way == way, abs(frames) > abs(stop.frames) { return stop.clip }
+        if let result = trimmed(frames) { return result }
+        // The frames that fit come first from the edge, so halve the way to the first that does not.
+        var fits: Int64 = 0, fails = frames, stop = clip
+        while abs(fails-fits) > 1 {
+            let middle = fits+(fails-fits)/2
+            if let result = trimmed(middle) { fits = middle; stop = result } else { fails = middle }
+        }
+        trimStop = (way,fits,stop)
+        return stop
     }
     private func autoscrollHorizontally(with event:NSEvent) {
         let point = convert(event.locationInWindow,from:nil), visible = visibleRect
@@ -800,21 +908,29 @@ struct TimelineSurface: NSViewRepresentable {
     }
     override func mouseUp(with event:NSEvent) {
         if mode == .scrub { scrub(at:convert(event.locationInWindow,from:nil),with:event) }
-        if let resize = transitionResize, let store, moved, store.project == resize.base {
+        if let resize = transitionResize, let store, moved, Self.sameTimeline(store.project,resize.base) {
             store.setTransitionDuration(resize.original.id,to:resize.candidate.duration)
         }
-        if let store, let group {
-            if moved, candidateValid, let delta = groupDelta, delta != .zero { store.moveClips(group,by:delta) }
-            else if !moved, let id = clickedInGroup { store.selectedClipID = id }      // a click picks just that one
-        } else if let store, let original, let candidate, moved, candidateValid {
-            if mode == .move { store.move(original.id,to:candidate.start,lane:candidate.lane) }
-            else if mode == .start { store.trim(original.id,leading:true,to:candidate.start) }
-            else if mode == .end { store.trim(original.id,leading:false,to:candidate.end) }
+        // A timeline changed under the gesture (an undo mid-drag) leaves it nothing to apply.
+        if let store, mode != .scrub, Self.sameTimeline(store.project,gestureBase) {
+            if let group {
+                if moved, candidateValid, let delta = groupDelta, delta != .zero { store.moveClips(group,by:delta) }
+                else if !moved, let id = clickedInGroup { store.selectedClipID = id }      // a click picks just that one
+            } else if let original, let candidate, moved, candidateValid {
+                if mode == .move { store.move(original.id,to:candidate.start,lane:candidate.lane) }
+                else if mode == .start { store.trim(original.id,leading:true,to:candidate.start) }
+                else if mode == .end { store.trim(original.id,leading:false,to:candidate.end) }
+            } else if mode == .marquee, marquee?.size == .zero, store.dragSelectArmed,
+                      let clip = store.project.clips.last(where:{rect($0).contains(origin)}) {
+                // Rectangle select pressed without a drag: the clip under the pointer, as a click picks
+                // it (with Shift, added). On empty track space the selection stays cleared.
+                store.selectClips(marqueeBase.union([clip.id]))
+            }
         }
         // The toolbar's rectangle select is for one drag.
         if mode == .marquee, let store, store.dragSelectArmed { store.dragSelectArmed = false }
-        mode = nil; original = nil; candidate = nil; transitionResize = nil; moved = false; needsDisplay = true
-        group = nil; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil
+        mode = nil; original = nil; candidate = nil; transitionResize = nil; moved = false; gestureBase = nil; needsDisplay = true
+        group = nil; groupMoving = []; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil
         resetScrubbing()
         window?.invalidateCursorRects(for:self)
     }
@@ -825,6 +941,8 @@ struct TimelineSurface: NSViewRepresentable {
     @objc func paste(_ sender: Any?) { store?.pasteClips() }
     @objc override func selectAll(_ sender: Any?) { store?.selectAllClips(); needsDisplay = true }
     func validateUserInterfaceItem(_ item:any NSValidatedUserInterfaceItem) -> Bool {
+        // Help mode covers the timeline: nothing is cut, pasted or selected behind it.
+        guard store?.showHelp != true else { return false }
         if item.action == #selector(copy(_:)) || item.action == #selector(cut(_:)) { return store?.canCopyClip == true && store?.isExporting == false }
         if item.action == #selector(selectAll(_:)) { return store?.project.clips.isEmpty == false }
         if item.action == #selector(paste(_:)) { return store?.canPasteClip == true }
@@ -839,7 +957,7 @@ struct TimelineSurface: NSViewRepresentable {
     }
     override func performKeyEquivalent(with event:NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command,.shift,.option,.control])
-        if window?.firstResponder === self, modifiers == [.command], let store {
+        if window?.firstResponder === self, modifiers == [.command], let store, !store.showHelp {
             if Self.isCommand(event,"c",keyCode:8), store.canCopyClip { copy(nil); return true }
             if Self.isCommand(event,"v",keyCode:9), store.canPasteClip { paste(nil); return true }
             if Self.isCommand(event,"x",keyCode:7), store.canCopyClip, !store.isExporting { cut(nil); return true }
@@ -849,34 +967,48 @@ struct TimelineSurface: NSViewRepresentable {
     }
     override func keyDown(with event:NSEvent) {
         guard let store else { return }
+        let modifiers = event.modifierFlags.intersection(Shortcut.modifierMask)
+        // Help mode dims the editor while its tips are read: no key acts behind it, and Esc closes it.
+        if store.showHelp {
+            if event.keyCode == 53 { store.showHelp = false } else { super.keyDown(with:event) }
+            return
+        }
+        // The fixed keys come before the shortcuts set in Settings, which cannot take them over.
+        // Placing the alignment point, Return or Esc ends the placing and keeps the transform, as
+        // they do in the preview. Esc still lets go of a drag here and switches rectangle select off.
+        if store.anchorEditID != nil, event.keyCode == 53 || PreviewTransformOverlay.isReturn(event) {
+            store.anchorEditID = nil
+            if event.keyCode == 53 { cancelDrag(); if store.dragSelectArmed { store.dragSelectArmed = false } }
+            return
+        }
+        switch event.keyCode {
+        // Shift-arrows move ten frames, whatever the frame keys are set to.
+        case 123 where modifiers == [.shift]: store.step(-10); return
+        case 124 where modifiers == [.shift]: store.step(10); return
+        case 53:
+            // A transition being resized is only let go; anything else also clears what goes with it.
+            let resizing = transitionResize != nil
+            cancelDrag()
+            guard !resizing else { return }
+            store.selectedGap = nil; store.previewTransformID = nil; store.selectedTransitionID = nil
+            if store.dragSelectArmed { store.dragSelectArmed = false }
+            else if store.selectedClipIDs.count > 1 { store.selectClips([]) }
+            return
+        // Return (or Enter) finishes a transform in the preview, keeping it, as it does there. With a
+        // modifier, or no transform, it goes on like any other key.
+        case 36,76:
+            if store.previewTransformID != nil, PreviewTransformOverlay.isReturn(event) { store.previewTransformID = nil; return }
+        default: break
+        }
         // A Korean input source may not produce the Latin menu equivalent, so the timeline's
         // own commands also work from here by key position; text fields keep their own keys.
-        if let command = ShortcutSettings.shared.command(matching:event), store.performFromKeyboard(command,repeating:event.isARepeat) { return }
-        if event.modifierFlags.intersection([.command,.shift,.option,.control]) == [.command] {
+        if let command = store.shortcuts.command(matching:event), store.performFromKeyboard(command,repeating:event.isARepeat) { return }
+        if modifiers == [.command] {
             if Self.isCommand(event,"c",keyCode:8) { copy(nil); return }
             if Self.isCommand(event,"v",keyCode:9) { paste(nil); return }
         }
-        let modifiers = event.modifierFlags.intersection(Shortcut.modifierMask)
-        switch event.keyCode {
-        // Shift-arrows move ten frames, whatever the frame keys are set to.
-        case 123 where modifiers == [.shift]: store.step(-10)
-        case 124 where modifiers == [.shift]: store.step(10)
-        case 117 where modifiers.isEmpty: store.deleteSelection()
-        case 53:
-            resetScrubbing()
-            if transitionResize != nil {
-                transitionResize = nil; moved = false; needsDisplay = true; window?.invalidateCursorRects(for:self); return
-            }
-            mode = nil; candidate = nil; original = nil; moved = false; store.selectedGap = nil; store.previewTransformID = nil; store.selectedTransitionID = nil
-            clearGroupGesture()
-            if store.dragSelectArmed { store.dragSelectArmed = false }
-            else if store.selectedClipIDs.count > 1 { store.selectClips([]) }
-            needsDisplay = true
-        // Return (or Enter) finishes a transform in the preview, keeping it, as it does there.
-        case 36,76 where store.previewTransformID != nil && PreviewTransformOverlay.isReturn(event):
-            store.previewTransformID = nil
-        default: super.keyDown(with:event)
-        }
+        if event.keyCode == 117, modifiers.isEmpty { store.deleteSelection(); return }
+        super.keyDown(with:event)
     }
     override func magnify(with event:NSEvent) { if let store { store.zoom = min(220,max(8,store.zoom*(1+event.magnification))) } }
     /// Validate the position used by both the ghost and the final drop. Haptics must

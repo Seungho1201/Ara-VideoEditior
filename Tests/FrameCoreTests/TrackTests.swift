@@ -91,6 +91,22 @@ final class TrackTests: XCTestCase {
         r = try r.validated()
         XCTAssertThrowsError(try Editing.addText(at:.init(seconds:1),to:&r))
     }
+    /// A title must go above the video it covers: with the top track busy within its span it is
+    /// refused even though lower tracks are free, and the alert says so.
+    func testATitleUnderABusyTopTrackNamesThatTrack() throws {
+        var (p,media) = project()
+        while p.videoTrackCount < Project.trackCounts.upperBound { try Editing.addTrack(.video,to:&p) }
+        let top = Lane(.video,Project.trackCounts.upperBound)
+        p.clips.append(Clip(mediaID:media.id,name:media.name,kind:.video,lane:top,start:.init(seconds:2.9),duration:.init(seconds:5)))
+        p = try p.validated()
+        let before = p
+        XCTAssertThrowsError(try Editing.addText(at:.zero,to:&p)) { error in
+            let message = (error as? EditError)?.message ?? ""
+            XCTAssertTrue(message.contains("\(top.rawValue), the top track, is in use"),message)
+            XCTAssertFalse(message.contains("Every video track"),message)
+        }
+        XCTAssertEqual(p,before)
+    }
     func testRemovingAnEmptyAddedTrackShiftsTheTracksAbove() throws {
         var (p,_) = project()
         try Editing.addTrack(.video,to:&p); try Editing.addTrack(.video,to:&p)                  // V3, V4

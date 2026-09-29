@@ -351,6 +351,8 @@ final class TitleEffectsRenderTests: XCTestCase {
         store.updateStyleLive(clip.id,name:"Outline",closesWhenIdle:false) { $0.outlineRed = 1 }
         store.updateStyleLive(clip.id,name:"Shadow",closesWhenIdle:false) { $0.shadowOpacity = 0.6; $0.shadowDistance = 30 }
         store.endLiveEdit()
+        for _ in 0..<1000 where store.isDrawingTitles { try await Task.sleep(for:.milliseconds(10)) }      // drawn off the main actor
+        XCTAssertFalse(store.isBuilding)
         let after = try XCTUnwrap(store.previewLayerImage(for:clip))
         XCTAssertGreaterThan(after.extent.width,before.extent.width+60)
         // The transform box still fits the letters; the picture reaches past it by the margin.
@@ -360,6 +362,33 @@ final class TitleEffectsRenderTests: XCTestCase {
         store.undo(); XCTAssertEqual(store.project.clips[0].style.shadowOpacity,0); XCTAssertEqual(store.project.clips[0].style.outlineRed,1)
         store.undo(); XCTAssertEqual(store.project,outlined)
         store.undo(); XCTAssertEqual(store.project,original,"the drag was one undo step")
+    }
+    /// A live step on a title that has to be drawn again (a new outline width takes a new distance
+    /// transform) is drawn off the main actor: the step returns at once, the preview keeps its last
+    /// picture meanwhile, and shows the new one when it is ready. Steps that come while one is
+    /// drawn are drawn after it from the newest, not one by one.
+    @MainActor func testLiveStepsDrawTheTitleOffTheMainActorNewestFirst() async throws {
+        _ = NSApplication.shared
+        let store = EditorStore()
+        var clip = Clip(name:"Title",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:3))
+        clip.style.text = "Drawn elsewhere \(UUID().uuidString.prefix(6)) 한글"; clip.style.outlineWidth = 3
+        store.edit("Fixture") { $0.clips = [clip] }
+        for _ in 0..<1000 where store.isBuilding || store.player.currentItem == nil { try await Task.sleep(for:.milliseconds(10)) }
+        let before = try XCTUnwrap(store.previewLayerImage(for:clip))
+        let widths = Array(stride(from:4.0,through:7,by:0.5))
+        for width in widths { store.updateStyleLive(clip.id,name:"Outline",closesWhenIdle:false) { $0.outlineWidth = width } }
+        store.endLiveEdit()
+        XCTAssertTrue(store.isDrawingTitles,"being drawn elsewhere")
+        XCTAssertTrue(try XCTUnwrap(store.previewLayerImage(for:clip)) === before,"the last picture meanwhile")
+        XCTAssertEqual(store.project.clips[0].style.outlineWidth,7,"the title itself changed at once")
+        for _ in 0..<1000 where store.isDrawingTitles { try await Task.sleep(for:.milliseconds(10)) }
+        XCTAssertFalse(store.isBuilding,"redrawn in place, not rebuilt")
+        let newest = try XCTUnwrap(FrameRenderer.drawnTextImage(store.project.clips[0].style))
+        XCTAssertTrue(try XCTUnwrap(store.previewLayerImage(for:clip)) === newest,"the newest picture")
+        func drawn(_ width: Double) -> Bool { var style = store.project.clips[0].style; style.outlineWidth = width; return FrameRenderer.drawnTextImage(style) != nil }
+        XCTAssertTrue(drawn(4),"the first step")
+        XCTAssertEqual(widths.dropFirst().dropLast().filter(drawn),[],"the steps in between were never drawn")
+        store.undo(); XCTAssertEqual(store.project.clips[0].style.outlineWidth,3,"one undo step")
     }
     @MainActor func testTurningATitleInThePreviewRedrawsItsShadowOnlyWhenItHasOne() async throws {
         _ = NSApplication.shared
@@ -378,6 +407,7 @@ final class TitleEffectsRenderTests: XCTestCase {
             store.endInteraction()
             XCTAssertEqual(store.project.clips.first { $0.id == clip.id }?.style.rotation,90)
             XCTAssertFalse(store.isBuilding,"turned in place, not rebuilt")
+            for _ in 0..<1000 where store.isDrawingTitles { try await Task.sleep(for:.milliseconds(10)) }  // drawn off the main actor
             let after = try XCTUnwrap(store.previewLayerImage(for:clip))
             // Its shadow is drawn for the screen, so a shadowed title gets a new picture.
             XCTAssertEqual(after === before,!clip.style.hasShadow,clip.name)

@@ -11,7 +11,7 @@ import FrameMedia
     /// The start screen is up instead of the editor. A launch that names a project or media
     /// (Finder, `--project`, `--import`) goes straight to the editor.
     @Published private(set) var showLauncher = !CommandLine.arguments.contains("--project") && !CommandLine.arguments.contains("--import")
-    let registry = ProjectRegistry()
+    let registry: ProjectRegistry
     /// A text field in the inspector has focus. Unmodified arrow-key menu equivalents beat any
     /// first responder, so the frame-step items must stand down or the caret cannot move.
     @Published var isEditingText = false
@@ -71,7 +71,15 @@ import FrameMedia
         let kept = selectionForEditing
         if kept != selectedClipIDs || (kept.count > 1) != (selectedClipID == nil) { selectClips(kept) }
     }
-    @Published var previewTransformID: UUID?
+    @Published var previewTransformID: UUID? {
+        didSet { if previewTransformID == nil || previewTransformID != anchorEditID { anchorEditID = nil } }
+    }
+    /// Placing the alignment point of this clip (the inspector's Adjust button): a click or drag
+    /// in the preview puts it there.
+    @Published var anchorEditID: UUID?
+    /// Bumped when placing an alignment point starts: the preview takes the keyboard, so Return
+    /// and Esc end the placing there, as after a click in it.
+    @Published private(set) var previewFocusRequest = 0
     @Published var selectedGap: TimelineGap?
     /// A transition picked on the timeline; exclusive with a clip or gap selection.
     @Published var selectedTransitionID: UUID?
@@ -92,7 +100,10 @@ import FrameMedia
     }
     @Published private(set) var revealPlayheadRequest = 0
     @Published var zoom: Double = 64
-    @Published var snapping = true
+    /// Kept across launches, like the other Settings switches.
+    @Published var snapping = UserDefaults.standard.object(forKey:"timeline.snapping") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(snapping,forKey:"timeline.snapping") }
+    }
     @Published var scrubHaptics = UserDefaults.standard.object(forKey:"timeline.scrubHaptics") as? Bool ?? true {
         didSet { UserDefaults.standard.set(scrubHaptics,forKey:"timeline.scrubHaptics") }
     }
@@ -116,19 +127,38 @@ import FrameMedia
     @Published var showNewProjectSheet = false
     /// Bumped when fonts are added, so font menus list them.
     @Published private(set) var fontsRevision = 0
+    /// Bumped when an undo or redo puts the project back. The inspector's title field follows it
+    /// even when SwiftUI never drew the text in between (typing committed and undone in one call).
+    @Published private(set) var textRevision = 0
     @Published private(set) var isAddingFonts = false
     /// Where added fonts are kept (tests point it elsewhere).
     var fontFolder = FontLibrary.folder
     var exportHeight: Int { project.outputResolution }
     @Published var message: String?
-    @Published var status = String(localized:"Import media to start editing")
+    @Published var status = String(localized:"Import media to start editing") { didSet { statusWrites &+= 1 } }
+    /// Counts what is written to the status, so a build does not replace a note written after it
+    /// began (why the speed slider stopped, what was deleted) with its summary.
+    private var statusWrites = 0
     @Published var thumbnails: [UUID:NSImage] = [:]
     @Published var waveforms: [UUID:[Float]] = [:]
     @Published var missing: Set<UUID> = []
+    /// Missing sources that clips on the timeline use. Only these stop the preview, snapshots and
+    /// export; an unused one is just marked Missing in the library.
+    var missingInUse: Set<UUID> { missing.intersection(project.clips.compactMap(\.mediaID)) }
     @Published private(set) var documentURL: URL?
+    /// A bookmark of the open document, so ⌘S follows it when it is renamed or moved in Finder.
+    private(set) var documentBookmark: Data?
     private var saved: Project?
     private(set) var history = EditHistory()
     private var interactionStart: Project?
+    /// A drag (in the preview, or on a slider) is open as one undo step. An undo or redo closes it,
+    /// which ends a drag still going in the preview.
+    var isInteracting: Bool { interactionStart != nil }
+    /// What the open interaction's edits are called, so one drag is one undo step named after
+    /// what it changed (a slider's speed or transition length). Nil: direct manipulation.
+    private var interactionName: String?
+    /// A speed slider drag has met the next clip and said so; once a drag is enough.
+    private var speedHeld = false
     /// An open run of render-only style edits (typing a title, dragging the colour well) that
     /// will become ONE undo step when it ends: after a short idle, on focus loss, or before any
     /// other edit, so history order stays correct.
@@ -146,6 +176,10 @@ import FrameMedia
     func commitPendingEdits() { flushPendingEdits?(); endLiveEdit() }
     private var urls: [UUID:URL] = [:]
     private var scopes: [URL:Bool] = [:]
+    /// Titles being drawn off the main actor for the preview, by clip (see drawTitle).
+    private var titleDraws: [UUID:UUID] = [:]
+    /// A title's new picture is still being drawn for the preview.
+    var isDrawingTitles: Bool { !titleDraws.isEmpty }
     private let library = MediaLibrary()
     private let builder = CompositionBuilder()
     private let exporter = MovieExporter()
@@ -153,6 +187,10 @@ import FrameMedia
     private var rebuildTask: Task<Void,Never>?
     private var importTask: Task<Void,Never>?
     private var analysisTasks: [UUID:Task<Void,Never>] = [:]
+    /// The source path each media item's thumbnail and waveform were read from (or are being
+    /// read from). A relink, or an undo of one, points the item at another file: its old
+    /// pictures are dropped and the new file is read.
+    private var analyzed: [UUID:String] = [:]
     private var exportTask: Task<Void,Never>?
     private var snapshotTask: Task<Void,Never>?
     private var snapshotID: UUID?
@@ -174,12 +212,14 @@ import FrameMedia
     /// The encode in progress, so one whose source left the project (undo, relink) can be stopped.
     private var proxyJob: (id: UUID, key: URL, task: Task<URL?,Error>)?
     /// A rebuild interrupted playback and means to resume it. Survives a newer rebuild that
-    /// supersedes the first, which would otherwise read "not playing" and leave playback stopped.
+    /// supersedes the first, which would otherwise read "not playing" and leave playback stopped;
+    /// a pause meanwhile clears it, and the build then leaves playback stopped.
     private var resumeAfterBuild = false
     private var rateObservation: NSKeyValueObservation?
     private var fontsObserver: NSObjectProtocol?
     private var proxySwapDeferred = false
     private var periodic: Any?
+    private var mountObserver: NSObjectProtocol?
     private var itemObservation: NSKeyValueObservation?
     let player = AVPlayer()
     var dirty: Bool { project != saved }
@@ -193,12 +233,28 @@ import FrameMedia
     /// Where clips are copied to: the system clipboard (tests use a private one).
     var pasteboard = NSPasteboard.general
     var canCopyClip: Bool { selectedClip != nil || hasMultipleSelection }
+    /// Delete has something to remove: a clip, several, or a transition (picked on the timeline or
+    /// just added from the panel), so the menu item and the trash button work wherever focus is.
+    var canDeleteSelection: Bool { selectedClip != nil || hasMultipleSelection || selectedTransition != nil }
+    /// The menus' editing commands (Undo, Redo, Import, the Timeline menu) stand down: the start
+    /// screen or a sheet (New Project, Export) hides the project, an export is reading it, or help
+    /// mode dims it while its tips are read.
+    var editingSuspended: Bool { showLauncher || showNewProjectSheet || showExportSheet || isExporting || showHelp }
+    /// The shortcuts that status texts name (tests give their own).
+    var shortcuts = ShortcutSettings.shared
     /// Only clips backed by a media stream can be retimed; text and stills have no source to speed up.
     var canRetimeSelection: Bool { selectedClip.map { $0.kind == .video || $0.kind == .audio } ?? false }
     var selectedSpeed: Double { selectedClip?.speed ?? 1 }
     var canPasteClip: Bool { pasteboard.availableType(from:[Self.clipPasteboardType]) != nil }
-    var canCaptureSnapshot: Bool { project.duration > .zero && missing.isEmpty && !isBuilding && !isCapturingSnapshot && !isExporting }
-    init() {
+    /// Runs a question and returns the button chosen (tests answer it without a window).
+    var runAlert: @MainActor (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
+    var canCaptureSnapshot: Bool { project.duration > .zero && missingInUse.isEmpty && !isBuilding && !isCapturingSnapshot && !isExporting }
+    /// `registry` is the start screen's list (tests give it their own defaults).
+    init(registry: ProjectRegistry = ProjectRegistry()) {
+        self.registry = registry
+        // Named in Ara's language, as the New Project sheet names one: media opened with Ara before
+        // any New Project go into it. FrameCore's own default stays English.
+        project.name = String(localized:"Untitled")
         saved = project
         player.actionAtItemEnd = .pause
         Task.detached(priority:.background) { ProxyMaker.prune() }
@@ -216,6 +272,10 @@ import FrameMedia
                 let revision = self.fontsRevision, folder = self.fontFolder
                 Task { await FontMenu.warm(revision,addedIn:folder) }
             }
+        }
+        // A drive plugged in again brings back the sources on it, with no edit or trip to another app.
+        mountObserver = NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didMountNotification,object:nil,queue:.main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshSources() }
         }
         periodic = player.addPeriodicTimeObserver(forInterval:CMTime(value:1,timescale:30),queue:.main) { [weak self] time in
             Task { @MainActor in
@@ -242,22 +302,29 @@ import FrameMedia
     }
     func report(_ error: Error) { if !(error is CancellationError) { message = error.localizedDescription; status = String(localized:"Action could not be completed") } }
     @discardableResult func edit(_ name: String, _ operation: (inout Project) throws -> Void) -> Bool {
+        // The export reads this project until it is done: no edit lands meanwhile, whatever asks.
+        guard !isExporting else { return false }
         commitPendingEdits()
         do {
             var next = project; try operation(&next); next = try next.validated()   // also settles transitions
             guard next != project else { return true }
-            if interactionStart == nil { history.record(project,name:name) }
+            if interactionStart == nil { history.record(project,name:name) } else if interactionName == nil { interactionName = name }
             // Any timeline change can move the edges a gap selection was measured from.
             project = next; selectedGap = nil; rebuild(); return true
         } catch { report(error); return false }
     }
-    func beginInteraction() { commitPendingEdits(); if interactionStart == nil { interactionStart = project } }
+    func beginInteraction() { commitPendingEdits(); if interactionStart == nil { interactionStart = project; interactionName = nil; speedHeld = false } }
+    /// One drag, one undo step: named after its edits ("Change speed", "Transition length"), or
+    /// "Adjust clip" for direct manipulation in the preview.
     func endInteraction() {
-        if let before = interactionStart, before != project { history.record(before,name:"Adjust clip") }
-        interactionStart = nil; objectWillChange.send()
+        if let before = interactionStart, before != project { history.record(before,name:interactionName ?? "Adjust clip") }
+        interactionStart = nil; interactionName = nil; objectWillChange.send()
         applyDeferredProxySwap()
     }
     func updateStyle(_ update: (inout ClipStyle) -> Void) {
+        // A title typed a moment ago lands first, so the style below starts from it (Reset
+        // appearance keeps the text just typed).
+        commitPendingEdits()
         guard let clip = selectedClip else { return }
         var style = clip.style; update(&style)
         edit("Adjust clip") { project in
@@ -279,7 +346,7 @@ import FrameMedia
     /// main thread and, by re-rendering the text view mid-composition, dropped Hangul input.
     /// Audio (volume, mute) and timing are never routed here; they change the composition itself.
     func updateStyleLive(_ id: UUID, name: String, closesWhenIdle: Bool = true, _ update: (inout ClipStyle) -> Void) {
-        guard let index = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        guard !isExporting, let index = project.clips.firstIndex(where: { $0.id == id }) else { return }
         var clip = project.clips[index]
         update(&clip.style)
         guard clip != project.clips[index] else { return }
@@ -306,25 +373,63 @@ import FrameMedia
         liveEditStart = nil
         if before != project { history.record(before,name:liveEditName); objectWillChange.send() }
     }
-    /// Re-renders one layer of the current preview in place. False when there is no settled
-    /// player item to patch (nothing loaded yet, or a rebuild is in flight whose snapshot is
-    /// already stale) — the caller then rebuilds from the current project instead.
-    private func refreshPreviewLayer(_ clip: Clip) -> Bool {
+    /// Re-renders one layer of the current preview in place, a title with `image` or with its
+    /// picture as `titleImage` finds it. False when there is no settled player item to patch
+    /// (nothing loaded yet, or a rebuild is in flight whose snapshot is already stale) — the
+    /// caller then rebuilds from the current project instead.
+    @discardableResult private func refreshPreviewLayer(_ clip: Clip, image drawn: CIImage? = nil) -> Bool {
         guard !isBuilding, let item = player.currentItem,
               let composition = item.videoComposition?.mutableCopy() as? AVMutableVideoComposition,
               let instruction = composition.instructions.first as? FrameInstruction,
               instruction.layers.contains(where: { $0.clip.id == clip.id }) else { return false }
-        var image: CIImage?
-        if clip.kind == .text { guard let text = try? FrameRenderer.textImage(clip.style) else { return false }; image = text }
+        let image = drawn ?? (clip.kind == .text ? titleImage(clip) : nil)
         composition.instructions = [instruction.replacingLayer(for:clip,image:image)]
         // A fresh composition re-renders a paused frame without replacing the player item (QA1966).
         item.videoComposition = composition
         return true
     }
+    /// A title's picture for the preview when it has been drawn. Otherwise nil: it is drawn off the
+    /// main actor (a big title with an outline or shadow takes tens of milliseconds, too long to hold
+    /// up a slider or the pointer) and put in when ready; the preview keeps its last picture meanwhile.
+    private func titleImage(_ clip: Clip) -> CIImage? {
+        if let drawn = FrameRenderer.drawnTextImage(clip.style) { return drawn }
+        drawTitle(clip.id); return nil
+    }
+    /// Draws a title's picture off the main actor, one at a time for each title: the steps that
+    /// come meanwhile are drawn after it, from the newest, and those in between are skipped.
+    private func drawTitle(_ id: UUID) {
+        guard titleDraws[id] == nil, let style = project.clips.first(where: { $0.id == id })?.style else { return }
+        let token = UUID(); titleDraws[id] = token
+        Task { [weak self] in
+            let image = await Task.detached(priority:.userInitiated) { try? FrameRenderer.textImage(style) }.value
+            // A build since, or another document, has its own pictures.
+            guard let self, titleDraws[id] == token else { return }
+            titleDraws[id] = nil
+            guard let clip = project.clips.first(where: { $0.id == id }), clip.kind == .text else { return }
+            if let newest = FrameRenderer.drawnTextImage(clip.style) { refreshPreviewLayer(clip,image:newest); return }
+            // A newer step came meanwhile: this picture is nearer to it than the one shown.
+            if let image { refreshPreviewLayer(clip,image:image) }
+            if image != nil || clip.style != style { drawTitle(id) }
+        }
+    }
+    /// Starts (or ends) placing a clip's alignment point in the preview. The playhead goes into
+    /// the clip first if it is elsewhere, so the clip is there to click on.
+    func editAnchor(_ clip: Clip) {
+        if anchorEditID == clip.id { anchorEditID = nil; return }
+        pause(); commitPendingEdits()
+        if playhead < clip.start || playhead >= clip.end { seek(clip.start) }
+        selectedClipID = clip.id; selectedGap = nil; previewTransformID = clip.id; anchorEditID = clip.id; previewFocusRequest += 1
+        status = String(localized:"Click or drag in the preview to place the alignment point · Return to finish")
+    }
+    /// The alignment point back in the middle of the clip.
+    func resetAnchor(_ clip: Clip) {
+        updateStyleLive(clip.id,name:"Alignment point",closesWhenIdle:false) { $0.anchorX = 0; $0.anchorY = 0 }
+        endLiveEdit()
+    }
     /// Direct manipulation changes only placement (position, scale, rotation); it does not
     /// rebuild tracks or audio.
     func updatePreviewTransform(_ id: UUID, style: ClipStyle) {
-        guard previewTransformID == id, !isBuilding,
+        guard previewTransformID == id, !isBuilding, !isExporting,
               let index = project.clips.firstIndex(where: { $0.id == id }),
               let item = player.currentItem,
               let composition = item.videoComposition?.mutableCopy() as? AVMutableVideoComposition,
@@ -332,14 +437,15 @@ import FrameMedia
               instruction.layers.contains(where: { $0.clip.id == id }) else { return }
         var clip = project.clips[index]
         clip.style.x = style.x; clip.style.y = style.y; clip.style.scale = style.scale; clip.style.rotation = style.rotation
+        clip.style.anchorX = style.anchorX; clip.style.anchorY = style.anchorY
         guard clip != project.clips[index] else { return }
         var candidate = project; candidate.clips[index] = clip
         guard (try? candidate.validated()) != nil else { return }
         let turned = clip.style.rotation != project.clips[index].style.rotation
         project = candidate
         // A title's shadow keeps its screen direction, so turning a shadowed title redraws it.
-        if turned, clip.kind == .text, clip.style.hasShadow, let image = try? FrameRenderer.textImage(clip.style) {
-            composition.instructions = [instruction.replacingLayer(for:clip,image:image)]
+        if turned, clip.kind == .text, clip.style.hasShadow {
+            composition.instructions = [instruction.replacingLayer(for:clip,image:titleImage(clip))]
         } else {
             composition.instructions = [instruction.replacingTransform(of:clip)]
         }
@@ -371,14 +477,50 @@ import FrameMedia
         guard let media = project.media(for:clip), media.width > 0, media.height > 0 else { return nil }
         return CGSize(width:media.width,height:media.height)
     }
-    func undo() { commitPendingEdits(); endInteraction(); selectedGap = nil; if let previous = history.undo(project) { project = previous; pruneSelection(); restoreAccess(); rebuild() } }
-    func redo() { commitPendingEdits(); endInteraction(); selectedGap = nil; if let next = history.redo(project) { project = next; pruneSelection(); restoreAccess(); rebuild() } }
+    func undo() { guard !isExporting else { return }; commitPendingEdits(); endInteraction(); selectedGap = nil; if let previous = history.undo(project) { restore(previous) } }
+    func redo() { guard !isExporting else { return }; commitPendingEdits(); endInteraction(); selectedGap = nil; if let next = history.redo(project) { restore(next) } }
+    /// An undo or redo step. The project keeps its name: the name follows the document's file,
+    /// which Save and Save As rename without an undo step of their own.
+    private func restore(_ snapshot: Project) {
+        var snapshot = snapshot; snapshot.name = project.name
+        project = snapshot; textRevision += 1; pruneSelection(); restoreAccess(); rebuild()
+    }
     func split() { guard let id = selectedClipID else { return }; edit("Split clip") { try Editing.split(id,at:playhead,in:&$0) } }
     /// Retiming changes the clip's timeline length, so it is one undoable step per commit,
-    /// not per slider sample: the caller brackets a drag with begin/endInteraction.
-    func setSpeed(_ speed: Double) {
-        guard let id = selectedClipID else { return }
-        edit("Change speed") { try Editing.setSpeed(id,to:speed,in:&$0) }
+    /// not per slider sample: the caller brackets a drag with begin/endInteraction. A slower
+    /// speed with no room for the longer clip is refused, saying why. False when not applied.
+    @discardableResult func setSpeed(_ speed: Double) -> Bool {
+        guard let id = selectedClipID, !isExporting else { return false }
+        if speedAgainstNextClip(id,for:speed) != nil { message = noRoom(for:speed); return false }
+        return edit("Change speed") { try Editing.setSpeed(id,to:speed,in:&$0) }
+    }
+    /// Slowing a clip lengthens it. When the clips after it (on its track, or its linked audio's)
+    /// leave no room for `speed`, the speed at which it meets them instead: the longest clip
+    /// there is room for, at the fastest speed giving that length, so it keeps its source (with
+    /// no room at all, its own speed). Nil when `speed` fits, or something other than room stops it.
+    private func speedAgainstNextClip(_ id: UUID, for speed: Double, basedOn base: Project? = nil) -> Double? {
+        func length(_ speed: Double) -> MediaTime? {
+            var probe = project
+            guard (try? Editing.setSpeed(id,to:speed,in:&probe,basedOn:base)) != nil else { return nil }
+            return probe.clips.first { $0.id == id }?.duration
+        }
+        guard let current = (base ?? project).clips.first(where: { $0.id == id })?.speed, speed < current,
+              length(speed) == nil, let now = length(current) else { return nil }
+        /// Where `holds` changes between `low` and `high`, to the three decimals speeds are kept
+        /// to: the end on the side where it holds.
+        func edge(_ low: Double, _ high: Double, holdsAtHigh: Bool, _ holds: (Double) -> Bool) -> Double {
+            var low = low, high = high
+            while true {
+                let middle = ((low+high)/2*1000).rounded()/1000
+                guard middle > low, middle < high else { return holdsAtHigh ? high : low }
+                if holds(middle) == holdsAtHigh { high = middle } else { low = middle }
+            }
+        }
+        let slowest = edge(speed,current,holdsAtHigh:true) { length($0) != nil }, longest = length(slowest)
+        return now == longest ? current : edge(slowest,current,holdsAtHigh:false) { length($0) == longest }
+    }
+    private func noRoom(for speed: Double) -> String {
+        String(localized:"There isn't room after this clip for \(String(format:"%gx",speed)) speed. Move the next clip or use another track.")
     }
     /// The toolbar and inspector presets.
     static let speedPresets: [Double] = [0.25,0.5,0.75,1,1.5,2,3,4,5]
@@ -393,20 +535,27 @@ import FrameMedia
         let speed = (value*scale*100).rounded()/100
         return Clip.speedRange.contains(speed) ? speed : nil
     }
-    /// Applies a typed speed to the selected clip. False (with a note) when it is not usable.
+    /// Applies a typed speed to the selected clip. False (with a note) when it is not usable or
+    /// was refused, so the Custom… popover stays open for another value.
     @discardableResult func setCustomSpeed(_ text: String) -> Bool {
         guard let speed = Self.parseSpeed(text) else {
             status = String(localized:"Enter a speed from 0.1x to 10x"); NSSound.beep(); return false
         }
-        if abs(speed-selectedSpeed) > 0.0001 { setSpeed(speed) }
-        return true
+        return abs(speed-selectedSpeed) <= 0.0001 || setSpeed(speed)
     }
     /// Slider path: every sample resolves against the snapshot the drag started from, so
     /// dragging back to where you began restores the clip exactly instead of ratcheting down.
+    /// Slowed into the next clip, the clip stops against it and the status says why, once a drag.
     func setSpeedInteractively(_ speed: Double) {
         guard let id = selectedClipID else { return }
-        let base = interactionStart
+        let base = interactionStart, asked = speed
+        var speed = speed, note = false
+        if let fit = speedAgainstNextClip(id,for:speed,basedOn:base) {
+            note = !speedHeld; speedHeld = base != nil; speed = fit
+        }
         edit("Change speed") { try Editing.setSpeed(id,to:speed,in:&$0,basedOn:base) }
+        // After the edit, so the build it starts keeps the note.
+        if note { status = noRoom(for:asked) }
     }
     func deleteSelection() {
         if selectedTransitionID != nil { removeSelectedTransition(); return }
@@ -449,7 +598,9 @@ import FrameMedia
             id = try Editing.setTransition(kind,direction:existing?.direction ?? .left,duration:existing?.duration,from:from,to:to,in:&$0)
         }), let id {
             selectClips([]); selectedTransitionID = id; selectedGap = nil
-            status = String(localized:"\(kind.displayName) added · Delete to remove")
+            // The key Delete is set to now, if any.
+            let key = shortcuts.label(.delete)
+            status = key.isEmpty ? String(localized:"\(kind.displayName) added") : String(localized:"\(kind.displayName) added · \(key) to remove")
             return true
         }
         return false
@@ -521,7 +672,10 @@ import FrameMedia
         guard !isExporting, let media = project.media.first(where: { $0.id == id }) else { return false }
         guard !missing.contains(id) else { message = String(localized:"Relink this source in the library before adding it."); return false }
         let target = lane ?? (media.kind == .audio ? .a1 : .v1)
-        let end = project.clips.filter { $0.lane == target || (media.hasAudio && $0.lane == target.paired) }.map(\.end).max() ?? .zero
+        // A video with sound lands on both lanes of the pair, so it goes after the end of both.
+        // An audio file or a still fills only its own lane.
+        let paired = media.kind == .video && media.hasAudio
+        let end = project.clips.filter { $0.lane == target || (paired && $0.lane == target.paired) }.map(\.end).max() ?? .zero
         var result: UUID?
         guard edit("Add clip", { result = try Editing.add(mediaID:id,lane:target,at:time ?? end,to:&$0) }) else { return false }
         selectedClipID = result; status = String(localized:"Added \(media.name) to \(target.rawValue)")
@@ -534,15 +688,23 @@ import FrameMedia
             status = String(localized:"Added \(added.rawValue)")+undoHint
         }
     }
-    /// Removes an empty added track; the tracks above move down one number.
+    /// Removes an empty added track; the tracks above move down one number. The undo step is named
+    /// by kind, like adding one: undo names are looked up whole in the string table.
     func removeTrack(_ lane: Lane) {
-        if edit("Remove \(lane.rawValue)", { try Editing.removeTrack(lane,from:&$0) }) {
+        if edit(lane.isVideo ? "Remove video track" : "Remove audio track", { try Editing.removeTrack(lane,from:&$0) }) {
             status = String(localized:"Removed \(lane.rawValue)")+undoHint
         }
     }
     func addText() {
         var id: UUID?
-        if edit("Add text", { id = try Editing.addText(at:playhead,to:&$0) }) { selectedClipID = id }
+        if edit("Add text", { project in
+            let added = try Editing.addText(at:playhead,to:&project)
+            // A new title reads in Ara's language; FrameCore's default words are English.
+            if let index = project.clips.firstIndex(where: { $0.id == added }) {
+                project.clips[index].name = String(localized:"Title"); project.clips[index].style.text = String(localized:"Your story starts here")
+            }
+            id = added
+        }) { selectedClipID = id }
     }
     func move(_ id: UUID, to time: MediaTime, lane: Lane) { edit("Move clip") { try Editing.move(id,to:time,lane:lane,in:&$0) } }
     func trim(_ id: UUID, leading: Bool, to time: MediaTime) { edit("Trim clip") { try Editing.trim(id,leading:leading,to:time,in:&$0) } }
@@ -609,7 +771,10 @@ import FrameMedia
     }
     func pause() { player.pause(); resumeAfterBuild = false; if isPlaying { isPlaying = false }; applyDeferredProxySwap() }
     func togglePlayback() {
-        guard !isBuilding, player.currentItem != nil else { return }
+        guard !isExporting else { return }
+        // Mid-rebuild the key pauses what the build would resume, as it would the playback itself.
+        guard !isBuilding else { if resumeAfterBuild { pause() }; return }
+        guard player.currentItem != nil else { return }
         if isPlaying { pause() }
         else {
             previewTransformID = nil; if playhead >= project.duration { seek(.zero) }; settleSeek(); player.play(); isPlaying = true
@@ -617,15 +782,19 @@ import FrameMedia
         }
     }
     private func rebuild() {
+        // A used source moved or deleted in Finder since it was read is looked for again first, and
+        // a missing one put back (a drive plugged in again) is found.
+        recheckSources(Set(project.clips.compactMap(\.mediaID)))
         proxySwapDeferred = false               // this build picks up the current proxies
-        revision += 1; let token = revision
+        titleDraws.removeAll()                  // and draws every title as it is now
+        revision += 1; let token = revision, writes = statusWrites
         rebuildTask?.cancel(); let resume = isPlaying || resumeAfterBuild; pause()
         resumeAfterBuild = resume                // after pause(), which clears it
         playhead = project.frameRate.quantize(min(playhead,project.duration))
         guard !project.clips.isEmpty else { player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false; return }
-        guard missing.isEmpty else {
+        guard missingInUse.isEmpty else {
             player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false
-            status = String(localized:"\(missing.count) missing files · Use Relink in the library"); return
+            status = String(localized:"Missing sources: \(missingInUse.count) · Use Relink in the library"); return
         }
         let snapshot = project, mediaURLs = urls, pictures = proxies
         isBuilding = true
@@ -644,12 +813,16 @@ import FrameMedia
                     }
                 }
                 player.replaceCurrentItem(with:item); isBuilding = false; seek(playhead)
-                resumeAfterBuild = false
-                if resume { player.play(); isPlaying = true }
-                status = String(localized:"\(project.clips.filter { $0.kind != .audio || $0.linkID == nil }.count) clips · SDR Rec.709")
+                // Only if still wanted: a pause during the build (Space, a scrub) cleared it.
+                if resumeAfterBuild { resumeAfterBuild = false; player.play(); isPlaying = true }
+                // A note written since the build began (by the edit that asked for it) stays.
+                if statusWrites == writes { status = String(localized:"Clips: \(project.clips.filter { $0.kind != .audio || $0.linkID == nil }.count) · SDR Rec.709") }
             } catch {
                 guard revision == token else { return }; isBuilding = false; resumeAfterBuild = false
-                if !(error is CancellationError) { player.replaceCurrentItem(with:nil); report(error) }
+                guard !(error is CancellationError) else { return }
+                // A source that went away while this build ran is followed or marked missing, not reported.
+                if recheckSources(Set(project.clips.compactMap(\.mediaID))) { rebuild(); return }
+                player.replaceCurrentItem(with:nil); report(error)
             }
         }
     }
@@ -685,7 +858,7 @@ import FrameMedia
                 fontsRevision += 1
                 let names = Set(imported.added.map(\.postScriptName)), count = imported.added.count
                 let families = Array(NSOrderedSet(array:imported.added.map(\.familyDisplayName))) as? [String] ?? []
-                status = String(localized:"Added \(count) fonts · \(families.joined(separator:", "))")
+                status = count == 1 ? String(localized:"Added 1 font · \(families.joined(separator:", "))") : String(localized:"Added \(count) fonts · \(families.joined(separator:", "))")
                 redrawTitles { names.contains($0.style.fontName) }
                 var applied = false
                 // Only in the document the font was asked for, and not when the title was already
@@ -700,7 +873,10 @@ import FrameMedia
                     applied = true
                 }
                 var notes: [String] = []
-                if !applied { notes.append(String(localized:"Added \(families.joined(separator:", ")) (\(count) styles). Choose it from a title's Font menu.")) }
+                if !applied {
+                    notes.append(count == 1 ? String(localized:"Added \(families.joined(separator:", ")) (1 style). Choose it from a title's Font menu.")
+                                            : String(localized:"Added \(families.joined(separator:", ")) (\(count) styles). Choose it from a title's Font menu."))
+                }
                 if !imported.skipped.isEmpty { notes.append(String(localized:"Some files were not added:")+"\n" + imported.skipped.joined(separator:"\n")) }
                 if !notes.isEmpty { message = notes.joined(separator:"\n\n") }
             }
@@ -728,12 +904,30 @@ import FrameMedia
     private func hold(_ url: URL) {
         if scopes[url] == nil { scopes[url] = url.startAccessingSecurityScopedResource() }
     }
+    /// A project document: `.framestudio` in any case, as Launch Services matches it.
+    static func isProjectFile(_ url: URL) -> Bool { url.pathExtension.lowercased() == "framestudio" }
+    /// Files opened with Ara (Finder, the Dock) or dropped on the library or timeline. A project
+    /// among them opens first, and the media that came with it are imported into it. Ara keeps one
+    /// project open: other projects go on the start screen, and a note says so.
     func importFiles(_ files: [URL]) {
         // Fonts dropped on the window (or opened with Ara) go to the font library, not the media.
         let fonts = files.filter(FontLibrary.accepts)
         if !fonts.isEmpty { addFonts(fonts,applyToSelection:false) }
-        let files = files.filter { !FontLibrary.accepts($0) }
+        var files = files.filter { !FontLibrary.accepts($0) }
+        let documents = files.filter(Self.isProjectFile)
+        if let document = documents.first {
+            files.removeAll(where:Self.isProjectFile)
+            guard openProject(document) else { return }
+            var seen: Set<String> = [ProjectHistory.normalized(document.path)]
+            let others = documents.dropFirst().filter { seen.insert(ProjectHistory.normalized($0.path)).inserted }
+            if !others.isEmpty {
+                for url in others { registry.record(url) }
+                let note = String(localized:"Ara opens one project at a time. These were put on the start screen instead: \(others.map(\.lastPathComponent).joined(separator:", ")).")
+                message = message.map { $0+"\n\n"+note } ?? note
+            }
+        }
         guard !files.isEmpty else { return }
+        guard !waitsForExport(String(localized:"Import these files again once the export has finished.")) else { return }
         guard !isImporting else { message = String(localized:"An import is already running. Wait for it to finish."); return }
         showLauncher = false
         for url in files { hold(url) }
@@ -743,52 +937,111 @@ import FrameMedia
             var errors: [String] = []
             for url in files {
                 guard !Task.isCancelled, project.id == projectID else { break }
-                if let existing = project.media.first(where: { $0.path == url.path }) { selectedMediaID = existing.id; continue }
+                // The same file spelled another way (through a symbolic link, /tmp for /private/tmp)
+                // is the source already there.
+                let path = ProjectHistory.normalized(url.path)
+                if let existing = project.media.first(where: { ProjectHistory.normalized($0.path) == path }) { selectedMediaID = existing.id; continue }
                 status = String(localized:"Reading \(url.lastPathComponent)…")
                 do {
                     let media = try await library.inspect(url)
                     guard !Task.isCancelled, project.id == projectID else { break }
-                    commitPendingEdits(); history.record(project,name:"Import media"); project.media.append(media); urls[media.id] = url; selectedMediaID = media.id
+                    commitPendingEdits()
+                    // Landing during a drag (in the preview, on a slider), the import is an undo step
+                    // before the drag's, which starts from the project with the media: undoing the
+                    // drag keeps them.
+                    if var start = interactionStart { history.record(start,name:"Import media"); start.media.append(media); interactionStart = start }
+                    else { history.record(project,name:"Import media") }
+                    project.media.append(media); urls[media.id] = url; selectedMediaID = media.id
                     analyze(media,url:url); ensureProxies()
                 } catch { if !(error is CancellationError) { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") } }
             }
-            if project.id == projectID { isImporting = false; status = String(localized:"\(project.media.count) media items"); if !errors.isEmpty { message = errors.joined(separator:"\n\n") } }
+            if project.id == projectID { isImporting = false; status = String(localized:"Media items: \(project.media.count)"); if !errors.isEmpty { message = errors.joined(separator:"\n\n") } }
         }
     }
+    /// Reads a source's thumbnail and waveform. Those of another file (the item was relinked, or
+    /// an undo put its first file back) are dropped at once, and a result that lands after the
+    /// item has moved on to another file is thrown away.
     private func analyze(_ media: MediaReference, url: URL) {
+        if analyzed[media.id] != media.path { thumbnails[media.id] = nil; waveforms[media.id] = nil }
+        analyzed[media.id] = media.path
         analysisTasks[media.id]?.cancel(); let projectID = project.id
         analysisTasks[media.id] = Task { [weak self] in
             guard let self else { return }
             do {
                 let analysis = try await library.analyze(media,at:url)
-                guard !Task.isCancelled, project.id == projectID, project.media.contains(where: { $0.id == media.id }) else { return }
+                guard !Task.isCancelled, project.id == projectID, analyzed[media.id] == media.path,
+                      project.media.contains(where: { $0.id == media.id }) else { return }
                 if let data = analysis.thumbnail { thumbnails[media.id] = NSImage(data:data) }
                 waveforms[media.id] = analysis.peaks
-            } catch { if !(error is CancellationError), project.id == projectID { status = String(localized:"Analysis unavailable for \(media.name): \(error.localizedDescription)") } }
+            } catch {
+                if !(error is CancellationError), project.id == projectID, analyzed[media.id] == media.path {
+                    status = String(localized:"Analysis unavailable for \(media.name): \(error.localizedDescription)")
+                }
+            }
         }
     }
     private func restoreAccess() {
         missing.removeAll(); urls.removeAll()
-        for i in project.media.indices {
-            let resolved = MediaPaths.resolve(project.media[i])
-            guard !resolved.needsRelink else { missing.insert(project.media[i].id); continue }
-            hold(resolved.url)
-            if FileManager.default.isReadableFile(atPath:resolved.url.path) {
-                urls[project.media[i].id] = resolved.url
-                if resolved.stale {
-                    project.media[i].path = resolved.url.path
-                    let projectID = project.id, mediaID = project.media[i].id, url = resolved.url
-                    // Creating a security bookmark may wait on file-system/permission services.
-                    // Never do it synchronously inside an Open Documents Apple event on the UI thread.
-                    Task.detached(priority:.utility) { [weak self] in
-                        let bookmark = MediaPaths.bookmark(for:url)
-                        await self?.refreshBookmark(bookmark,for:mediaID,projectID:projectID,path:url.path)
-                    }
-                }
-                if thumbnails[project.media[i].id] == nil { analyze(project.media[i],url:resolved.url) }
-            } else { missing.insert(project.media[i].id) }
-        }
+        for i in project.media.indices { locate(i) }
         ensureProxies()
+    }
+    /// Finds one source through its bookmark, following a file moved or renamed since, and reads
+    /// its thumbnail and waveform unless it has those of this file. One that cannot be read is missing.
+    private func locate(_ i: Int) {
+        let media = project.media[i], resolved = MediaPaths.resolve(media)
+        guard !resolved.needsRelink else { lose(media); return }
+        // Deleted in Finder, a file goes to the Trash and its bookmark follows it there: it is gone
+        // (for good once the Trash is emptied), not moved. Put Back brings it to its place again.
+        guard !Self.isInTrash(resolved.url) || Self.isInTrash(URL(fileURLWithPath:media.path)) else { lose(media); return }
+        hold(resolved.url)
+        guard FileManager.default.isReadableFile(atPath:resolved.url.path) else { lose(media); return }
+        urls[media.id] = resolved.url; missing.remove(media.id)
+        if resolved.stale {
+            project.media[i].path = resolved.url.path
+            // Where the saved document named the same file, following it is no unsaved change.
+            if saved?.id == project.id, let index = saved?.media.firstIndex(of:media) { saved?.media[index].path = resolved.url.path }
+            let projectID = project.id, mediaID = media.id, url = resolved.url
+            // Creating a security bookmark may wait on file-system/permission services.
+            // Never do it synchronously inside an Open Documents Apple event on the UI thread.
+            Task.detached(priority:.utility) { [weak self] in
+                let bookmark = MediaPaths.bookmark(for:url)
+                await self?.refreshBookmark(bookmark,for:mediaID,projectID:projectID,path:url.path)
+            }
+        }
+        if thumbnails[media.id] == nil || analyzed[media.id] != project.media[i].path { analyze(project.media[i],url:resolved.url) }
+    }
+    /// A source that cannot be found is missing. It keeps its thumbnail when that shows this very
+    /// file, so the library still shows what to look for.
+    private func lose(_ media: MediaReference) {
+        missing.insert(media.id); urls[media.id] = nil
+        guard analyzed[media.id] != media.path else { return }
+        analysisTasks[media.id]?.cancel(); analyzed[media.id] = nil; thumbnails[media.id] = nil; waveforms[media.id] = nil
+    }
+    /// Sources can be moved, renamed or deleted in Finder while the project is open. Each of these
+    /// that can no longer be read where it was is looked for again: a moved file is followed
+    /// through its bookmark, one that is gone is marked missing (the library then offers Relink…
+    /// and the viewer asks to reconnect), and a missing one may be back. True when any changed.
+    @discardableResult private func recheckSources(_ ids: Set<UUID>) -> Bool {
+        var changed = false
+        for i in project.media.indices where ids.contains(project.media[i].id) {
+            let id = project.media[i].id, before = urls[id]
+            if let url = before {
+                if FileManager.default.isReadableFile(atPath:url.path) { continue }
+            } else {
+                // A missing one is looked for once something is back at its place (a drive
+                // reconnected, the file put back). One never looked for is left alone.
+                guard missing.contains(id), FileManager.default.fileExists(atPath:project.media[i].path) else { continue }
+            }
+            locate(i)
+            if urls[id] != before { changed = true }
+        }
+        if changed { ensureProxies() }
+        return changed
+    }
+    /// Ara is back in front: sources moved or deleted in the meantime are found again or marked
+    /// missing, and missing ones put back are picked up, before an edit runs into them.
+    func refreshSources() {
+        if recheckSources(Set(project.media.map(\.id))) { rebuild() }
     }
     /// Points the preview at the FHD proxy of every source larger than 1920 × 1080 that has one
     /// on disk, and makes the missing ones in the background, one at a time. Until a source's
@@ -876,7 +1129,12 @@ import FrameMedia
     }
     func relink(_ media: MediaReference) {
         let panel = NSOpenPanel(); panel.title = String(localized:"Relink \(media.name)")
-        guard panel.runModal() == .OK, let url = panel.url else { return }; hold(url)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        relink(media,to:url)
+    }
+    /// Points a media item at another file; its clips stay where they are.
+    func relink(_ media: MediaReference, to url: URL) {
+        hold(url)
         let projectID = project.id
         Task {
             do {
@@ -892,11 +1150,13 @@ import FrameMedia
         }
     }
     func confirmDiscard() -> Bool {
+        // A title typed a moment ago is still waiting on its commit delay: it counts.
+        commitPendingEdits()
         guard dirty else { return true }
         let alert = NSAlert(); alert.messageText = String(localized:"Save changes to \(project.name)?")
         alert.informativeText = String(localized:"Your source media files are never modified.")
         alert.addButton(withTitle:String(localized:"Save")); alert.addButton(withTitle:String(localized:"Cancel")); alert.addButton(withTitle:String(localized:"Discard Changes"))
-        switch alert.runModal() {
+        switch runAlert(alert) {
         case .alertFirstButtonReturn: return save()
         case .alertThirdButtonReturn: return true
         default: return false
@@ -906,12 +1166,13 @@ import FrameMedia
         // The previous document's open live-edit run is discarded, not recorded: its idle timer
         // would otherwise write the old document into the new one's undo history.
         liveEditEnd?.cancel(); liveEditEnd = nil; liveEditStart = nil; interactionStart = nil; proxySwapDeferred = false
-        session = UUID()
-        showNewProjectSheet = false
+        session = UUID(); titleDraws.removeAll()
+        // A sheet made for the previous document (its export settings) closes with it.
+        showNewProjectSheet = false; showExportSheet = false
         previewTransformID = nil
         pause(); revision += 1; rebuildTask?.cancel(); importTask?.cancel(); isBuilding = false; isImporting = false
         snapshotTask?.cancel(); snapshotTask = nil; snapshotID = nil; isCapturingSnapshot = false
-        for task in analysisTasks.values { task.cancel() }; analysisTasks.removeAll()
+        for task in analysisTasks.values { task.cancel() }; analysisTasks.removeAll(); analyzed.removeAll(); documentBookmark = nil
         player.replaceCurrentItem(with:nil); history = EditHistory(); playhead = .zero
         seekInFlight = nil; chaseTarget = nil; seeking = false
         proxyTask?.cancel(); proxyTask = nil; proxyJob = nil; proxyProgress = nil; proxies.removeAll(); proxyFailures.removeAll()
@@ -919,15 +1180,30 @@ import FrameMedia
         // Keep security scopes until app termination: an in-flight cancelled reader may still own a buffer.
     }
     func newProject() {
-        guard !isExporting, !isCapturingSnapshot, !showExportSheet else { return }
+        guard !waitsForExport(String(localized:"Start a new project once the export has finished.")) else { return }
+        guard !isCapturingSnapshot, !showExportSheet else { return }
         pause(); showNewProjectSheet = true
+    }
+    /// The export reads this project until it is done. New, Open and Import say so rather than do
+    /// nothing: true when `advice` was shown and the request goes no further.
+    private func waitsForExport(_ advice: @autoclosure () -> String) -> Bool {
+        guard isExporting else { return false }
+        let alert = NSAlert(); alert.messageText = String(localized:"An output is being saved"); alert.informativeText = advice()
+        _ = runAlert(alert); return true
+    }
+    /// A project name with something to see. One of only spaces and characters that draw nothing
+    /// (a joiner, a direction mark, a soft hyphen) would show blank everywhere.
+    static func isVisibleName(_ name: String) -> Bool {
+        name.unicodeScalars.contains { !$0.properties.isDefaultIgnorableCodePoint && !$0.properties.isWhitespace }
     }
     /// The setup sheet owns a draft. Only an accepted, valid setup can replace open work.
     @discardableResult func createProject(name: String, aspectRatio: VideoAspectRatio, frameRate: FrameRate, resolution: Int) throws -> Bool {
         let name = name.trimmingCharacters(in:.whitespacesAndNewlines)
-        guard !name.isEmpty else { throw EditError("Enter a project name.") }
-        guard name.count <= 120, !name.unicodeScalars.contains(where:{ CharacterSet.controlCharacters.contains($0) }) else {
-            throw EditError("Use a project name of up to 120 characters, without line breaks.")
+        guard Self.isVisibleName(name) else { throw EditError(String(localized:"Enter a project name.")) }
+        // Line breaks and control characters only. Format characters (the joiner in family and flag
+        // emoji, ZWNJ, a soft hyphen, a direction mark) are ordinary parts of a name.
+        guard name.count <= 120, !name.unicodeScalars.contains(where:{ $0.properties.generalCategory == .control || CharacterSet.newlines.contains($0) }) else {
+            throw EditError(String(localized:"Use a project name of up to 120 characters, without line breaks or tabs."))
         }
         var next = Project(); next.name = name; next.aspectRatio = aspectRatio
         next.frameRate = frameRate; next.outputResolution = resolution
@@ -941,8 +1217,8 @@ import FrameMedia
     }
     @discardableResult func save(as: Bool = false) -> Bool {
         commitPendingEdits()
-        var target = documentURL
-        if target == nil || `as` {
+        var target = `as` ? nil : documentLocation()
+        if target == nil {
             let panel = NSSavePanel(); panel.title = String(localized:"Save Ara project")
             panel.allowedContentTypes = [UTType(exportedAs:"com.framestudio.project",conformingTo:.json)]
             panel.nameFieldStringValue = project.name+".framestudio"
@@ -951,11 +1227,66 @@ import FrameMedia
         guard let target else { return false }
         do {
             var next = project; next.name = target.deletingPathExtension().lastPathComponent
-            try ProjectFile.encode(next).write(to:target,options:.atomic)
-            project = next; saved = project; documentURL = target
+            try Self.writeDocument(ProjectFile.encode(next),to:target)
+            // Renamed or moved in Finder while open: its start-screen card goes with it.
+            if !`as`, let old = documentURL, old != target { registry.relocate(old,to:target) }
+            project = next; saved = project; documentURL = target; followDocument(target)
             NSDocumentController.shared.noteNewRecentDocumentURL(target); registry.record(target)
             status = String(localized:"Saved \(target.lastPathComponent)"); return true
         } catch { report(error); return false }
+    }
+    /// Where the open document is now. Renamed or moved in Finder since it was opened or saved, it
+    /// is found through its bookmark; deleted (or put in the Trash), it is written where it was.
+    private func documentLocation() -> URL? {
+        guard let url = documentURL, let bookmark = documentBookmark else { return documentURL }
+        var stale = false
+        guard let found = try? URL(resolvingBookmarkData:bookmark,options:[.withoutUI,.withoutMounting],relativeTo:nil,bookmarkDataIsStale:&stale),
+              ProjectHistory.normalized(found.path) != ProjectHistory.normalized(url.path),
+              FileManager.default.fileExists(atPath:found.path), !Self.isInTrash(found) else { return url }
+        return found
+    }
+    /// In a Trash: the home folder's, another volume's or iCloud Drive's.
+    static func isInTrash(_ url: URL) -> Bool { url.standardizedFileURL.pathComponents.contains { $0 == ".Trash" || $0 == ".Trashes" } }
+    /// Keeps a bookmark of the open document. It is made off the main actor: opening is reached
+    /// from the Open Documents Apple event, and making one can wait on file-system services.
+    private func followDocument(_ url: URL) {
+        documentBookmark = nil
+        let path = url.path
+        Task { [weak self] in
+            let bookmark = await Task.detached(priority:.utility) {
+                try? URL(fileURLWithPath:path).bookmarkData(options:[],includingResourceValuesForKeys:nil,relativeTo:nil)
+            }.value
+            guard let self, documentURL?.path == path else { return }
+            documentBookmark = bookmark
+        }
+    }
+    /// Writes a document over the old one without losing what Finder keeps on the file: a symbolic
+    /// link is written through to the file it points at, and the file keeps its tags and other
+    /// extended attributes, its access list (a shared folder's entries included) and group, its
+    /// permissions and creation date. The new contents are complete in a temporary file before
+    /// they take the old one's place, so a failed save leaves it whole.
+    static func writeDocument(_ data: Data, to url: URL) throws {
+        let files = FileManager.default, destination = url.resolvingSymlinksInPath()
+        guard let old = try? files.attributesOfItem(atPath:destination.path),
+              let folder = try? files.url(for:.itemReplacementDirectory,in:.userDomainMask,appropriateFor:destination,create:true)
+        else { try data.write(to:destination,options:.atomic); return }
+        defer { try? files.removeItem(at:folder) }
+        let staged = folder.appendingPathComponent(destination.lastPathComponent)
+        try data.write(to:staged)
+        _ = copyfile(destination.path,staged.path,nil,copyfile_flags_t(COPYFILE_XATTR))
+        // The access list as it is, the entries it has from a shared folder included: copyfile
+        // leaves those to the new file's own folder, and the staging folder has none.
+        if let access = acl_get_file(destination.path,ACL_TYPE_EXTENDED) {
+            _ = acl_set_file(staged.path,ACL_TYPE_EXTENDED,access); acl_free(UnsafeMutableRawPointer(access))
+        }
+        // Apart: a group the user is not in cannot be set, and must not stop the rest.
+        try? files.setAttributes(old.filter { $0.key == .groupOwnerAccountID },ofItemAtPath:staged.path)
+        try? files.setAttributes(old.filter { $0.key == .posixPermissions || $0.key == .creationDate },ofItemAtPath:staged.path)
+        guard rename(staged.path,destination.path) == 0 else {
+            let code = errno
+            throw CocoaError(code == EACCES || code == EPERM ? .fileWriteNoPermission : .fileWriteUnknown,
+                             userInfo:[NSURLErrorKey:destination,NSUnderlyingErrorKey:POSIXError(POSIXErrorCode(rawValue:code) ?? .EIO)])
+        }
     }
     /// Returning to the start screen keeps the current project loaded; choosing another one
     /// from there goes through openProject, which asks before discarding unsaved changes.
@@ -969,36 +1300,43 @@ import FrameMedia
     func resumeEditing() { if hasOpenWork { showLauncher = false } }
     func openFromLauncher(_ path: String) {
         let url = URL(fileURLWithPath: path)
-        if let current = documentURL, ProjectHistory.normalized(current.path) == ProjectHistory.normalized(path) { showLauncher = false; return }
+        // The open document, also when it was renamed or moved in Finder since (its card follows it).
+        if let current = documentLocation(), ProjectHistory.normalized(current.path) == ProjectHistory.normalized(path) { showLauncher = false; return }
         openProject(url)
         if showLauncher { registry.refresh() }   // failed: the card re-reads and shows why
     }
     func addProjects(_ urls: [URL]) {
         Task {
-            let added = await registry.add(from:urls)
-            if added == 0 { message = String(localized:"No new .framestudio projects were found there.") }
+            let result = await registry.add(from:urls)
+            if result.unlisted > 0 {
+                message = String(localized:"The start screen lists up to \(ProjectHistory.limit) projects and has no room for \(result.unlisted) found here. Remove projects from the list to make room.")
+            } else if result.added == 0 { message = String(localized:"No new .framestudio projects were found there.") }
         }
     }
     func chooseOpen() {
+        guard !waitsForExport(String(localized:"Open a project once the export has finished.")) else { return }
         let panel = NSOpenPanel(); panel.title = String(localized:"Open project")
         panel.allowedContentTypes = [UTType(exportedAs:"com.framestudio.project",conformingTo:.json),.json]
         if panel.runModal() == .OK, let url = panel.url { openProject(url) }
     }
-    func openProject(_ url: URL) {
+    /// True when the project was opened (not cancelled, refused or unreadable).
+    @discardableResult func openProject(_ url: URL) -> Bool {
         commitPendingEdits()
-        guard !isExporting, confirmDiscard() else { return }
+        guard !waitsForExport(String(localized:"Open “\(url.lastPathComponent)” again once the export has finished.")) else { return false }
+        guard confirmDiscard() else { return false }
         do {
             let scope = url.startAccessingSecurityScopedResource(); defer { if scope { url.stopAccessingSecurityScopedResource() } }
             let loaded = try ProjectFile.decode(Data(contentsOf:url))
-            resetSession(); project = loaded; documentURL = url; restoreAccess(); saved = project
-            if missing.isEmpty { rebuild() } else { status = String(localized:"\(missing.count) sources need relinking · Use Relink in the library") }
+            resetSession(); project = loaded; documentURL = url; followDocument(url); restoreAccess(); saved = project
+            rebuild()                                   // held back only by missing sources the timeline uses
             let fonts = missingFonts
             if !fonts.isEmpty {
                 message = String(localized:"This project uses fonts that aren't on this Mac: \(fonts.joined(separator:", ")). Titles in them are shown in Helvetica Neue Bold until you add the fonts (Add Font… in a title's inspector).")
             }
             NSDocumentController.shared.noteNewRecentDocumentURL(url); registry.record(url)
             showLauncher = false
-        } catch { report(error) }
+            return true
+        } catch { report(error); return false }
     }
     func chooseSnapshot() {
         commitPendingEdits()

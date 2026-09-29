@@ -91,6 +91,15 @@ public struct ClipStyle: Codable, Hashable, Sendable {
     public var shadowRed: Double = 0
     public var shadowGreen: Double = 0
     public var shadowBlue: Double = 0
+    /// The clip's alignment point (anchor), from its centre, as a share of its width and height
+    /// (right and down positive; ±0.5 is an edge, and it may lie outside the clip, up to ±10).
+    /// Rotation and pinch turn and scale about it,
+    /// and moving lines it up with other clips' anchors. It changes no pixel of the picture.
+    public var anchorX: Double = 0
+    public var anchorY: Double = 0
+    public var hasAnchor: Bool { anchorX != 0 || anchorY != 0 }
+    /// How far outside the clip the alignment point may go, in clip widths and heights.
+    public static let anchorReach = 10.0
     public static let defaultFontName = "HelveticaNeue-Bold"
     public var hasOutline: Bool { outlineWidth > 0 }
     public var hasShadow: Bool { shadowOpacity > 0 }
@@ -99,6 +108,7 @@ public struct ClipStyle: Codable, Hashable, Sendable {
         case x, y, scale, rotation, opacity, brightness, contrast, saturation, volume, muted, text, fontName, fontSize, red, green, blue
         case outlineWidth, outlineRed, outlineGreen, outlineBlue
         case shadowOpacity, shadowDistance, shadowAngle, shadowBlur, shadowRed, shadowGreen, shadowBlue
+        case anchorX, anchorY
     }
     /// Documents from before fonts could be chosen have no font name: they keep the font they
     /// were made with.
@@ -120,6 +130,8 @@ public struct ClipStyle: Codable, Hashable, Sendable {
         shadowOpacity = try optional(.shadowOpacity,0); shadowDistance = try optional(.shadowDistance,6)
         shadowAngle = try optional(.shadowAngle,45); shadowBlur = try optional(.shadowBlur,8)
         shadowRed = try optional(.shadowRed,0); shadowGreen = try optional(.shadowGreen,0); shadowBlue = try optional(.shadowBlue,0)
+        // Documents from before anchors: the centre.
+        anchorX = try optional(.anchorX,0); anchorY = try optional(.anchorY,0)
     }
 }
 
@@ -137,9 +149,20 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
     public var speed: Double = 1
     public var linkID: UUID?
     public var style = ClipStyle()
+    /// The source length a retimed clip was given, when whole frames at its speed use a little
+    /// less (150 frames at 4x last 37 frames and use 148). The next speed change starts from it,
+    /// so going back to 1x gives the same frames back, also after a frame rate change. Edits that
+    /// change the source range clear it; older versions ignore it.
+    public var retimedSourceLength: MediaTime?
     public var end: MediaTime { start + duration }
     /// How much of the source this clip consumes. Equal to `duration` at 1x.
     public var sourceLength: MediaTime { speed == 1 ? duration : duration.scaled(by: speed) }
+    /// Whether `length` still describes the source this clip was given (`retimedSourceLength`): no
+    /// less than it uses, and no more than whole frames at its speed leave out, through a change of
+    /// frame rate since (under a frame of the slowest rate for each).
+    public func wasGiven(_ length: MediaTime) -> Bool {
+        length >= sourceLength && length - sourceLength <= FrameRate.longestFrame.scaled(by: 2 * speed)
+    }
     /// 0.1x–10x: presets up to 5x, and any value typed in between.
     public static let speedRange: ClosedRange<Double> = 0.1...10
     public init(mediaID: UUID? = nil, name: String, kind: MediaKind, lane: Lane, start: MediaTime,
@@ -147,7 +170,7 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
         self.mediaID = mediaID; self.name = name; self.kind = kind; self.lane = lane; self.start = start
         self.sourceStart = sourceStart; self.duration = duration; self.speed = speed; self.linkID = linkID
     }
-    private enum CodingKeys: String, CodingKey { case id, mediaID, name, kind, lane, start, sourceStart, duration, speed, linkID, style }
+    private enum CodingKeys: String, CodingKey { case id, mediaID, name, kind, lane, start, sourceStart, duration, speed, linkID, style, retimedSourceLength }
     /// Hand-written so documents saved before per-clip speed still load: Swift's synthesized
     /// decoder ignores stored-property defaults and would reject every older file.
     public init(from decoder: any Decoder) throws {
@@ -163,6 +186,7 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
         speed = try c.decodeIfPresent(Double.self, forKey: .speed) ?? 1
         linkID = try c.decodeIfPresent(UUID.self, forKey: .linkID)
         style = try c.decode(ClipStyle.self, forKey: .style)
+        retimedSourceLength = try c.decodeIfPresent(MediaTime.self, forKey: .retimedSourceLength)
     }
 }
 
@@ -223,6 +247,20 @@ public struct Project: Codable, Hashable, Sendable {
         guard let link = clip.linkID else { return [clip] }
         return clips.filter { $0.linkID == link }
     }
+    /// The clips of every group in `ids` (each clip with its linked partner), in one pass: asking
+    /// `group(for:)` once per clip searches the whole timeline for each of them.
+    public func groupIDs(for ids: Set<UUID>) -> Set<UUID> {
+        guard !ids.isEmpty else { return [] }
+        var links = Set<UUID>()
+        for clip in clips where ids.contains(clip.id) { if let link = clip.linkID { links.insert(link) } }
+        return Set(clips.lazy.filter { ids.contains($0.id) || $0.linkID.map(links.contains) == true }.map(\.id))
+    }
+    /// A video or audio clip may end less than one frame (at its speed) after its source does:
+    /// rounding its cuts to a new frame rate can take them there (a trim never does, see
+    /// `Editing.trim`). Its last frame is held and its sound is silent for that remainder.
+    public func fitsSource(_ clip: Clip, of asset: MediaReference) -> Bool {
+        clip.sourceStart + clip.sourceLength < asset.duration + frameRate.frame.scaled(by: clip.speed)
+    }
     public func validated() throws -> Project {
         guard version == 2 else { throw EditError("This project version is not supported (\(version)).") }
         guard FrameRate.supported.contains(frameRate) else { throw EditError("Unsupported project frame rate.") }
@@ -233,22 +271,23 @@ public struct Project: Codable, Hashable, Sendable {
             guard media.duration.ticks >= 0, media.duration.seconds < 7 * 86400,
                   media.width >= 0, media.height >= 0, media.frameRate.isFinite else { throw EditError("Invalid media metadata.") }
         }
+        // Looked up once per clip: searching the list for each one made validation quadratic.
+        let assets = Dictionary(uniqueKeysWithValues: media.map { ($0.id, $0) })
         for clip in clips {
             // Bound every decoded operand before adding times; malformed JSON must never trap on overflow.
             let limit = Int64(7 * 86400) * MediaTime.scale
             guard (0..<limit).contains(clip.start.ticks), (0..<limit).contains(clip.sourceStart.ticks),
                   (frameRate.frame.ticks..<limit).contains(clip.duration.ticks),
-                  clip.end.seconds < 7 * 86400,
+                  clip.end.seconds < 7 * 86400, clip.retimedSourceLength.map({ (0..<limit).contains($0.ticks) }) ?? true,
                   clip.lane.isVideo == (clip.kind != .audio), hasLane(clip.lane) else { throw EditError("Invalid clip timing or track.") }
             // Bound speed before any multiplication: sourceLength feeds Int64 arithmetic below.
             guard clip.speed.isFinite, Clip.speedRange.contains(clip.speed) else { throw EditError("Clip speed must be between 0.1x and 10x.") }
             guard clip.kind == .video || clip.kind == .audio || clip.speed == 1 else { throw EditError("Only video and audio clips can be retimed.") }
             guard clip.start == frameRate.quantize(clip.start), clip.duration == frameRate.quantize(clip.duration) else { throw EditError("Clip timing is off the project frame grid.") }
             if clip.kind != .text {
-                guard let asset = media(for: clip), asset.kind == clip.kind || (clip.kind == .audio && asset.hasAudio) else { throw EditError("Clip references invalid media.") }
+                guard let asset = clip.mediaID.flatMap({ assets[$0] }), asset.kind == clip.kind || (clip.kind == .audio && asset.hasAudio) else { throw EditError("Clip references invalid media.") }
                 if clip.kind == .audio || clip.kind == .video {
-                    guard (0..<limit).contains(clip.sourceLength.ticks),
-                          clip.sourceStart + clip.sourceLength <= asset.duration else { throw EditError("Clip exceeds its source duration.") }
+                    guard (0..<limit).contains(clip.sourceLength.ticks), fitsSource(clip, of: asset) else { throw EditError("Clip exceeds its source duration.") }
                 }
             }
             let s = clip.style
@@ -265,13 +304,17 @@ public struct Project: Codable, Hashable, Sendable {
                   [s.outlineRed,s.outlineGreen,s.outlineBlue,s.shadowRed,s.shadowGreen,s.shadowBlue].allSatisfy({ (0...1).contains($0) }) else {
                 throw EditError("Invalid title outline or shadow.")
             }
+            guard s.anchorX.isFinite, s.anchorY.isFinite, (-ClipStyle.anchorReach...ClipStyle.anchorReach).contains(s.anchorX), (-ClipStyle.anchorReach...ClipStyle.anchorReach).contains(s.anchorY) else {
+                throw EditError("Invalid alignment point.")
+            }
         }
+        let lanes = Dictionary(grouping: clips, by: \.lane)
         for lane in videoLanes+audioLanes {
-            let sorted = clips.filter { $0.lane == lane }.sorted { $0.start < $1.start }
+            let sorted = (lanes[lane] ?? []).sorted { $0.start < $1.start }
             for pair in zip(sorted, sorted.dropFirst()) where pair.0.end > pair.1.start { throw EditError("Clips overlap on \(lane.rawValue). Use another track.") }
         }
-        for link in Set(clips.compactMap(\.linkID)) {
-            let group = clips.filter { $0.linkID == link }
+        // Grouped once: filtering every clip for each link made validation quadratic in linked pairs.
+        for group in Dictionary(grouping: clips.filter { $0.linkID != nil }, by: { $0.linkID! }).values {
             guard group.count == 2, let v = group.first(where: { $0.kind == .video }), let a = group.first(where: { $0.kind == .audio }),
                   v.mediaID == a.mediaID, v.start == a.start, v.duration == a.duration, v.sourceStart == a.sourceStart,
                   v.speed == a.speed, v.lane.paired == a.lane else { throw EditError("Linked video and audio are out of sync.") }
@@ -286,7 +329,13 @@ public struct Project: Codable, Hashable, Sendable {
 
 public struct EditError: LocalizedError, Sendable {
     public let message: String
-    public init(_ message: String) { self.message = message }
+    /// In the app's language (its Localizable.strings), the values put into it included.
+    public init(_ message: String.LocalizationValue) { self.message = String(localized: message) }
+    /// Text that is final as it is: a message put together from parts that are localized already.
+    public init(verbatim message: String) { self.message = message }
+    /// A string made elsewhere (`String(localized:)` at the call site) is used as it is. A literal
+    /// still goes through the table: this is disfavoured, as SwiftUI's `Text` does it.
+    @_disfavoredOverload public init<S: StringProtocol>(_ message: S) { self.message = String(message) }
     public var errorDescription: String? { message }
 }
 

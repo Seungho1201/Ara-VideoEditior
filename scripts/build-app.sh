@@ -7,7 +7,11 @@ if pgrep -x Ara >/dev/null; then
     printf 'Quit Ara before rebuilding its app bundle.\n' >&2
     exit 1
 fi
-swift build --configuration "$configuration" --arch arm64 --product Ara
+# Linked against the current SDK; the deployment target stays macOS 15. swiftc hands the SDK to
+# the linker only as --sysroot, which does not give its version (-isysroot does): the app would be
+# marked as built with the macOS 15 SDK, and AppKit and SwiftUI would draw it in their older design.
+sdk="$(xcrun --sdk macosx --show-sdk-path)"
+swift build --configuration "$configuration" --arch arm64 --product Ara -Xswiftc -Xclang-linker -Xswiftc -isysroot -Xswiftc -Xclang-linker -Xswiftc "$sdk"
 binary_dir="$(swift build --configuration "$configuration" --arch arm64 --show-bin-path)"
 app="build/Ara.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"

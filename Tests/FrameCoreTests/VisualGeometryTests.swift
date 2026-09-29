@@ -199,4 +199,65 @@ final class VisualGeometryTests: XCTestCase {
         XCTAssertNil(result.vertical); XCTAssertNil(result.horizontal)
         XCTAssertEqual(result.style,near(330,190).style)
     }
+
+    func testTheAlignmentPointSitsOnTheClipAndCatchesItsStops() {
+        var style = ClipStyle(); style.scale = 0.5; style.rotation = 30; style.x = 0.1
+        let geometry = VisualGeometry(sourceSize:CGSize(width:400,height:200),canvasSize:canvas,style:style)
+        // The stops at the corners are the corners, turned with the clip; the middle is the centre.
+        assertPoint(geometry.point(atShare:CGPoint(x:-0.5,y:-0.5)),geometry.corners[0])
+        assertPoint(geometry.point(atShare:CGPoint(x:0.5,y:0.5)),geometry.corners[2])
+        assertPoint(geometry.anchor,geometry.center)
+        // A point near the top-right corner catches it; one in open space stays where it is.
+        let corner = geometry.corners[1]
+        let caught = geometry.anchorMoved(to:CGPoint(x:corner.x+3,y:corner.y-2),snap:8)
+        XCTAssertEqual(caught.stop,2); XCTAssertEqual(caught.style.anchorX,0.5); XCTAssertEqual(caught.style.anchorY,-0.5)
+        let free = geometry.anchorMoved(to:geometry.point(atShare:CGPoint(x:0.2,y:0.1)),snap:8)
+        XCTAssertNil(free.stop); XCTAssertEqual(free.style.anchorX,0.2,accuracy:0.001); XCTAssertEqual(free.style.anchorY,0.1,accuracy:0.001)
+        // Off the clip too: the point goes where it is put.
+        let away = geometry.point(atShare:CGPoint(x:-1.5,y:0.8))
+        let outside = geometry.anchorMoved(to:away,snap:8)
+        XCTAssertNil(outside.stop)
+        XCTAssertEqual(outside.style.anchorX,-1.5,accuracy:0.001); XCTAssertEqual(outside.style.anchorY,0.8,accuracy:0.001)
+        XCTAssertEqual(free.style.x,style.x,"placing the point moves nothing")
+    }
+
+    func testTurningGoesAboutTheAlignmentPointAndMovingLinesItUp() throws {
+        var style = ClipStyle(); style.scale = 0.5; style.anchorX = -0.5; style.anchorY = -0.5    // the top-left corner
+        let geometry = VisualGeometry(sourceSize:CGSize(width:400,height:200),canvasSize:canvas,style:style)
+        let pivot = geometry.anchor
+        let turned = try XCTUnwrap(geometry.rotated(from:CGPoint(x:pivot.x+100,y:pivot.y),to:CGPoint(x:pivot.x,y:pivot.y+100)))
+        XCTAssertEqual(turned.rotation,90,accuracy:0.01)
+        let after = VisualGeometry(sourceSize:geometry.sourceSize,canvasSize:canvas,style:turned)
+        assertPoint(after.anchor,pivot)
+        XCTAssertNotEqual(turned.x,style.x,"the centre swung round the corner")
+        // Scaling about the point keeps it too.
+        var bigger = turned; bigger.scale = 1
+        assertPoint(VisualGeometry(sourceSize:geometry.sourceSize,canvasSize:canvas,style:after.keepingAnchor(bigger)).anchor,pivot)
+        // Moving lines the point, not the centre, up with the frame's middle.
+        let middle = CGPoint(x:canvas.width/2,y:canvas.height/2)
+        let near = VisualGeometry(sourceSize:geometry.sourceSize,canvasSize:canvas,style:geometry.moved(by:CGSize(width:middle.x-pivot.x+3,height:middle.y-pivot.y-2)))
+        let lined = near.aligned(to:[middle],threshold:5)
+        XCTAssertEqual(lined.vertical,middle.x); XCTAssertEqual(lined.horizontal,middle.y)
+        assertPoint(VisualGeometry(sourceSize:geometry.sourceSize,canvasSize:canvas,style:lined.style).anchor,middle)
+    }
+
+    func testTheAlignmentPointIsSavedAndChecked() throws {
+        var project = Project()
+        var clip = Clip(name:"T",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:2)); clip.style.anchorX = 0.25; clip.style.anchorY = -0.5
+        project.clips = [clip]
+        let reopened = try ProjectFile.decode(ProjectFile.encode(project))
+        XCTAssertEqual(reopened.clips[0].style.anchorX,0.25); XCTAssertEqual(reopened.clips[0].style.anchorY,-0.5)
+        // Earlier documents have none: the centre.
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with:ProjectFile.encode(project)) as? [String:Any])
+        var clips = try XCTUnwrap(object["clips"] as? [[String:Any]]); var styleObject = try XCTUnwrap(clips[0]["style"] as? [String:Any])
+        styleObject.removeValue(forKey:"anchorX"); styleObject.removeValue(forKey:"anchorY"); clips[0]["style"] = styleObject; object["clips"] = clips
+        let old = try ProjectFile.decode(JSONSerialization.data(withJSONObject:object))
+        XCTAssertFalse(old.clips[0].style.hasAnchor)
+        project.clips[0].style.anchorX = 3
+        XCTAssertNoThrow(try project.validated(),"outside the clip is fine")
+        project.clips[0].style.anchorX = 11
+        XCTAssertThrowsError(try project.validated())
+        project.clips[0].style.anchorX = .nan
+        XCTAssertThrowsError(try project.validated())
+    }
 }

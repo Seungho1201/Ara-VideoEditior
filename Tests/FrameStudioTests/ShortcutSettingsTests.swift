@@ -58,9 +58,84 @@ import FrameCore
         XCTAssertNil(shortcuts.shortcut(.split))
         XCTAssertNil(shortcuts.keyboardShortcut(.split))
         XCTAssertTrue(shortcuts.clashes.isEmpty)
-        // Bringing Split's default back makes the clash visible rather than silently doubling it.
-        shortcuts.reset(.split)
+        // Bringing Split's default back takes ⌘B back, as recording it would: two commands never
+        // keep one key.
+        XCTAssertEqual(shortcuts.reset(.split),.addText)
+        XCTAssertEqual(shortcuts.label(.split),"⌘B")
+        XCTAssertNil(shortcuts.shortcut(.addText))
+        XCTAssertTrue(shortcuts.clashes.isEmpty)
+        XCTAssertEqual(shortcuts.command(matching:key("b",code:11,.command)),.split)
+        XCTAssertNil(shortcuts.reset(.addText),"⇧⌘T was free")
+        XCTAssertTrue(shortcuts.changes.isEmpty)
+    }
+
+    /// A clash kept by an earlier Ara (both on ⌘B): each row shows the other, and Restore default
+    /// on either row settles it.
+    func testRestoreDefaultSettlesAClashKeptFromBefore() throws {
+        defaults.set(try JSONEncoder().encode(["addText":Shortcut("b",.command)] as [String:Shortcut?]),forKey:ShortcutSettings.storageKey)
+        var shortcuts = ShortcutSettings(defaults:defaults)
         XCTAssertEqual(shortcuts.clashes,[.split,.addText])
+        XCTAssertEqual(shortcuts.sharing(.split),.addText); XCTAssertEqual(shortcuts.sharing(.addText),.split)
+        XCTAssertNil(shortcuts.sharing(.undo))
+        // On the row whose default it is: the key comes back from the other command.
+        XCTAssertEqual(shortcuts.reset(.split),.addText)
+        XCTAssertTrue(shortcuts.clashes.isEmpty)
+        XCTAssertEqual(shortcuts.label(.split),"⌘B"); XCTAssertEqual(shortcuts.label(.addText),"")
+        XCTAssertTrue(ShortcutSettings(defaults:defaults).clashes.isEmpty,"settled for good")
+        // On the other row: it takes its own default back and leaves ⌘B to Split.
+        defaults.set(try JSONEncoder().encode(["addText":Shortcut("b",.command)] as [String:Shortcut?]),forKey:ShortcutSettings.storageKey)
+        shortcuts = ShortcutSettings(defaults:defaults)
+        XCTAssertNil(shortcuts.reset(.addText))
+        XCTAssertTrue(shortcuts.clashes.isEmpty)
+        XCTAssertEqual(shortcuts.label(.split),"⌘B"); XCTAssertEqual(shortcuts.label(.addText),"⇧⌘T")
+    }
+
+    /// Return, ⇧→ or ⇧Esc saved for a command by an earlier Ara (whose recorder took them) are not
+    /// used: they would take the fixed keys over from the menus. The command gets its default back,
+    /// or none when another command has that key now; other changes stay.
+    func testFixedKeysSavedByAnEarlierAraAreNotUsed() throws {
+        let stored: [String:Shortcut?] = ["addText":Shortcut("return"),"nextFrame":Shortcut("right",.shift),"delete":Shortcut("escape",.shift),
+                                          "clipEnd":Shortcut("c",.command),"snapping":Shortcut("k")]
+        defaults.set(try JSONEncoder().encode(stored),forKey:ShortcutSettings.storageKey)
+        var shortcuts = ShortcutSettings(defaults:defaults)
+        XCTAssertEqual(shortcuts.label(.addText),"⇧⌘T"); XCTAssertEqual(shortcuts.label(.nextFrame),"→")
+        XCTAssertEqual(shortcuts.label(.delete),"⌫"); XCTAssertEqual(shortcuts.label(.clipEnd),"⌥→")
+        XCTAssertEqual(shortcuts.label(.snapping),"K")
+        XCTAssertNil(shortcuts.command(matching:key("\r",code:36)))
+        XCTAssertTrue(shortcuts.clashes.isEmpty)
+        defaults.set(try JSONEncoder().encode(["addText":Shortcut("return"),"split":Shortcut("t",[.command,.shift])] as [String:Shortcut?]),forKey:ShortcutSettings.storageKey)
+        shortcuts = ShortcutSettings(defaults:defaults)
+        XCTAssertNil(shortcuts.shortcut(.addText)); XCTAssertEqual(shortcuts.label(.split),"⇧⌘T")
+        XCTAssertTrue(shortcuts.clashes.isEmpty)
+    }
+
+    /// Recording the key a command has by default is no change, so Restore Defaults stays off.
+    func testAKeysOwnDefaultIsNoChange() throws {
+        let shortcuts = ShortcutSettings(defaults:defaults)
+        XCTAssertNil(shortcuts.set(Shortcut("b",.command),for:.split))
+        XCTAssertTrue(shortcuts.changes.isEmpty)
+        XCTAssertNil(defaults.data(forKey:ShortcutSettings.storageKey))
+        // Nor is one saved that way by an earlier Ara.
+        defaults.set(try JSONEncoder().encode(["split":Shortcut("b",.command)] as [String:Shortcut?]),forKey:ShortcutSettings.storageKey)
+        XCTAssertTrue(ShortcutSettings(defaults:defaults).changes.isEmpty)
+    }
+
+    /// Keys macOS keeps (standard menu items, Spotlight, the app switcher, focus moves) and those
+    /// the timeline and preview keep whatever the settings say.
+    func testKeptKeys() {
+        let mac = [Shortcut("f",[.command,.control]),Shortcut("w",[.command,.option]),Shortcut("m",[.command,.option]),Shortcut("/",[.command,.shift]),
+                   Shortcut("v",[.command,.option,.shift]),Shortcut("space",[.command,.control]),Shortcut("`",.command),Shortcut("tab",.command),
+                   Shortcut("space",.command),Shortcut("tab"),Shortcut("tab",.shift),Shortcut("q",.command),Shortcut("h",[.command,.option])]
+        for shortcut in mac { XCTAssertTrue(shortcut.isReserved,shortcut.display) }
+        let fixed = [Shortcut("left",.shift),Shortcut("right",.shift),Shortcut("return"),Shortcut("escape"),Shortcut("escape",.shift),
+                     Shortcut("escape",.option),Shortcut("escape",[.command,.control])]
+        for shortcut in fixed { XCTAssertTrue(shortcut.isFixed,shortcut.display) }
+        for free in [Shortcut("return",.command),Shortcut("left",.option),Shortcut("left",[.shift,.command]),Shortcut("n"),Shortcut("f",.command),Shortcut("tab",.option)] {
+            XCTAssertFalse(free.isReserved || free.isFixed,free.display)
+        }
+        // Quit, Close, Settings and the like are the app's own; copy and paste are not.
+        XCTAssertTrue(Shortcut("w",.command).isAppKey); XCTAssertTrue(Shortcut(",",.command).isAppKey)
+        XCTAssertFalse(Shortcut("v",.command).isAppKey); XCTAssertFalse(Shortcut("z",.command).isAppKey)
     }
 
     func testClearingAndResetting() {
@@ -107,10 +182,30 @@ import FrameCore
         XCTAssertEqual(AppLanguage.current(in:defaults,domain:suite),.system)
     }
 
+    /// The restart note and Restart Now follow what the choice shows at the next launch, System
+    /// default included: set to English on a Korean Mac, going back to it shows Korean.
+    func testSystemDefaultAsksForARestartWhenItChangesTheLanguage() {
+        AppLanguage.english.apply(to:defaults)
+        AppLanguage.system.apply(to:defaults)                         // what the picker does
+        XCTAssertEqual(AppLanguage.current(in:defaults,domain:suite),.system)
+        XCTAssertEqual(AppLanguage.system.resolved(macLanguages:["ko-KR"]),"ko")
+        XCTAssertTrue(AppLanguage.system.needsRestart(running:"en",macLanguages:["ko-KR"]))
+        XCTAssertFalse(AppLanguage.system.needsRestart(running:"ko",macLanguages:["ko-KR"]))
+        XCTAssertTrue(AppLanguage.system.needsRestart(running:"ko",macLanguages:["en-US","ko-KR"]))
+        // The first of the Mac's languages Ara has; English when it has none of them.
+        XCTAssertEqual(AppLanguage.system.resolved(macLanguages:["ja-JP","ko-KR"]),"ko")
+        XCTAssertEqual(AppLanguage.system.resolved(macLanguages:["ja-JP"]),"en")
+        XCTAssertFalse(AppLanguage.system.needsRestart(running:"en",macLanguages:["ja-JP"]))
+        // A language chosen outright, whatever the Mac's.
+        XCTAssertTrue(AppLanguage.korean.needsRestart(running:"en",macLanguages:["ko-KR"]))
+        XCTAssertFalse(AppLanguage.english.needsRestart(running:"en",macLanguages:["ko-KR"]))
+    }
+
     func testEveryCommandHasItsOwnDefault() {
         let defaults = AppCommand.allCases.compactMap(\.standard)
         XCTAssertEqual(Set(defaults).count,defaults.count)
         XCTAssertFalse(defaults.contains(where:\.isReserved))
+        XCTAssertFalse(defaults.contains(where:\.isFixed))
     }
 }
 

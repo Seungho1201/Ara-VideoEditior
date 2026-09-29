@@ -229,11 +229,134 @@ final class EditingTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(p.clips.first { $0.id == id }).speed,1)
         XCTAssertEqual(try XCTUnwrap(p.clips.first { $0.id == id }).duration,originalDuration)
         XCTAssertEqual(p,base)
-        // Without an anchor the same sweep compounds its own rounding and loses content.
-        var drifting = base
-        for step in 0...300 { try Editing.setSpeed(id,to:1 + 3 * Double(step)/300,in:&drifting) }
-        for step in 0...300 { try Editing.setSpeed(id,to:4 - 3 * Double(step)/300,in:&drifting) }
-        XCTAssertLessThan(try XCTUnwrap(drifting.clips.first { $0.id == id }).duration.ticks,originalDuration.ticks)
+        // Without an anchor each step starts from the source range the clip was given (not the
+        // whole frames the previous speed left), so the same sweep loses nothing either.
+        var stepped = base
+        for step in 0...300 { try Editing.setSpeed(id,to:1 + 3 * Double(step)/300,in:&stepped) }
+        for step in 0...300 { try Editing.setSpeed(id,to:4 - 3 * Double(step)/300,in:&stepped) }
+        XCTAssertEqual(try XCTUnwrap(stepped.clips.first { $0.id == id }).duration,originalDuration)
+        XCTAssertEqual(stepped,base)
+    }
+    /// A speed and then 1x again, from the menu or a typed value rather than Undo, gives back the
+    /// clip's own frames: each speed starts from the source range the clip was given, never from
+    /// the whole frames the previous speed left of it, and never reads past its out point.
+    func testSpeedRoundTripsKeepTheSourceRangeAtManyLengthsAndSpeeds() throws {
+        for rate in [FrameRate(30),FrameRate(24000,1001),FrameRate(60)] {
+            for frames in stride(from:3,through:300,by:7) {
+                for speed in [0.25,0.5,0.75,1.23,1.5,2,2.5,3,4,5,7.3,10] {
+                    var (p,id) = try fixture(rate:rate)
+                    try Editing.trim(id,leading:false,to:MediaTime(ticks:rate.frame.ticks*Int64(frames)),in:&p)
+                    let before = p, length = try XCTUnwrap(p.clip(id)).sourceLength
+                    do { try Editing.setSpeed(id,to:speed,in:&p) }
+                    catch { XCTAssertLessThan(Double(frames),speed,"\(frames) frames at \(speed)x is at least a frame"); XCTAssertEqual(p,before); continue }
+                    let retimed = try XCTUnwrap(p.clip(id))
+                    XCTAssertLessThanOrEqual(retimed.sourceLength,length,"\(frames) frames at \(speed)x reads past the out point")
+                    XCTAssertEqual(Set(p.group(for:id).map(\.duration)),[retimed.duration])
+                    try Editing.setSpeed(id,to:1.5,in:&p)                          // another speed on the way back
+                    try Editing.setSpeed(id,to:1,in:&p)
+                    XCTAssertEqual(p,before,"\(frames) frames → \(speed)x → 1.5x → 1x at \(rate.label) fps")
+                }
+            }
+        }
+    }
+    func testASpeedThatLeavesLessThanAFrameIsRefused() throws {
+        var (p,id) = try fixture()
+        try Editing.trim(id,leading:false,to:.init(ticks:p.frameRate.frame.ticks*3),in:&p)
+        let before = p
+        XCTAssertThrowsError(try Editing.setSpeed(id,to:10,in:&p)) { XCTAssertTrue(($0 as? EditError)?.message.contains("less than one frame") == true,"\($0)") }
+        XCTAssertEqual(p,before)
+        try Editing.setSpeed(id,to:3,in:&p)                                     // exactly one frame
+        XCTAssertEqual(p.clip(id)?.duration,p.frameRate.frame)
+        XCTAssertEqual(p.clip(id)?.sourceLength,.init(ticks:p.frameRate.frame.ticks*3))
+    }
+    /// The slider stops at the fastest speed that leaves a frame, as it stops against the next
+    /// clip, rather than failing on every sample past it; dragging back restores the clip.
+    func testALiveDragStopsAtTheFastestSpeedThatLeavesAFrame() throws {
+        for rate in [FrameRate(30),FrameRate(24000,1001)] {
+            var (p,id) = try fixture(rate:rate)
+            try Editing.trim(id,leading:false,to:.init(ticks:rate.frame.ticks*3),in:&p)
+            let base = p
+            for speed in [2.0,3.5,7,10] { try Editing.setSpeed(id,to:speed,in:&p,basedOn:base) }
+            let fastest = try XCTUnwrap(p.clip(id))
+            XCTAssertEqual(fastest.speed,3); XCTAssertEqual(fastest.duration,rate.frame)
+            XCTAssertEqual(fastest.sourceLength,.init(ticks:rate.frame.ticks*3),"no frame past the out point")
+            for speed in [5.0,2,1] { try Editing.setSpeed(id,to:speed,in:&p,basedOn:base) }
+            XCTAssertEqual(p,base)
+        }
+    }
+    /// A whole clip that ends a little past its source after a frame rate change keeps that end
+    /// through a slow speed that allows less (and is cut to fit meanwhile) and back.
+    func testASlowSpeedOnAClipEndingPastItsSourceComesBackWhole() throws {
+        var p = Project()
+        let media = MediaReference(name:"Six",path:"/six.mov",kind:.video,duration:.init(seconds:6),hasAudio:true)
+        p.media = [media]
+        let id = try Editing.add(mediaID:media.id,lane:.v1,at:.zero,to:&p)
+        try Editing.setVideoSettings(aspectRatio:.landscape,frameRate:.init(30000,1001),in:&p)
+        let converted = p, clip = try XCTUnwrap(p.clip(id))
+        XCTAssertGreaterThan(clip.sourceLength,media.duration)                     // 180 frames of 29.97: 6.006 s
+        try Editing.setSpeed(id,to:0.1,in:&p)
+        let slow = try XCTUnwrap(p.clip(id))
+        XCTAssertLessThan((slow.sourceStart+slow.sourceLength-media.duration).ticks,p.frameRate.frame.scaled(by:0.1).ticks)
+        XCTAssertEqual(slow.duration,.init(ticks:p.frameRate.frame.ticks*1799))    // a frame short of 1800 to fit
+        try Editing.setSpeed(id,to:1,in:&p)
+        XCTAssertEqual(p,converted)
+    }
+    /// Edits that give a retimed clip a new source range forget the one it was given, and a
+    /// remembered length that no longer describes the clip is not used.
+    func testTrimSplitAndStaleLengthsStartFromTheCurrentRange() throws {
+        var (p,id) = try fixture()
+        try Editing.trim(id,leading:false,to:.init(seconds:5),in:&p)                // 150 frames
+        try Editing.setSpeed(id,to:4,in:&p)                                        // 37 frames, 148 of source
+        XCTAssertEqual(p.clip(id)?.retimedSourceLength,.init(seconds:5))
+        XCTAssertEqual(try ProjectFile.decode(ProjectFile.encode(p)),p)             // saved with the document
+        var trimmed = p
+        try Editing.trim(id,leading:false,to:p.clip(id)!.end-p.frameRate.frame,in:&trimmed)
+        XCTAssertEqual(Set(trimmed.group(for:id).map(\.retimedSourceLength)),[nil])
+        try Editing.setSpeed(id,to:1,in:&trimmed)
+        XCTAssertEqual(trimmed.clip(id)?.duration,.init(ticks:p.frameRate.frame.ticks*144))
+        var split = p
+        try Editing.split(id,at:.init(ticks:p.frameRate.frame.ticks*20),in:&split)
+        XCTAssertEqual(Set(split.clips.map(\.retimedSourceLength)),[nil])
+        var stale = p
+        for i in stale.clips.indices { stale.clips[i].retimedSourceLength = .init(seconds:9) }
+        try Editing.setSpeed(id,to:1,in:&stale)
+        XCTAssertEqual(stale.clip(id)?.duration,.init(ticks:p.frameRate.frame.ticks*148))
+        // Documents without the remembered length (and older Ara versions) are unaffected.
+        var json = try XCTUnwrap(try JSONSerialization.jsonObject(with:ProjectFile.encode(p)) as? [String:Any])
+        json["clips"] = try XCTUnwrap(json["clips"] as? [[String:Any]]).map { var clip = $0; clip.removeValue(forKey:"retimedSourceLength"); return clip }
+        XCTAssertEqual(Set(try ProjectFile.decode(JSONSerialization.data(withJSONObject:json)).clips.map(\.retimedSourceLength)),[nil])
+    }
+    /// A trim stops at its source's end, also for a source that is not a whole number of frames
+    /// long (10.01 s is 300 frames and a third at 30 fps): the clip is added as 300 frames, and its
+    /// end handle goes no further, at any speed. Only a frame rate change ends a clip past its
+    /// source (holding its last frame): a trim can shorten such a clip, but lengthens it no more.
+    func testATrimStopsAtTheSourcesEndWhenItIsNotAWholeNumberOfFrames() throws {
+        for (seconds,speed) in [(10.01,1.0),(10.021,1.0),(10.0,1.0),(10.01,10.0),(10.01,0.5)] {
+            var p = Project()
+            let media = MediaReference(name:"Phone",path:"/phone.mov",kind:.video,duration:.init(seconds:seconds),hasAudio:true)
+            p.media = [media]
+            let id = try Editing.add(mediaID:media.id,lane:.v1,at:.zero,to:&p)
+            if speed != 1 { try Editing.setSpeed(id,to:speed,in:&p) }
+            let clip = try XCTUnwrap(p.clip(id)), before = p
+            XCTAssertThrowsError(try Editing.trim(id,leading:false,to:clip.end+p.frameRate.frame,in:&p),"\(seconds) s at \(speed)x") {
+                XCTAssertEqual($0.localizedDescription,"Clip exceeds its source duration.")
+            }
+            XCTAssertEqual(p,before)
+            // Shorter and back is fine.
+            try Editing.trim(id,leading:false,to:clip.end-p.frameRate.frame,in:&p)
+            try Editing.trim(id,leading:false,to:clip.end,in:&p)
+            XCTAssertEqual(p.clip(id)?.end,clip.end)
+        }
+        var p = Project()
+        let six = MediaReference(name:"Six",path:"/six.mov",kind:.video,duration:.init(seconds:6),hasAudio:true)
+        p.media = [six]
+        let id = try Editing.add(mediaID:six.id,lane:.v1,at:.zero,to:&p)
+        try Editing.setVideoSettings(aspectRatio:.landscape,frameRate:.init(30000,1001),in:&p)
+        let held = try XCTUnwrap(p.clip(id))
+        XCTAssertGreaterThan(held.sourceStart+held.sourceLength,six.duration)          // 180 frames of 29.97: 6.006 s
+        XCTAssertThrowsError(try Editing.trim(id,leading:false,to:held.end+p.frameRate.frame,in:&p))
+        try Editing.trim(id,leading:false,to:held.end-p.frameRate.frame,in:&p)
+        XCTAssertThrowsError(try Editing.trim(id,leading:false,to:held.end,in:&p),"not back past the source")
     }
     func testSpeedIsSnappedSoOneXStaysExactlyOneX() throws {
         var (p,id) = try fixture()

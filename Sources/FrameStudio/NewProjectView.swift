@@ -5,7 +5,7 @@ struct NewProjectView: View {
     @ObservedObject var store: EditorStore
     @Environment(\.dismiss) private var dismiss
     @FocusState private var nameFocused: Bool
-    @State private var name = "Untitled"
+    @State private var name = String(localized:"Untitled")
     @State private var resolution = 1080
     @State private var aspectRatio = VideoAspectRatio.landscape
     @State private var frameRate = FrameRate(30)
@@ -24,11 +24,13 @@ struct NewProjectView: View {
                 }
                 GridRow {
                     Text("Quality")
+                    // The column fills the sheet, and every picker starts at its leading edge whatever
+                    // width the system gives a pop-up.
                     Picker("Quality",selection:$resolution) {
                         ForEach(OutputQuality.allCases) { quality in
                             Text(verbatim:"\(quality.name) · \(aspectRatio.dimensions(resolution:quality.rawValue))").tag(quality.rawValue)
                         }
-                    }.labelsHidden().frame(maxWidth:.infinity)
+                    }.labelsHidden().frame(maxWidth:.infinity,alignment:.leading)
                 }
                 GridRow {
                     Text("Aspect ratio")
@@ -67,7 +69,7 @@ struct NewProjectView: View {
                     } catch { self.error = error.localizedDescription }
                 }
                 .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                .disabled(name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+                .disabled(!EditorStore.isVisibleName(name))
             }
         }.padding(28).frame(width:470).background(Theme.panel).tint(Theme.accent)
             .onAppear { nameFocused = true }

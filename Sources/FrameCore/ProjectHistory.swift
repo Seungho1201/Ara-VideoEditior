@@ -11,9 +11,12 @@ public struct ProjectHistory: Codable, Equatable, Sendable {
         public var lastOpened: Date
         /// Follows the file if the user moves or renames it in Finder.
         public var bookmark: Data?
+        /// Found in a folder dropped on the start screen, dated by its last change, and not opened
+        /// since. Lists saved before it have none, and count as opened.
+        public var discovered: Bool?
         public var id: String { path }
-        public init(path: String, lastOpened: Date, bookmark: Data? = nil) {
-            self.path = path; self.lastOpened = lastOpened; self.bookmark = bookmark
+        public init(path: String, lastOpened: Date, bookmark: Data? = nil, discovered: Bool? = nil) {
+            self.path = path; self.lastOpened = lastOpened; self.bookmark = bookmark; self.discovered = discovered
         }
     }
     public private(set) var entries: [Entry] = []
@@ -28,23 +31,32 @@ public struct ProjectHistory: Codable, Equatable, Sendable {
     public static func normalized(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
+    /// A project opened or saved goes to the top. Past the limit, files only found go first, the
+    /// oldest of them, then the projects opened longest ago: a dropped folder never pushes a
+    /// project the user opened off the list, now or at a later open.
     public mutating func record(_ path: String, at date: Date, bookmark: Data? = nil) {
         let path = Self.normalized(path)
         let previous = entries.first { $0.path == path }
         entries.removeAll { $0.path == path }
         entries.insert(Entry(path: path, lastOpened: date, bookmark: bookmark ?? previous?.bookmark), at: 0)
-        if entries.count > Self.limit { entries.removeLast(entries.count - Self.limit) }
+        while entries.count > Self.limit { entries.remove(at: entries.lastIndex { $0.discovered == true } ?? entries.count - 1) }
     }
     /// Adds project files found on disk without disturbing ones already listed, then keeps the
-    /// whole list newest first so a folder of old projects does not bury recent work.
-    public mutating func add(discovered: [(path: String, date: Date)]) {
+    /// whole list newest first so a folder of old projects does not bury recent work. Found files
+    /// only take free places (the newest of them first): a folder of recently edited files never
+    /// pushes a project the user opened off the list. Returns how many were added.
+    @discardableResult
+    public mutating func add(discovered: [(path: String, date: Date)]) -> Int {
+        var listed = Set(entries.map(\.path)), found: [Entry] = []
         for item in discovered {
             let path = Self.normalized(item.path)
-            guard !entries.contains(where: { $0.path == path }) else { continue }
-            entries.append(Entry(path: path, lastOpened: item.date))
+            guard listed.insert(path).inserted else { continue }
+            found.append(Entry(path: path, lastOpened: item.date, discovered: true))
         }
+        let added = found.sorted { $0.lastOpened > $1.lastOpened }.prefix(max(0, Self.limit - entries.count))
+        entries += added
         entries.sort { $0.lastOpened > $1.lastOpened }
-        if entries.count > Self.limit { entries.removeLast(entries.count - Self.limit) }
+        return added.count
     }
     /// Attaches a bookmark made later, off the main actor, without touching the order.
     public mutating func setBookmark(_ bookmark: Data, for path: String) {

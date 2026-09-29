@@ -163,10 +163,14 @@ public enum FrameRenderer {
     /// the preview does, only rasterised at 4K instead of enlarged from 1080. The image comes back
     /// in basis units, so it is placed the same at every resolution. Titles without an outline or
     /// shadow at scale 1 keep exactly the raster they always had.
+    /// Drawn titles are kept (see RecentCache): every build draws every title, and a rebuild after
+    /// an edit, or a slider moving back and forth, asks for the same pictures again.
     public static func textImage(_ style: ClipStyle, scale requested: CGFloat = 1) throws -> CIImage {
         let scale = max(1,requested.isFinite ? requested : 1)
         let space = CGColorSpace(name:CGColorSpace.sRGB)!
         let font = FontLibrary.font(style.fontName,size:style.fontSize)       // the default when not available here
+        let key = TitleKey(style,face:CTFontCopyPostScriptName(font) as String,scale:scale)
+        if let drawn = titles.value(for:key) { return drawn }
         let color = CGColor(colorSpace:space,components:[style.red,style.green,style.blue,1])!
         let text = NSAttributedString(string:style.text.isEmpty ? " " : style.text,attributes:[NSAttributedString.Key(kCTFontAttributeName as String):font,NSAttributedString.Key(kCTForegroundColorAttributeName as String):color])
         let framesetter = CTFramesetterCreateWithAttributedString(text)
@@ -188,15 +192,47 @@ public enum FrameRenderer {
         context.translateBy(x:CGFloat(pad),y:CGFloat(pad))
         CTFrameDraw(frame,context)
         guard var image = context.makeImage() else { throw EditError("Cannot create text image.") }
-        if style.hasOutline || style.hasShadow { image = try withEffects(image,drawnIn:context,style,scale:scale) }
+        if style.hasOutline || style.hasShadow { image = try withEffects(image,drawnIn:context,style,scale:scale,face:key.face,pad:pad) }
         let drawn = CIImage(cgImage:image)
         // Back to the 1080 layout's size exactly, also for scales such as 4/3 (QHD) whose
         // pixel sizes round: the picture then fits the same box at every quality.
-        return scale == 1 ? drawn : drawn.transformed(by:CGAffineTransform(scaleX:CGFloat(width)/CGFloat(image.width),y:CGFloat(height)/CGFloat(image.height)))
+        let placed = scale == 1 ? drawn : drawn.transformed(by:CGAffineTransform(scaleX:CGFloat(width)/CGFloat(image.width),y:CGFloat(height)/CGFloat(image.height)))
+        titles.insert(placed,bytes:image.height*image.bytesPerRow,for:key)
+        return placed
     }
+    /// The title's picture when textImage has drawn it already (and it is kept), or nil: nothing is
+    /// drawn here, so the caller can have a big title drawn elsewhere.
+    public static func drawnTextImage(_ style: ClipStyle, scale requested: CGFloat = 1) -> CIImage? {
+        let font = FontLibrary.font(style.fontName,size:style.fontSize)
+        return titles.value(for:TitleKey(style,face:CTFontCopyPostScriptName(font) as String,scale:max(1,requested.isFinite ? requested : 1)))
+    }
+    /// Everything that shapes a title's pixels: its colours, effects and (for the direction of
+    /// its shadow) rotation, and the face actually drawn, so adding a missing font redraws it.
+    struct TitleKey: Hashable {
+        let text: String, face: String, size: Double, colour: [Double], outline: [Double], shadow: [Double], scale: CGFloat
+        init(_ style: ClipStyle, face: String, scale: CGFloat) {
+            text = style.text; self.face = face; size = style.fontSize; colour = [style.red,style.green,style.blue]; self.scale = scale
+            outline = style.hasOutline ? [style.outlineWidth,style.outlineRed,style.outlineGreen,style.outlineBlue] : []
+            shadow = style.hasShadow ? [style.shadowOpacity,style.shadowDistance,style.shadowAngle-style.rotation,style.shadowBlur,style.shadowRed,style.shadowGreen,style.shadowBlue] : []
+        }
+    }
+    /// Beyond the titles the preview shows (found while it holds them), a few big ones or many subtitles.
+    static let titles = RecentCache<TitleKey,CIImage>(budget:64 << 20)
+    /// An outline's coverage depends only on the letters and its width: a colour, shadow or
+    /// rotation change reuses it instead of running the distance transform (tens of milliseconds
+    /// on a large title) again. Kept with its place relative to the letters' origin, so it fits a
+    /// canvas whose shadow margin changed; with a fractional scale the letters' pixels depend on
+    /// that margin, which is then part of the key.
+    struct OutlineKey: Hashable { let text: String, face: String, size: Double, width: Double, scale: CGFloat, pad: Int? }
+    final class OutlineCoverage {
+        let left: Int, bottom: Int, width: Int, height: Int, values: [UInt8]
+        init(left: Int, bottom: Int, width: Int, height: Int, values: [UInt8]) { self.left = left; self.bottom = bottom; self.width = width; self.height = height; self.values = values }
+    }
+    static let outlines = RecentCache<OutlineKey,OutlineCoverage>(budget:32 << 20)
     /// The letters with their outline under them and one shadow under both (never one per part:
-    /// the shadow is cast by the finished picture). `context` holds the letters' pixels.
-    private static func withEffects(_ letters: CGImage, drawnIn context: CGContext, _ style: ClipStyle, scale: CGFloat) throws -> CGImage {
+    /// the shadow is cast by the finished picture). `context` holds the letters' pixels, drawn
+    /// `pad` basis points in from the left and bottom.
+    private static func withEffects(_ letters: CGImage, drawnIn context: CGContext, _ style: ClipStyle, scale: CGFloat, face: String, pad: Int) throws -> CGImage {
         let width = letters.width, height = letters.height, space = CGColorSpace(name:CGColorSpace.sRGB)!
         let all = CGRect(x:0,y:0,width:width,height:height)
         func canvas() throws -> CGContext {
@@ -205,18 +241,29 @@ public enum FrameRenderer {
         }
         var body = letters
         if style.hasOutline {
-            guard let pixels = context.data else { throw EditError("Cannot render text.") }
-            let cover = TitleOutline.coverage(of:pixels.assumingMemoryBound(to:UInt8.self),width:width,height:height,bytesPerRow:context.bytesPerRow,radius:style.outlineWidth*scale)
+            // The letters start `origin` pixels in from the left and the bottom, a whole number at a whole scale.
+            let whole = scale.rounded() == scale, origin = whole ? pad*Int(scale) : 0
+            let key = OutlineKey(text:style.text,face:face,size:style.fontSize,width:style.outlineWidth,scale:scale,pad:whole ? nil : pad)
+            let cover: OutlineCoverage
+            if let known = outlines.value(for:key) { cover = known }
+            else {
+                guard let pixels = context.data else { throw EditError("Cannot render text.") }
+                let values = TitleOutline.coverage(of:pixels.assumingMemoryBound(to:UInt8.self),width:width,height:height,bytesPerRow:context.bytesPerRow,radius:style.outlineWidth*scale)
+                cover = OutlineCoverage(left:-origin,bottom:-origin,width:width,height:height,values:values)
+                outlines.insert(cover,bytes:values.count,for:key)
+            }
             let outlined = try canvas()
             guard let data = outlined.data else { throw EditError("Cannot render text.") }
             // Premultiplied sRGB in the outline's colour, then the letters drawn over it.
             let bytes = data.assumingMemoryBound(to:UInt8.self), rowBytes = outlined.bytesPerRow
             let tint = [style.outlineRed,style.outlineGreen,style.outlineBlue].map { $0*255 }
-            for y in 0..<height {
-                for x in 0..<width {
-                    let c = cover[y*width+x]
+            let left = origin+cover.left, top = height-origin-cover.bottom-cover.height, values = cover.values
+            // Only the part of the coverage that lies on this canvas (a smaller shadow margin crops it).
+            for y in stride(from:max(0,-top),to:min(cover.height,height-top),by:1) {
+                for x in stride(from:max(0,-left),to:min(cover.width,width-left),by:1) {
+                    let c = values[y*cover.width+x]
                     guard c > 0 else { continue }
-                    let i = y*rowBytes+x*4, a = Double(c)/255
+                    let i = (top+y)*rowBytes+(left+x)*4, a = Double(c)/255
                     bytes[i] = UInt8(tint[0]*a+0.5); bytes[i+1] = UInt8(tint[1]*a+0.5); bytes[i+2] = UInt8(tint[2]*a+0.5); bytes[i+3] = c
                 }
             }

@@ -40,13 +40,14 @@ import FrameMedia
         }
     }
     /// Adds every project found in the given files and folders (folders are searched a few levels
-    /// deep). Returns how many new projects were added.
-    @discardableResult func add(from urls: [URL]) async -> Int {
+    /// deep). Returns how many new projects were added, and how many found ones are still not
+    /// listed: found files only take free places, so a full list has no room for them.
+    @discardableResult func add(from urls: [URL]) async -> (added: Int, unlisted: Int) {
         let found = await Task.detached(priority: .userInitiated) { Self.findProjects(in: urls) }.value
-        let before = Set(history.entries.map(\.path))
-        history.add(discovered: found.map { (path: $0.path, date: $0.date) })
+        let added = history.add(discovered: found.map { (path: $0.path, date: $0.date) })
         persist(); refresh()
-        return history.entries.filter { !before.contains($0.path) }.count
+        let listed = Set(history.entries.map(\.path))
+        return (added, Set(found.map { ProjectHistory.normalized($0.path) }).subtracting(listed).count)
     }
     private struct Found: Sendable { let path: String; let date: Date }
     private nonisolated static func findProjects(in urls: [URL]) -> [Found] {
@@ -74,6 +75,16 @@ import FrameMedia
     }
     func remove(_ path: String) {
         history.remove(path); status[path] = nil; posters[path] = nil; persist()
+    }
+    /// The open project was renamed or moved in Finder and saved there: its card follows it
+    /// instead of turning into "File not found".
+    func relocate(_ old: URL, to new: URL) {
+        // The old file is gone, so its path keeps the spelling it has: it was listed while it
+        // existed, when /private/var and /var both came out as /var.
+        var path = ProjectHistory.normalized(old.path)
+        if path.hasPrefix("/private/"), !history.entries.contains(where: { $0.path == path }) { path.removeFirst("/private".count) }
+        history.relocate(path, to: new.path, bookmark: nil); persist()
+        status[path] = nil; posters[path] = nil
     }
     private func persist() {
         if let data = try? JSONEncoder().encode(history) { defaults.set(data, forKey: Self.key) }

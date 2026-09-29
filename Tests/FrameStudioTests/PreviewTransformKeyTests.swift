@@ -70,6 +70,31 @@ final class PreviewTransformKeyTests: XCTestCase {
         }
     }
 
+    /// Return set for a command (as an earlier Ara let Snapping have it) still finishes the
+    /// transform first, as in the timeline; with nothing to finish it is that command. The preview
+    /// goes by the store's shortcuts.
+    @MainActor func testTheFixedKeysComeBeforeTheShortcutsSetInSettings() async throws {
+        try await withOverlay { store, overlay, title in
+            let suite = "ara.tests.preview-keys.\(UUID().uuidString)", saved = UserDefaults.standard.object(forKey:"timeline.snapping")
+            defer {
+                UserDefaults(suiteName:suite)?.removePersistentDomain(forName:suite)
+                if let saved { UserDefaults.standard.set(saved,forKey:"timeline.snapping") } else { UserDefaults.standard.removeObject(forKey:"timeline.snapping") }
+            }
+            store.shortcuts = ShortcutSettings(defaults:UserDefaults(suiteName:suite)!)
+            store.shortcuts.set(Shortcut("return"),for:.snapping)
+            let snapping = store.snapping
+            overlay.keyDown(with:key(36,"\r",in:overlay))
+            XCTAssertNil(store.previewTransformID,"Return finishes"); XCTAssertEqual(store.snapping,snapping,"and toggles nothing")
+            overlay.keyDown(with:key(36,"\r",in:overlay))
+            XCTAssertNotEqual(store.snapping,snapping,"with nothing to finish it is the shortcut")
+            // Esc cancels, whatever it is set for.
+            store.shortcuts.set(Shortcut("escape"),for:.snapping)
+            store.previewTransformID = title.id; let now = store.snapping
+            overlay.keyDown(with:key(53,"\u{1b}",in:overlay))
+            XCTAssertNil(store.previewTransformID); XCTAssertEqual(store.snapping,now)
+        }
+    }
+
     @MainActor func testReturnInTheTimelineFinishesTheTransformToo() async throws {
         try await withOverlay { store, overlay, title in
             let canvas = TimelineCanvas(frame:NSRect(x:0,y:0,width:800,height:300))
@@ -115,6 +140,32 @@ final class PreviewTransformKeyTests: XCTestCase {
             XCTAssertNil(overlay.guides.vertical); XCTAssertNil(overlay.guides.horizontal)
             XCTAssertNotEqual(store.project.clips.first { $0.id == title.id }?.style.x ?? 0,0,"not pulled to the middle")
             overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:402,y:227),in:overlay))
+        }
+    }
+
+    @MainActor func testTheAlignmentPointIsPlacedWithAClickAndCatchesACorner() async throws {
+        try await withOverlay { store, overlay, title in
+            store.editAnchor(title)
+            XCTAssertEqual(store.anchorEditID,title.id); XCTAssertEqual(store.previewTransformID,title.id)
+            var ticks: [NSHapticFeedbackManager.FeedbackPattern] = []
+            overlay.performHaptic = { ticks.append($0) }
+            let saved = UserDefaults.standard.object(forKey:"timeline.scrubHaptics"); store.scrubHaptics = true
+            defer { if let saved { UserDefaults.standard.set(saved,forKey:"timeline.scrubHaptics") } else { UserDefaults.standard.removeObject(forKey:"timeline.scrubHaptics") } }
+            let before = store.project.clips[0].style
+            // The title's top-left corner, in the 800×450 overlay (the canvas fills it).
+            let size = try XCTUnwrap(store.previewSourceSize(for:title))
+            let corner = VisualGeometry(sourceSize:size,canvasSize:CGSize(width:800,height:450),style:before,isText:true).corners[0]
+            overlay.mouseDown(with:mouse(.leftMouseDown,CGPoint(x:corner.x+4,y:corner.y+3),in:overlay))
+            overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:corner.x+4,y:corner.y+3),in:overlay))
+            let placed = store.project.clips[0].style
+            XCTAssertEqual(placed.anchorX,-0.5); XCTAssertEqual(placed.anchorY,-0.5)
+            XCTAssertEqual(placed.x,before.x); XCTAssertEqual(placed.y,before.y,"the title stays put")
+            XCTAssertEqual(ticks,[.alignment],"a tick for catching the corner")
+            store.undo(); XCTAssertFalse(store.project.clips[0].style.hasAnchor,"one undo step")
+            // Still placing the point; Return ends that but keeps the transform.
+            XCTAssertEqual(store.anchorEditID,title.id)
+            overlay.keyDown(with:key(36,"\r",in:overlay))
+            XCTAssertNil(store.anchorEditID); XCTAssertEqual(store.previewTransformID,title.id)
         }
     }
 }

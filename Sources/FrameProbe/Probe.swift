@@ -11,7 +11,7 @@ actor ProgressFlag {
 }
 
 @main struct FrameProbe {
-    static func require(_ condition:Bool,_ message:String) throws { if !condition { throw EditError("CHECK FAILED: "+message) } }
+    static func require(_ condition:Bool,_ message:String) throws { if !condition { throw EditError(verbatim:"CHECK FAILED: "+message) } }
     static func main() async throws {
         let args = CommandLine.arguments
         if args.count >= 4, args[1] == "snapshot-roundtrip" {
@@ -20,7 +20,8 @@ actor ProgressFlag {
             try await snapshotRoundTrip(source:source,output:output); return
         }
         guard args.count >= 4, ["smoke","snapshot","video-settings","fonts","titles"].contains(args[1]) else {
-            print("Usage: FrameProbe <smoke|snapshot|video-settings|titles> <fixture-directory> <output-directory>\n       FrameProbe fonts <fixture-directory> <output-directory> [font files or ZIPs…]\n       FrameProbe snapshot-roundtrip <media-file|--chart> <output-directory>"); return
+            print("Usage: FrameProbe <smoke|snapshot|video-settings|titles> <fixture-directory> <output-directory>\n       FrameProbe fonts <fixture-directory> <output-directory> [font files or ZIPs…]\n       FrameProbe snapshot-roundtrip <media-file|--chart> <output-directory>")
+            exit(64)                    // EX_USAGE: a misspelled mode must not pass as a run that checked nothing
         }
         let fixtures = URL(fileURLWithPath:args[2],isDirectory:true), output = URL(fileURLWithPath:args[3],isDirectory:true)
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
@@ -473,7 +474,7 @@ actor ProgressFlag {
         do {
             try await exporter.export(audioBundle,to:blockedDestination) { _ in }
             throw EditError("Unexpected success replacing a directory")
-        } catch is POSIXError { }
+        } catch let error as EditError where error.message.contains("“blocked.mp4” cannot be replaced") { }
         try require(try String(contentsOf:sentinel,encoding:.utf8) == "preserve","failed export preserves destination")
         try FileManager.default.removeItem(at:blockedDestination)
         print("PASS failed export preserves destination and removes working files")
@@ -532,7 +533,7 @@ actor ProgressFlag {
             if CMSampleBufferGetPresentationTimeStamp(sample) <= time.cmTime { shown = buffer } else { break }
         }
         guard let shown, let image = FrameRenderer.makeContext().createCGImage(CIImage(cvPixelBuffer:shown),from:CGRect(x:0,y:0,width:CVPixelBufferGetWidth(shown),height:CVPixelBufferGetHeight(shown))) else {
-            throw EditError("CHECK FAILED: no composed frame at \(time.seconds) s")
+            throw EditError(verbatim:"CHECK FAILED: no composed frame at \(time.seconds) s")
         }
         return image
     }

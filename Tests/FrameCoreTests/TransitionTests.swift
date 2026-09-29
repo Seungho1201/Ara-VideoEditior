@@ -216,6 +216,24 @@ final class TransitionTests: XCTestCase {
         XCTAssertEqual(p.transitions.filter { $0.from == a }.map(\.kind),[.wipe])
     }
 
+    /// With the clip's other transition taking all of it, the refusal names that as the cause
+    /// rather than calling a 4 s clip too short.
+    func testNoRoomBecauseOfTheOtherTransitionSaysSo() throws {
+        var (p,a,b) = try cutProject()
+        try Editing.setTransition(.crossDissolve,duration:.init(seconds:4),from:nil,to:a,in:&p)   // A's whole length
+        XCTAssertEqual(p.transition(into:a)?.duration,.init(seconds:4))
+        let before = p
+        XCTAssertThrowsError(try Editing.setTransition(.wipe,from:a,to:nil,in:&p)) { error in
+            let message = (error as? EditError)?.message ?? ""
+            XCTAssertTrue(message.contains("Another transition on this clip"),message)
+        }
+        XCTAssertEqual(p,before)
+        // The same across the cut after A: its fade in leaves A nothing to give.
+        XCTAssertThrowsError(try Editing.setTransition(.crossDissolve,from:a,to:b,in:&p)) { error in
+            XCTAssertEqual((error as? EditError)?.message,"Another transition on one of these clips leaves no room here. Shorten that transition first.")
+        }
+        XCTAssertEqual(p,before)
+    }
     func testTransitionsFollowTheirClipsThroughEdits() throws {
         var (p,a,b) = try cutProject()
         try Editing.setTransition(.crossDissolve,from:a,to:b,in:&p)

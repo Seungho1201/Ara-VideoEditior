@@ -158,7 +158,7 @@ struct LauncherView: View {
             .frame(height:132).clipped()
             VStack(alignment:.leading,spacing:5) {
                 Text(title(entry,status)).font(.system(size:13,weight:.semibold)).lineLimit(1)
-                Text(detail(status)).font(.system(size:10)).foregroundStyle(detailColor(status)).lineLimit(1)
+                Text(Self.detail(status)).font(.system(size:10)).foregroundStyle(detailColor(status)).lineLimit(1)
                 Text(location(entry.path)).font(.system(size:9)).foregroundStyle(Theme.muted.opacity(0.8)).lineLimit(1).truncationMode(.middle)
             }.padding(12)
         }
@@ -177,7 +177,7 @@ struct LauncherView: View {
             Button("Remove from List") { registry.remove(entry.path); if selection == entry.path { selection = nil } }
         }
         .accessibilityElement(children:.combine)
-        .accessibilityLabel("\(title(entry,status)), \(detail(status))")
+        .accessibilityLabel(Text(verbatim:"\(title(entry,status)), \(Self.detail(status))"))
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { if openable { store.openFromLauncher(entry.path) } }
     }
@@ -199,15 +199,17 @@ struct LauncherView: View {
         if case let .ready(summary, _)? = status { return summary.name }
         return URL(fileURLWithPath:entry.path).deletingPathExtension().lastPathComponent
     }
-    private func detail(_ status: ProjectRegistry.Status?) -> String {
+    /// A card's second line, in Ara's language (the relative date follows it too).
+    static func detail(_ status: ProjectRegistry.Status?) -> String {
         switch status {
         case let .ready(summary, modified)?:
-            let clips = summary.clipCount == 1 ? "1 clip" : "\(summary.clipCount) clips"
-            guard let modified else { return clips }
-            return "\(clips) · Edited \(modified.formatted(.relative(presentation:.named)))"
-        case .missing?: return "File not found · Right-click to remove"
-        case let .unreadable(message)?: return "Can’t open · \(message)"
-        case .loading?, nil: return "Reading…"
+            let count = summary.clipCount
+            guard let modified else { return count == 1 ? String(localized:"1 clip") : String(localized:"\(count) clips") }
+            let edited = modified.formatted(.relative(presentation:.named))
+            return count == 1 ? String(localized:"1 clip · Edited \(edited)") : String(localized:"\(count) clips · Edited \(edited)")
+        case .missing?: return String(localized:"File not found · Right-click to remove")
+        case let .unreadable(message)?: return String(localized:"Can’t open · \(message)")
+        case .loading?, nil: return String(localized:"Reading…")
         }
     }
     private func detailColor(_ status: ProjectRegistry.Status?) -> Color {

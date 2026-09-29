@@ -1,7 +1,9 @@
 import Foundation
 import CoreVideo
+import CoreImage
 import VideoToolbox
 @preconcurrency import AVFoundation
+import FrameCore
 
 /// Brings decoded source frames to 8-bit Rec.709 BGRA, the one conversion every path shares.
 ///
@@ -72,6 +74,41 @@ final class SourceFrameConverter: @unchecked Sendable {
         return pool
     }
 
+    /// Held frames (see `heldFrame`) as Core Image images, by file and time. Each is decoded only
+    /// once, four at a time (one after another, 40 clips took over a second to build), and not
+    /// at all when an earlier build decoded it: a rebuild after an edit, a snapshot or an export
+    /// finds the preview's. A file's size and date are part of its key: a changed file is read again.
+    static func heldFrames(_ wanted: [(url: URL, time: CMTime)]) async -> [HeldFrameRequest:CIImage] {
+        var found: [HeldFrameRequest:CIImage] = [:], missing: [(HeldFrameRequest,HeldFrameKey,URL,CMTime)] = []
+        var seen = Set<HeldFrameRequest>(), files: [URL:FileStamp] = [:]
+        for (url,time) in wanted {
+            let request = HeldFrameRequest(url,time)
+            guard seen.insert(request).inserted else { continue }
+            if files[url] == nil { files[url] = FileStamp(url) }
+            let key = HeldFrameKey(path:url.path,file:files[url]!,ticks:request.ticks)
+            if let image = held.value(for:key) { found[request] = image } else { missing.append((request,key,url,time)) }
+        }
+        await withTaskGroup(of:(HeldFrameRequest,HeldFrameKey,Unchecked<CIImage?>).self) { group in
+            var next = missing.makeIterator()
+            func decode(_ item: (HeldFrameRequest,HeldFrameKey,URL,CMTime)) -> @Sendable () async -> (HeldFrameRequest,HeldFrameKey,Unchecked<CIImage?>) {
+                let (request,key,url,time) = item
+                return { (request,key,Unchecked(await heldFrame(of:url,at:time).map { CIImage(cvPixelBuffer:$0) })) }
+            }
+            for _ in 0..<4 { if let item = next.next() { group.addTask(operation:decode(item)) } }
+            while let (request,key,image) = await group.next() {
+                if let image = image.value, let buffer = image.pixelBuffer {
+                    found[request] = image
+                    held.insert(image,bytes:CVPixelBufferGetDataSize(buffer),for:key)
+                }
+                if let item = next.next() { group.addTask(operation:decode(item)) }
+            }
+        }
+        return found
+    }
+    /// About fifteen Full HD frames beyond those the preview's composition holds (found while it does).
+    static let held = RecentCache<HeldFrameKey,CIImage>(budget:128 << 20)
+    struct HeldFrameKey: Hashable { let path: String; let file: FileStamp; let ticks: Int64 }
+
     /// The source frame shown at `time` (source clock), decoded natively and converted like the
     /// compositor's frames, for a held frame. Nil when the track has no frame there.
     static func heldFrame(of url: URL, at time: CMTime) async -> CVPixelBuffer? {
@@ -118,4 +155,19 @@ final class SourceFrameConverter: @unchecked Sendable {
         // A decode that failed part-way leaves an earlier frame; no held frame beats a wrong one.
         return reader.status == .failed ? nil : shown
     }
+}
+
+/// A file's size and modification date: a file replaced or cut short since has another.
+struct FileStamp: Hashable, Sendable {
+    let size: Int64?, modified: Date?
+    init(_ url: URL) {
+        let attributes = try? FileManager.default.attributesOfItem(atPath:url.path)
+        size = (attributes?[.size] as? NSNumber)?.int64Value; modified = attributes?[.modificationDate] as? Date
+    }
+}
+
+/// A held frame a build shows: the picture at `time` (to a tick) in the file at `url`.
+struct HeldFrameRequest: Hashable, Sendable {
+    let path: String, ticks: Int64
+    init(_ url: URL, _ time: CMTime) { path = url.path; ticks = MediaTime(time).ticks }
 }

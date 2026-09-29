@@ -186,7 +186,8 @@ final class FontLibraryTests: XCTestCase {
         for _ in 0..<1000 where store.isBuilding || store.player.currentItem == nil { try await Task.sleep(for:.milliseconds(10)) }
         let fallback = try XCTUnwrap(store.previewLayerImage(for:title))
         store.addFonts([file],applyToSelection:false)
-        for _ in 0..<1000 where store.isAddingFonts || store.isBuilding { try await Task.sleep(for:.milliseconds(10)) }
+        // Redrawn off the main actor, then put in the preview.
+        for _ in 0..<1000 where store.isAddingFonts || store.isBuilding || store.isDrawingTitles { try await Task.sleep(for:.milliseconds(10)) }
         XCTAssertEqual(store.missingFonts,[])
         let redrawn = try XCTUnwrap(store.previewLayerImage(for:title))
         XCTAssertNotEqual(pixels(redrawn),pixels(fallback))

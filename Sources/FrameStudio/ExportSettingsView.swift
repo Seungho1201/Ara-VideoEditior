@@ -22,9 +22,11 @@ struct ExportSettingsView: View {
             Grid(alignment:.leading,horizontalSpacing:24,verticalSpacing:16) {
                 GridRow {
                     Text("Aspect ratio")
+                    // The column fills the sheet, and every picker starts at its leading edge whatever
+                    // width the system gives a pop-up.
                     Picker("Aspect ratio",selection:$aspectRatio) {
                         ForEach(VideoAspectRatio.allCases) { Text(LocalizedStringKey($0.name)).tag($0) }
-                    }.labelsHidden().frame(maxWidth:.infinity)
+                    }.labelsHidden().frame(maxWidth:.infinity,alignment:.leading)
                 }
                 GridRow {
                     Text("Frame rate")

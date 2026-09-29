@@ -53,6 +53,49 @@ final class ProjectHistoryTests: XCTestCase {
         XCTAssertEqual(history.entries.map(\.path), ["/p/recent.framestudio", "/p/newer.framestudio", "/p/old.framestudio"])
         XCTAssertEqual(history.entries.first?.lastOpened, t0 + 100)
     }
+    /// Files found in a dropped folder only take free places: projects the user opened stay listed
+    /// however many newer files the folder holds.
+    func testDiscoveredFilesNeverPushOutOpenedProjects() {
+        var history = ProjectHistory()
+        for i in 0..<10 { history.record("/opened/\(i).framestudio", at: t0 + Double(i)) }            // a week ago
+        let found = (0..<60).map { (path: "/dropped/\($0).framestudio", date: t0 + 7 * 86400 + Double($0)) }
+        XCTAssertEqual(history.add(discovered: found), ProjectHistory.limit - 10)
+        XCTAssertEqual(history.entries.count, ProjectHistory.limit)
+        XCTAssertEqual(history.entries.filter { $0.path.hasPrefix("/opened/") }.count, 10)
+        // The newest found files took the free places, and the list is still newest first.
+        XCTAssertTrue(history.entries.contains { $0.path == "/dropped/59.framestudio" })
+        XCTAssertFalse(history.entries.contains { $0.path == "/dropped/0.framestudio" })
+        XCTAssertEqual(history.entries.map(\.lastOpened), history.entries.map(\.lastOpened).sorted(by: >))
+        // A full list takes no more, and loses nothing.
+        let full = history
+        XCTAssertEqual(history.add(discovered: [(path: "/late/new.framestudio", date: t0 + 99 * 86400)]), 0)
+        XCTAssertEqual(history, full)
+    }
+    /// Once a dropped folder has filled the list, each project opened later pushes off a file that
+    /// was only found (the oldest), never one the user opened. A found file opened is an opened one.
+    func testOpeningProjectsAfterADropPushesOffFoundFilesFirst() throws {
+        var history = ProjectHistory()
+        for i in 0..<10 { history.record("/opened/\(i).framestudio", at: t0 + Double(i)) }            // a week ago
+        history.add(discovered: (0..<60).map { (path: "/dropped/\($0).framestudio", date: t0 + 7 * 86400 + Double($0)) })
+        history.record("/dropped/59.framestudio", at: t0 + 8 * 86400)                                  // one of them opened
+        for i in 0..<12 { history.record("/new/\(i).framestudio", at: t0 + 8 * 86400 + 1 + Double(i)) }
+        XCTAssertEqual(history.entries.count, ProjectHistory.limit)
+        XCTAssertEqual(history.entries.filter { $0.path.hasPrefix("/opened/") }.count, 10)
+        XCTAssertEqual(history.entries.filter { $0.path.hasPrefix("/new/") }.count, 12)
+        XCTAssertTrue(history.entries.contains { $0.path == "/dropped/59.framestudio" && $0.discovered == nil })
+        XCTAssertFalse(history.entries.contains { $0.path == "/dropped/10.framestudio" }, "the oldest found files went first")
+        XCTAssertTrue(history.entries.contains { $0.path == "/dropped/58.framestudio" })
+        // With no found file left, the project opened longest ago goes, as before.
+        for i in 0..<37 { history.record("/later/\(i).framestudio", at: t0 + 9 * 86400 + Double(i)) }
+        XCTAssertFalse(history.entries.contains { $0.discovered == true })
+        XCTAssertEqual(history.entries.filter { $0.path.hasPrefix("/opened/") }.count, 10)
+        history.record("/last.framestudio", at: t0 + 10 * 86400)
+        XCTAssertFalse(history.entries.contains { $0.path == "/opened/0.framestudio" })
+        // Lists saved before the mark count every project as opened, and keep the mark once saved.
+        let old = try JSONDecoder().decode(ProjectHistory.self, from: Data(#"{"entries":[{"path":"/p/a.framestudio","lastOpened":0}]}"#.utf8))
+        XCTAssertEqual(old.entries.map(\.discovered), [nil])
+        XCTAssertEqual(try JSONDecoder().decode(ProjectHistory.self, from: JSONEncoder().encode(history)), history)
+    }
     func testLateBookmarkAttachesWithoutReordering() {
         var history = ProjectHistory()
         history.record("/p/b.framestudio", at: t0)

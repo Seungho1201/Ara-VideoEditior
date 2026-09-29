@@ -41,4 +41,6 @@ public struct FrameRate: Codable, Hashable, Sendable, Identifiable {
         return String(format: "%02lld:%02lld:%02lld:%02lld", frames / (nominal * 3600), frames / (nominal * 60) % 60, frames / nominal % 60, frames % nominal)
     }
     public static let supported: [Self] = [.init(24), .init(25), .init(30), .init(50), .init(60), .init(24000,1001), .init(30000,1001), .init(60000,1001)]
+    /// The longest frame of any supported rate (23.976 fps).
+    public static let longestFrame = supported.map(\.frame).max()!
 }

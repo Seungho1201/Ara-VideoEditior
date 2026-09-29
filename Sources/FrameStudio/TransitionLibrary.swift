@@ -9,20 +9,7 @@ struct SidePanel: View {
     @ObservedObject var store: EditorStore
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
-            HStack(spacing:16) {
-                ForEach(EditorStore.SidePanel.allCases,id:\.self) { tab in
-                    let tip = tab == .inspector ? "Settings of the selected clip" : "Transitions: drag onto a cut"
-                    Button { store.sidePanel = tab } label: {
-                        Text(LocalizedStringKey(tab.rawValue)).font(.system(size:10,weight:.bold)).tracking(1.7)
-                            .foregroundStyle(store.sidePanel == tab ? Color.primary : Theme.muted)
-                            .padding(.bottom,4)
-                            .overlay(alignment:.bottom) { Rectangle().fill(store.sidePanel == tab ? Theme.accent : .clear).frame(height:2) }
-                    }.buttonStyle(.plain).accessibilityAddTraits(store.sidePanel == tab ? .isSelected : [])
-                    .helpTip(tip,.below)
-                }
-                Spacer()
-                Image(systemName:store.sidePanel == .inspector ? "slider.horizontal.3" : "square.on.square").foregroundStyle(Theme.muted)
-            }.padding(.horizontal,16).padding(.top,16).padding(.bottom,12)
+            SidePanelTabs(store:store)
             Divider()
             switch store.sidePanel {
             case .inspector: InspectorPanel(store:store)
@@ -32,9 +19,35 @@ struct SidePanel: View {
     }
 }
 
+/// The side panel's tabs. The titles take the room first, each on one line: at the panel's
+/// narrowest they fit whole (a longer one would shrink a little), never broken mid-word.
+struct SidePanelTabs: View {
+    @ObservedObject var store: EditorStore
+    var body: some View {
+        HStack(spacing:0) {
+            HStack(spacing:16) {
+                ForEach(EditorStore.SidePanel.allCases,id:\.self) { tab in
+                    let tip = tab == .inspector ? "Settings of the selected clip" : "Transitions: drag onto a cut"
+                    Button { store.sidePanel = tab } label: {
+                        Text(LocalizedStringKey(tab.rawValue)).font(.system(size:10,weight:.bold)).tracking(1.7)
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                            .foregroundStyle(store.sidePanel == tab ? Color.primary : Theme.muted)
+                            .padding(.bottom,4)
+                            .overlay(alignment:.bottom) { Rectangle().fill(store.sidePanel == tab ? Theme.accent : .clear).frame(height:2) }
+                    }.buttonStyle(.plain).accessibilityAddTraits(store.sidePanel == tab ? .isSelected : [])
+                    .helpTip(tip,.below)
+                }
+            }.layoutPriority(1)
+            Spacer(minLength:12)
+            Image(systemName:store.sidePanel == .inspector ? "slider.horizontal.3" : "square.on.square").foregroundStyle(Theme.muted)
+        }.padding(.horizontal,16).padding(.top,16).padding(.bottom,12)
+    }
+}
+
 /// Every transition by category, with a still of it part-way through that plays when hovered.
 /// Drag one onto a cut or a clip's edge in the timeline, or click it to put it on the selected
-/// clip's start or end.
+/// clip's start or end. With a transition selected (one just added included), a click swaps its
+/// kind, so kinds can be tried one after another.
 struct TransitionLibrary: View {
     @ObservedObject var store: EditorStore
     @State private var atEnd = true
@@ -43,7 +56,13 @@ struct TransitionLibrary: View {
     var body: some View {
         ScrollView {
             VStack(alignment:.leading,spacing:14) {
-                if let clip = store.selectedClip, clip.lane.isVideo {
+                if let transition = store.selectedTransition {
+                    VStack(alignment:.leading,spacing:6) {
+                        Text("Replace \(transition.kind.displayName)").font(.system(size:11,weight:.medium)).lineLimit(1)
+                        Text("Click another transition to try it in its place.")
+                            .font(.system(size:11)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
+                    }
+                } else if let clip = store.selectedClip, clip.lane.isVideo {
                     VStack(alignment:.leading,spacing:6) {
                         Text("Apply to \(clip.name)").font(.system(size:11,weight:.medium)).lineLimit(1)
                         Picker("",selection:$atEnd) { Text(edgeLabel(end:false)).tag(false); Text(edgeLabel(end:true)).tag(true) }
@@ -64,7 +83,9 @@ struct TransitionLibrary: View {
                                     // AppKit owns the entire mouse sequence, just as it does for
                                     // media cards. A SwiftUI Button's press must not consume the drag.
                                     .overlay { TransitionDragHandle(kind:kind,apply:{ apply(kind) }).accessibilityHidden(true) }
-                                    .help(store.selectedClip == nil ? "Drag onto the timeline" : "Click to add to the selected clip's \(atEnd ? "end" : "start") · or drag onto the timeline")
+                                    .help(store.selectedTransition != nil ? "Click to put it in place of the selected transition · or drag onto the timeline"
+                                          : store.selectedClip == nil ? "Drag onto the timeline"
+                                          : atEnd ? "Click to add to the selected clip's end · or drag onto the timeline" : "Click to add to the selected clip's start · or drag onto the timeline")
                                     .accessibilityLabel("\(kind.displayName) transition")
                             }
                         }
@@ -74,11 +95,14 @@ struct TransitionLibrary: View {
         }
     }
     private func edgeLabel(end: Bool) -> String {
-        guard let edge = store.transitionEdge(ofSelectedClipAtEnd:end) else { return end ? "End" : "Start" }
+        guard let edge = store.transitionEdge(ofSelectedClipAtEnd:end) else { return end ? String(localized:"End") : String(localized:"Start") }
         let cut = edge.from != nil && edge.to != nil
-        return end ? (cut ? "End · to next" : "End · fade out") : (cut ? "Start · from previous" : "Start · fade in")
+        return end ? (cut ? String(localized:"End · to next") : String(localized:"End · fade out"))
+                   : (cut ? String(localized:"Start · from previous") : String(localized:"Start · fade in"))
     }
     private func apply(_ kind: TransitionKind) {
+        // Same edge, length and direction: only the kind changes.
+        if store.selectedTransition != nil { store.updateSelectedTransition(kind:kind); return }
         guard let edge = store.transitionEdge(ofSelectedClipAtEnd:atEnd) else {
             store.status = String(localized:"Select a video, image or title clip first, or drag \(kind.displayName) onto the timeline"); return
         }
@@ -100,6 +124,18 @@ struct TransitionLibrary: View {
             .overlay(RoundedRectangle(cornerRadius:4).stroke(hovered == kind ? Theme.accent : .white.opacity(0.12),lineWidth:1))
             Text(kind.displayName).font(.system(size:10,weight:.medium)).lineLimit(1)
         }.contentShape(Rectangle())
+    }
+}
+
+extension TransitionDirection {
+    /// The direction as the inspector names it to VoiceOver, in Ara's language.
+    var displayName: String {
+        switch self {
+        case .left: String(localized:"Left")
+        case .right: String(localized:"Right")
+        case .up: String(localized:"Up")
+        case .down: String(localized:"Down")
+        }
     }
 }
 

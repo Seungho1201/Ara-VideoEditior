@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import FrameMedia
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     weak var store: EditorStore?
@@ -37,13 +36,12 @@ import FrameMedia
     }
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let store else { pendingURLs.append(contentsOf:urls); return }
-        // Fonts always go to the font library, also when a project is opened with them.
-        let fonts = urls.filter(FontLibrary.accepts)
-        if !fonts.isEmpty { store.addFonts(fonts,applyToSelection:false) }
-        let urls = urls.filter { !FontLibrary.accepts($0) }
-        if let url = urls.first(where: { $0.pathExtension == "framestudio" }) { store.openProject(url) }
-        else if !urls.isEmpty { store.importFiles(urls) }
+        // Fonts go to the font library; a project opens, and media opened with it go into it.
+        store.importFiles(urls)
     }
+    /// Sources moved or deleted in Finder while Ara was in the background are found again (or
+    /// marked missing) now, not when the next edit fails.
+    func applicationDidBecomeActive(_ notification: Notification) { store?.refreshSources() }
 }
 
 @main struct AraApp: App {
@@ -74,8 +72,9 @@ import FrameMedia
         .restorationBehavior(.disabled)
         .commands {
             CommandGroup(replacing:.newItem) {
-                Button("New Project") { store.newProject() }.keyboardShortcut(shortcuts.keyboardShortcut(.newProject)).disabled(store.showNewProjectSheet)
-                Button("Open Project…") { store.chooseOpen() }.keyboardShortcut(shortcuts.keyboardShortcut(.openProject)).disabled(store.showNewProjectSheet)
+                // Off while a sheet is up; during an export they say why they wait instead.
+                Button("New Project") { store.newProject() }.keyboardShortcut(shortcuts.keyboardShortcut(.newProject)).disabled(store.showNewProjectSheet || store.showExportSheet)
+                Button("Open Project…") { store.chooseOpen() }.keyboardShortcut(shortcuts.keyboardShortcut(.openProject)).disabled(store.showNewProjectSheet || store.showExportSheet)
                 Button("Start Screen") { store.showStartScreen() }.keyboardShortcut(shortcuts.keyboardShortcut(.startScreen))
                     .disabled(store.showLauncher || store.showNewProjectSheet || store.isExporting || store.isCapturingSnapshot)
                 Divider()
@@ -84,22 +83,23 @@ import FrameMedia
                     Button("Save Project") { store.save() }.keyboardShortcut(shortcuts.keyboardShortcut(.save))
                     Button("Save Project As…") { store.save(as:true) }.keyboardShortcut(shortcuts.keyboardShortcut(.saveAs))
                     Divider()
-                    Button("Import Media…") { store.chooseImport() }.keyboardShortcut(shortcuts.keyboardShortcut(.importMedia))
+                    Button("Import Media…") { store.chooseImport() }.keyboardShortcut(shortcuts.keyboardShortcut(.importMedia)).disabled(store.editingSuspended)
                     Button("Add Fonts…") { store.chooseFonts() }.disabled(store.isAddingFonts)
                     Button("Export Movie…") { store.showExportSheet = true }.keyboardShortcut(shortcuts.keyboardShortcut(.exportMovie)).disabled(store.isExporting || store.isCapturingSnapshot)
                     Button("Save Timeline Snapshot…") { store.chooseSnapshot() }.keyboardShortcut(shortcuts.keyboardShortcut(.snapshot)).disabled(!store.canCaptureSnapshot)
                 }.disabled(store.showLauncher || store.showNewProjectSheet)
             }
             CommandGroup(replacing:.undoRedo) {
-                Button("Undo \(EditorStore.localizedAction(store.undoName))") { store.undo() }.keyboardShortcut(shortcuts.keyboardShortcut(.undo)).disabled(!store.canUndo || store.showLauncher || store.showNewProjectSheet)
-                Button("Redo \(EditorStore.localizedAction(store.history.redoName))") { store.redo() }.keyboardShortcut(shortcuts.keyboardShortcut(.redo)).disabled(!store.canRedo || store.showLauncher || store.showNewProjectSheet)
+                Button("Undo \(EditorStore.localizedAction(store.undoName))") { store.undo() }.keyboardShortcut(shortcuts.keyboardShortcut(.undo)).disabled(!store.canUndo || store.editingSuspended)
+                Button("Redo \(EditorStore.localizedAction(store.history.redoName))") { store.redo() }.keyboardShortcut(shortcuts.keyboardShortcut(.redo)).disabled(!store.canRedo || store.editingSuspended)
             }
             CommandGroup(before:.help) {
                 Button("Show Tips") { store.showHelp.toggle() }.disabled(store.showLauncher || store.showNewProjectSheet)
             }
             CommandMenu("Timeline") {
-                // Unmodified keys (Space, arrows, Delete, N) must not reach a project the user cannot see,
-                // and must not steal typing from the start screen's search field.
+                // Unmodified keys (Space, arrows, Delete, N) must not reach a project the user cannot see
+                // (the start screen, a sheet, an export) or is reading tips over, and must not steal
+                // typing from the start screen's search field.
                 Group {
                 Button("Play / Pause") { store.togglePlayback() }.keyboardShortcut(shortcuts.keyboardShortcut(.playPause))
                 // Arrow equivalents win over any focused text view, so they yield while a title is edited.
@@ -109,12 +109,12 @@ import FrameMedia
                 Button("Go to Selected Clip End") { store.goToSelectedClipEnd() }.keyboardShortcut(shortcuts.keyboardShortcut(.clipEnd)).disabled(store.selectedClip == nil || store.isEditingText)
                 Divider()
                 Button("Split at Playhead") { store.split() }.keyboardShortcut(shortcuts.keyboardShortcut(.split)).disabled(store.selectedClip == nil)
-                Button("Delete Linked Selection") { store.deleteSelection() }.keyboardShortcut(shortcuts.keyboardShortcut(.delete)).disabled(store.selectedClip == nil && !store.hasMultipleSelection)
+                Button("Delete Linked Selection") { store.deleteSelection() }.keyboardShortcut(shortcuts.keyboardShortcut(.delete)).disabled(!store.canDeleteSelection)
                 Button("Close Gap") { store.closeSelectedGap() }.keyboardShortcut(shortcuts.keyboardShortcut(.closeGap)).disabled(store.selectedGap == nil)
                 Button("Add Text Clip") { store.addText() }.keyboardShortcut(shortcuts.keyboardShortcut(.addText))
                 Toggle("Snapping",isOn:$store.snapping).keyboardShortcut(shortcuts.keyboardShortcut(.snapping))
                 Toggle("Trackpad Haptics",isOn:$store.scrubHaptics)
-                }.disabled(store.showLauncher || store.showNewProjectSheet)
+                }.disabled(store.editingSuspended)
             }
         }
         Settings {
