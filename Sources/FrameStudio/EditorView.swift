@@ -47,6 +47,8 @@ struct EditorView: View {
                 timeline.frame(minHeight:345,idealHeight:345)
             }
         }
+        // The preview's transform outline is drawn from here, above every panel.
+        .overlay { TransformChromeLayer() }
         .overlay { if store.showHelp { HelpOverlay(isShown:$store.showHelp) } }
         .animation(.easeOut(duration:0.15),value:store.showHelp)
     }
@@ -65,11 +67,12 @@ struct EditorView: View {
             .disabled(store.isExporting || store.isCapturingSnapshot)
             .help("Projects  \(shortcuts.label(.startScreen))").accessibilityLabel("Back to projects")
             .helpTip("Projects",.below,shortcut:shortcuts.label(.startScreen))
-            VStack(alignment:.leading,spacing:3) {
-                Text("Ara").font(.system(size:16,weight:.bold)).tracking(1)
-                Text(store.project.name + (store.dirty ? " •" : "")).font(.system(size:12)).foregroundStyle(Theme.muted).lineLimit(1)
-                    .help(store.status)
+            // The project's name, large, with a dot while it has unsaved changes.
+            HStack(spacing:7) {
+                Text(verbatim:store.project.name).font(.system(size:20,weight:.bold)).lineLimit(1).truncationMode(.middle)
+                if store.dirty { Circle().fill(Theme.muted).frame(width:7,height:7).accessibilityLabel("Unsaved changes") }
             }
+            .help(store.status)
             Spacer(minLength:10)
             toolbarButton("New",icon:"doc.badge.plus",action:store.newProject).helpTip("New project",.below,shortcut:shortcuts.label(.newProject))
             toolbarButton("Open",icon:"folder",action:store.chooseOpen).helpTip("Open project",.below,shortcut:shortcuts.label(.openProject))

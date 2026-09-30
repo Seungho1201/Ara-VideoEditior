@@ -7,7 +7,10 @@ import FrameCore
 import FrameMedia
 
 @MainActor final class EditorStore: ObservableObject {
-    @Published private(set) var project = Project()
+    @Published private(set) var project = Project() { didSet { if project.clips != oldValue.clips { ownAudioTracks = TrackLayout.ownAudio(in:project) } } }
+    /// The audio tracks (by number) holding audio of their own, not a video's sound: folded under
+    /// their video track, they stay a strip rather than going away.
+    private(set) var ownAudioTracks: Set<Int> = []
     /// The start screen is up instead of the editor. A launch that names a project or media
     /// (Finder, `--project`, `--import`) goes straight to the editor.
     @Published private(set) var showLauncher = !CommandLine.arguments.contains("--project") && !CommandLine.arguments.contains("--import")
@@ -25,8 +28,12 @@ import FrameMedia
             // selectedClipID is set to nil with the set already in place, and that keeps it.
             if let id = selectedClipID { if selectedClipIDs != [id] { selectedClipIDs = [id] } }
             else if selectedClipIDs.count == 1 { selectedClipIDs = [] }
+            if selectedClipID != oldValue, colorPresetRow.open != nil { colorPresetRow.close() }
         }
     }
+    /// The inspector's title colour showing its presets beside its swatch. Choosing another clip
+    /// hides them.
+    @Published var colorPresetRow = ColorPresetRow()
     /// The timeline toolbar's rectangle select: the next drag across the tracks selects the clips
     /// it covers, without Shift, and then it switches itself off. Esc switches it off too.
     @Published var dragSelectArmed = false {
@@ -104,6 +111,11 @@ import FrameMedia
     @Published var snapping = UserDefaults.standard.object(forKey:"timeline.snapping") as? Bool ?? true {
         didSet { UserDefaults.standard.set(snapping,forKey:"timeline.snapping") }
     }
+    /// The video tracks (by number) whose sound is folded to a strip under them; kept across launches.
+    @Published var foldedSound = Set(UserDefaults.standard.array(forKey:"timeline.foldedSound") as? [Int] ?? []) {
+        didSet { UserDefaults.standard.set(foldedSound.sorted(),forKey:"timeline.foldedSound") }
+    }
+    func toggleSound(_ number: Int) { if foldedSound.contains(number) { foldedSound.remove(number) } else { foldedSound.insert(number) } }
     @Published var scrubHaptics = UserDefaults.standard.object(forKey:"timeline.scrubHaptics") as? Bool ?? true {
         didSet { UserDefaults.standard.set(scrubHaptics,forKey:"timeline.scrubHaptics") }
     }

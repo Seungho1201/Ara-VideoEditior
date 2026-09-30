@@ -75,8 +75,10 @@ final class TimelineDrawingTests: XCTestCase {
         window.contentView = canvas
         defer { window.contentView = nil; window.close() }
         XCTAssertEqual(canvas.visibleRect,canvas.bounds)
-        let audioTop = TimelineCanvas.ruler+TimelineCanvas.addBand+2*TimelineCanvas.rowHeight
-        try check(store,canvas,NSRect(x:0,y:audioTop,width:800,height:2*TimelineCanvas.rowHeight))
+        // The two sounds, each under its video track.
+        let rows = [Lane.a1,.a2].compactMap(canvas.trackLayout.row)
+        XCTAssertEqual(rows.count,2)
+        for row in rows { try check(store,canvas,NSRect(x:0,y:row.top,width:800,height:row.height)) }
     }
 
     @MainActor private func bitmap(for canvas:TimelineCanvas,scale:Double) throws -> CGContext {

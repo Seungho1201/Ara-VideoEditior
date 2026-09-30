@@ -29,7 +29,7 @@ import FrameCore
         let korean = try korean()
         let keys = ["Drag media onto a video (V) or audio (A) track","CLIP END","Track occupied","%.2f s · %lldf","%@ · in","%@ · out",
                     "A timeline has at most %lld video tracks","A timeline has at most %lld audio tracks",
-                    "Multitrack timeline. Video tracks above audio tracks, up to %lld of each. Linked audio is on the audio track numbered like its video."]
+                    "Multitrack timeline, up to %lld video and %lld audio tracks. Each video track has its sound, the audio track numbered like it, right under it; further audio tracks are at the bottom."]
         for key in keys {
             let value = try XCTUnwrap(korean[key],"no Korean for “\(key)”")
             XCTAssertEqual(specifiers(value),specifiers(key),key)
@@ -39,7 +39,7 @@ import FrameCore
         XCTAssertNil(korean["A timeline has at most %lld %@ tracks"],"no English word goes into the Korean sentence")
         XCTAssertNotEqual(korean["Span"],korean["RANGE"],"a multiple selection's length is not named like its section")
         XCTAssertEqual(TimelineCanvas(frame:.zero).accessibilityLabel(),
-                       "Multitrack timeline. Video tracks above audio tracks, up to 8 of each. Linked audio is on the audio track numbered like its video.")
+                       "Multitrack timeline, up to 8 video and 8 audio tracks. Each video track has its sound, the audio track numbered like it, right under it; further audio tracks are at the bottom.")
     }
 
     func testTheEmptyTimelineHintSitsInsideARow() throws {
@@ -49,10 +49,7 @@ import FrameCore
         // The hint's letters are far brighter than the rows, the lines between them and the second marks.
         let lit = (Int(TimelineCanvas.ruler)..<340).filter { y in (20..<420).contains { x in TimelineRig.color(image,Double(x),Double(y)).red > 80 } }
         let top = try XCTUnwrap(lit.first), bottom = try XCTUnwrap(lit.last)
-        let inside = (0..<4).contains { index in
-            let rowTop = TimelineCanvas.ruler+TimelineCanvas.addBand+Double(index)*TimelineCanvas.rowHeight
-            return Double(top) > rowTop && Double(bottom) < rowTop+TimelineCanvas.rowHeight-1
-        }
+        let inside = rig.canvas.trackLayout.rows.contains { row in Double(top) > row.top && Double(bottom) < row.bottom-1 }
         XCTAssertTrue(inside,"the hint spans y \(top)–\(bottom), across a line between rows")
     }
 

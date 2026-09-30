@@ -24,7 +24,10 @@ import FrameCore
                                 searchOptions: [NSPasteboard.ReadingOptionKey: Any],
                                 using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
     /// Over V1 (its row's middle) at this many seconds, 60 pt per second.
-    func move(_ seconds: Double, on canvas: TimelineCanvas) { draggingLocation = canvas.convert(NSPoint(x:seconds*60,y:147),to:nil) }
+    /// Over V1's picture, or its sound, `seconds` in.
+    func move(_ seconds: Double, on canvas: TimelineCanvas, lane: Lane = .v1) {
+        draggingLocation = canvas.convert(NSPoint(x:seconds*60,y:canvas.trackLayout.row(lane)!.top+20),to:nil)
+    }
 }
 
 final class TransitionDropHapticsTests: XCTestCase {
@@ -68,6 +71,17 @@ final class TransitionDropHapticsTests: XCTestCase {
             XCTAssertEqual(store.project.transitions.first.map { [$0.from,$0.to].compactMap { $0 }.count },2,"dropped on the cut")
         }
         XCTAssertEqual(cues,[.alignment,.alignment,.generic])
+    }
+
+    /// V1's sound is part of V1: a transition let go over it goes on the picture's cut above.
+    @MainActor func testATransitionOverATracksSoundGoesOnItsPicture() {
+        _ = drag(haptics:false) { info, canvas, store in
+            info.move(2.6,on:canvas,lane:.a1)
+            XCTAssertEqual(canvas.draggingEntered(info),.copy)
+            XCTAssertTrue(canvas.performDragOperation(info))
+            let names = store.project.transitions.first.map { [$0.from,$0.to].compactMap { id in store.project.clips.first { $0.id == id }?.name } }
+            XCTAssertEqual(names,["A","B"])
+        }
     }
 
     @MainActor func testNothingWithHapticsOff() {

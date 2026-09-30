@@ -42,17 +42,33 @@ struct PreviewSurface: NSViewRepresentable {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layout() { super.layout(); playerView.frame = bounds; overlay.frame = bounds; overlay.needsDisplay = true; chrome.needsDisplay = true }
     private var windowObserver: NSObjectProtocol?
+    private var layerObserver: NSObjectProtocol?
     private var lastWindowRect = CGRect.null
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let windowObserver { NotificationCenter.default.removeObserver(windowObserver); self.windowObserver = nil }
-        guard let window, let host = window.contentView else { chrome.removeFromSuperview(); return }
-        chrome.install(in:host); chrome.isHidden = !overlay.showsChrome
+        for observer in [windowObserver,layerObserver].compactMap({ $0 }) { NotificationCenter.default.removeObserver(observer) }
+        windowObserver = nil; layerObserver = nil
+        guard let window else { chrome.removeFromSuperview(); return }
+        installChrome()
         // The viewer can move without resizing (a split divider, a window resize that re-centres it);
         // layout() does not run then, so compare its window-space rect after each event.
         windowObserver = NotificationCenter.default.addObserver(forName:NSWindow.didUpdateNotification,object:window,queue:.main) { [weak self] _ in
             MainActor.assumeIsolated { self?.followWindowPosition() }
         }
+        // The editor's chrome layer can reach the window after the viewer does.
+        layerObserver = NotificationCenter.default.addObserver(forName:TransformChromeLayerView.didMoveToWindow,object:window,queue:.main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.installChrome() }
+        }
+    }
+    /// The chrome goes into the editor's chrome layer. A plain AppKit window (the tests') takes it
+    /// on its content view; SwiftUI's hosting view never does, as SwiftUI would not draw it there.
+    private func installChrome() {
+        guard let window else { return }
+        if let layer = TransformChromeLayerView.layer(in:window) { chrome.install(in:layer) }
+        else if let content = window.contentView, window.contentViewController == nil,
+                !NSStringFromClass(type(of:content)).contains("Hosting") { chrome.install(in:content) }
+        else { return }
+        chrome.isHidden = !overlay.showsChrome
     }
     private func followWindowPosition() {
         guard overlay.isTransforming else { lastWindowRect = .null; return }

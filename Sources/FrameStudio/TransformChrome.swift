@@ -1,15 +1,52 @@
+import SwiftUI
 import AppKit
 @preconcurrency import AVFoundation
 import CoreImage
 import FrameCore
 import FrameMedia
 
+/// The editor's layer for the transform chrome: an AppKit view in the SwiftUI content, laid over
+/// every panel. SwiftUI does not support AppKit views added straight to its hosting view; linked
+/// against a current SDK it leaves them out of what is drawn, so the outline never showed there.
+struct TransformChromeLayer: NSViewRepresentable {
+    func makeNSView(context: Context) -> TransformChromeLayerView { TransformChromeLayerView(frame:.zero) }
+    func updateNSView(_ view: TransformChromeLayerView, context: Context) {}
+}
+
+@MainActor final class TransformChromeLayerView: NSView {
+    /// Posted with the window when a layer arrives in one, for a viewer that got there first.
+    static let didMoveToWindow = Notification.Name("TransformChromeLayerDidMoveToWindow")
+    private struct Entry { weak var view: TransformChromeLayerView? }
+    private static var entries: [Entry] = []
+    /// The layer in `window`, if its editor has one.
+    static func layer(in window: NSWindow) -> TransformChromeLayerView? {
+        entries.lazy.compactMap(\.view).first { $0.window === window }
+    }
+    override var isFlipped: Bool { true }
+    override init(frame: NSRect) {
+        super.init(frame:frame)
+        setAccessibilityElement(false)
+        Self.entries.removeAll { $0.view == nil }; Self.entries.append(Entry(view:self))
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    /// Clicks pass through, except where the chrome takes them.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { NotificationCenter.default.post(name:Self.didMoveToWindow,object:window) }
+    }
+}
+
 /// The transform outline, its handles and the off-canvas part of the clip being transformed,
 /// drawn above the whole window: over the panels and the timeline, never clipped by the viewer.
 ///
-/// It sits as the topmost subview of the window's content view and takes clicks only on the
-/// transformed clip and its handles; every other click falls through to the views underneath.
-/// Mouse events are handed to the viewer's PreviewTransformOverlay, which owns the drag logic.
+/// It sits in the editor's TransformChromeLayer (in a plain AppKit window, such as the tests',
+/// on its content view) and takes clicks only on the transformed clip and its handles; every
+/// other click falls through to the views underneath. Mouse events are handed to the viewer's
+/// PreviewTransformOverlay, which owns the drag logic.
 @MainActor final class TransformChromeView: NSView {
     weak var overlay: PreviewTransformOverlay?
     override var isFlipped: Bool { true }

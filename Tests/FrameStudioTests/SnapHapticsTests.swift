@@ -35,7 +35,8 @@ final class SnapHapticsTests: XCTestCase {
         _ = try check(store,canvas,cues)
         return cues
     }
-    private let v1 = 147.0
+    /// The middle of V1's picture, under V2 and its sound.
+    private let v1 = TrackLayout(videoTracks:2,audioTracks:2,folded:[],top:TimelineCanvas.ruler+TimelineCanvas.addBand).row(.v1)!.top+31
     @MainActor private func mouse(_ type: NSEvent.EventType, _ seconds: Double, at time: TimeInterval, _ flags: NSEvent.ModifierFlags = [], on canvas: TimelineCanvas) -> NSEvent {
         NSEvent.mouseEvent(with:type,location:canvas.convert(NSPoint(x:seconds*60,y:v1),to:nil),modifierFlags:flags,timestamp:time,
                            windowNumber:canvas.window!.windowNumber,context:nil,eventNumber:0,clickCount:1,pressure:1)!

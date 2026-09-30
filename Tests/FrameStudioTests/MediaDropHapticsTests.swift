@@ -23,8 +23,9 @@ import FrameCore
     func enumerateDraggingItems(options: NSDraggingItemEnumerationOptions, for view: NSView?, classes: [AnyClass],
                                 searchOptions: [NSPasteboard.ReadingOptionKey: Any],
                                 using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
-    func move(x: Double, y: Double = 140, on canvas: TimelineCanvas) {
-        draggingLocation = canvas.convert(NSPoint(x:x,y:y),to:nil)
+    /// Over x on the canvas; by default in the middle of V1's picture.
+    func move(x: Double, y: Double? = nil, on canvas: TimelineCanvas) {
+        draggingLocation = canvas.convert(NSPoint(x:x,y:y ?? canvas.trackLayout.row(.v1)!.top+31),to:nil)
     }
 }
 
@@ -36,13 +37,13 @@ final class MediaDropHapticsTests: XCTestCase {
         let media = MediaReference(name:"Drop fixture",path:"/nonexistent/ara-drop-fixture.mov",kind:.video,
                                    duration:.init(seconds:1),width:1920,height:1080,frameRate:30,hasAudio:true)
         XCTAssertTrue(store.edit("Fixture") { project in
-            project.media = [media]
+            project.media = [media]; project.audioTrackCount = 3         // A3: an audio track of its own, at the bottom
             project.clips = [Clip(name:"Existing",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:10))]
         })
         store.resumeEditing(); store.isBuilding = false
-        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:900,height:400),styleMask:.borderless,backing:.buffered,defer:false)
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:900,height:480),styleMask:.borderless,backing:.buffered,defer:false)
         window.isReleasedWhenClosed = false
-        let canvas = TimelineCanvas(frame:NSRect(x:0,y:0,width:900,height:400))
+        let canvas = TimelineCanvas(frame:NSRect(x:0,y:0,width:900,height:480))
         canvas.store = store; canvas.pixelsPerSecond = 60
         window.contentView = canvas
         let info = LibraryDropInfo(); info.draggingDestinationWindow = window
@@ -85,12 +86,32 @@ final class MediaDropHapticsTests: XCTestCase {
         }
     }
 
+    /// A track's picture and sound are one track: a video let go over V1's sound goes on V1 (its
+    /// sound under it), and an audio file let go over V1's picture goes in its sound.
+    @MainActor func testMediaDroppedOnEitherHalfOfATrackGoesWhereItBelongs() {
+        withTimeline { store, canvas, info, mediaID in
+            canvas.performHaptic = { _ in }
+            info.move(x:720,y:canvas.trackLayout.row(.a1)!.top+20,on:canvas)
+            XCTAssertEqual(canvas.draggingEntered(info),.copy)
+            XCTAssertTrue(canvas.performDragOperation(info))
+            XCTAssertEqual(Set(store.project.clips.filter { $0.mediaID == mediaID }.map(\.lane)),[.v1,.a1])
+            let song = MediaReference(name:"Song",path:"/nonexistent/ara-drop-song.m4a",kind:.audio,duration:.init(seconds:2),hasAudio:true)
+            XCTAssertTrue(store.edit("Song") { $0.media.append(song) })
+            info.draggingPasteboard.clearContents(); info.draggingPasteboard.setString(song.id.uuidString,forType:.string)
+            info.draggingSequenceNumber += 1
+            info.move(x:840,on:canvas)
+            XCTAssertEqual(canvas.draggingEntered(info),.copy)
+            XCTAssertTrue(canvas.performDragOperation(info))
+            XCTAssertEqual(store.project.clips.first { $0.mediaID == song.id }?.lane,.a1)
+        }
+    }
+
     @MainActor func testInvalidTargetsAndStaleDropDoNotEmitSuccessOrMutateProject() {
         withTimeline { store, canvas, info, mediaID in
             let before = store.project
             var cues: [NSHapticFeedbackManager.FeedbackPattern] = []
             canvas.performHaptic = { cues.append($0) }
-            info.move(x:720,y:205,on:canvas) // Video cannot land on A1.
+            info.move(x:720,y:canvas.trackLayout.row(Lane(.audio,3))!.top+31,on:canvas) // Video cannot land on A3, an audio track of its own.
             XCTAssertEqual(canvas.draggingEntered(info),[])
             info.move(x:300,on:canvas) // Existing V1 footage blocks this position.
             XCTAssertEqual(canvas.draggingUpdated(info),[])

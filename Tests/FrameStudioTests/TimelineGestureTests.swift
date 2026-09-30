@@ -16,7 +16,7 @@ import FrameCore
     let window: NSWindow
     var cues: [NSHapticFeedbackManager.FeedbackPattern] = []
     static let pps = 60.0, rulerY = 10.0
-    private static let keys = ["timeline.snapping","timeline.scrubHaptics","haptics.off","haptics.skimStrength"]
+    private static let keys = ["timeline.snapping","timeline.scrubHaptics","haptics.off","haptics.skimStrength","timeline.foldedSound"]
     private let saved: [String:Any]
     private let suite = "ara.tests.timeline.\(UUID().uuidString)"
     private var now: TimeInterval = 1000
@@ -29,7 +29,7 @@ import FrameCore
         let made = store.edit("Fixture") { project in project.frameRate = .init(30); try fixture(&project) }
         XCTAssertTrue(made,store.message ?? "")
         store.isBuilding = false; store.message = nil
-        store.snapping = true; store.scrubHaptics = true; store.hapticsOff = []
+        store.snapping = true; store.scrubHaptics = true; store.hapticsOff = []; store.foldedSound = []
         window = RigWindow(contentRect:NSRect(x:0,y:0,width:width,height:height),styleMask:.borderless,backing:.buffered,defer:false)
         window.isReleasedWhenClosed = false
         canvas = TimelineCanvas(frame:NSRect(x:0,y:0,width:width,height:height))
@@ -48,10 +48,9 @@ import FrameCore
             if let value = saved[key] { UserDefaults.standard.set(value,forKey:key) } else { UserDefaults.standard.removeObject(forKey:key) }
         }
     }
-    /// y in a track's row: 20 pt down is a clip's title band, 45 pt its transition strip.
-    func y(_ lane: Lane, _ offset: Double = 20) -> Double {
-        TimelineCanvas.ruler+TimelineCanvas.addBand+Double(store.project.displayLanes.firstIndex(of:lane)!)*TimelineCanvas.rowHeight+offset
-    }
+    /// y in a track's row, from its top: in a video track 20 pt down is a clip's title band, 45 pt
+    /// its transition strip.
+    func y(_ lane: Lane, _ offset: Double = 20) -> Double { canvas.trackLayout.row(lane)!.top+offset }
     func clip(_ id: UUID) -> Clip { store.project.clips.first { $0.id == id }! }
     func clip(_ name: String) -> Clip { store.project.clips.first { $0.name == name }! }
     private func mouse(_ type: NSEvent.EventType, _ seconds: Double, _ y: Double, _ flags: NSEvent.ModifierFlags) -> NSEvent {
@@ -104,8 +103,9 @@ func timelineTestVideo() -> MediaReference {
                    width:1920,height:1080,frameRate:30,hasAudio:true)
 }
 
-/// Dragging on the timeline: trims stop at their limits, a clip keeps its kind of track, the snap
-/// tick only where the drag gets to, a rectangle-select click, and a drag the project changed under.
+/// Dragging on the timeline: trims stop at their limits, a clip's ends trim it under its fades, a
+/// clip keeps its kind of track, the snap tick only where the drag gets to, a rectangle-select
+/// click, and a drag the project changed under.
 @MainActor final class TimelineGestureTests: XCTestCase {
     private func title(_ name: String, _ lane: Lane, _ start: Double, _ length: Double) -> Clip {
         Clip(name:name,kind:.text,lane:lane,start:.init(seconds:start),duration:.init(seconds:length))
@@ -231,6 +231,57 @@ func timelineTestVideo() -> MediaReference {
         rig.down(4.5,rig.y(.v2)); rig.drag(4.2,rig.y(.v2)); rig.drag(4.05,rig.y(.v2)); rig.up(4.05,rig.y(.v2))
         XCTAssertEqual(rig.clip(a).start,.init(seconds:0.5)); XCTAssertEqual(rig.clip(b).start,.init(seconds:3))
         XCTAssertEqual(rig.cues,[.alignment])
+    }
+
+    /// A clip's ends trim it over their whole height, a fade's anchored end included: the end of a
+    /// clip that fades out is its end, and the pointer shows it. Where a transition's strip covers
+    /// a cut, the strip is the transition's and the title band above it trims.
+    func testAClipsEndTrimsItEvenUnderItsFade() {
+        var ids: [String:UUID] = [:]
+        let rig = TimelineRig(width:1800) { project in
+            // A 0–10 s fading in over 1 s; C | D at 12–15–18 s with a 1 s dissolve; E 20–25 s fading out over 1 s.
+            let a = self.title("A",.v1,0,10), c = self.title("C",.v1,12,3), d = self.title("D",.v1,15,3), e = self.title("E",.v1,20,5)
+            project.clips = [a,c,d,e]
+            ids["in"] = try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:nil,to:a.id,in:&project)
+            ids["cut"] = try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:c.id,to:d.id,in:&project)
+            ids["out"] = try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:e.id,to:nil,in:&project)
+        }
+        defer { rig.close() }
+        rig.store.snapping = false
+        func transition(_ name: String) -> FrameCore.Transition? { rig.store.project.transitions.first { $0.id == ids[name] } }
+        let band = rig.y(.v1), strip = rig.y(.v1,45)
+        // The resize pointer: at both ends of each clip, in the title band and in the strip, except
+        // in the strip over the cut, which picks the dissolve; not in a clip's middle.
+        let areas = rig.canvas.resizeCursorAreas(in:rig.canvas.bounds)
+        func resizes(_ seconds: Double, _ y: Double) -> Bool { areas.contains { $0.contains(NSPoint(x:seconds*TimelineRig.pps,y:y)) } }
+        let inside = 3/TimelineRig.pps
+        let points: [(seconds: Double, y: Double, shown: Bool)] = [
+            (25-inside,strip,true),(25-inside,band,true),(inside,strip,true),(10-inside,strip,true),(15+inside,band,true),
+            (15+inside,strip,false),(24+inside,strip,true),(22.5,band,false),(22.5,strip,false)]
+        for (seconds,y,shown) in points {
+            XCTAssertEqual(resizes(seconds,y),shown,"at \(seconds) s, \(y == band ? "title band" : "strip")")
+        }
+        // E's end, grabbed low where its fade ends (3 pt inside it), trims E; the fade goes with the end.
+        rig.drag(from:25-inside,through:[24,23-inside],y:strip)
+        XCTAssertEqual(rig.clip("E").end,.init(seconds:23)); XCTAssertEqual(rig.store.undoName,"Trim clip")
+        XCTAssertEqual(rig.store.selectedClipID,rig.clip("E").id)
+        XCTAssertEqual(transition("out")?.duration,.init(seconds:1))
+        XCTAssertEqual(transition("out").flatMap(rig.store.project.window)?.end,.init(seconds:23))
+        // A's start under its fade in, the same.
+        rig.drag(from:inside,through:[0.5,1+inside],y:strip)
+        XCTAssertEqual(rig.clip("A").start,.init(seconds:1)); XCTAssertEqual(transition("in")?.to,rig.clip("A").id)
+        // The fade's free edge still sizes the fade.
+        rig.drag(from:22+inside,through:[21.5+inside],y:strip)
+        XCTAssertEqual(transition("out")?.duration,.init(seconds:1.5)); XCTAssertEqual(rig.clip("E").end,.init(seconds:23))
+        // The strip over the cut is the dissolve's: pressed there it is picked, and D stays put.
+        rig.drag(from:15+inside,through:[16],y:strip)
+        XCTAssertEqual(rig.store.selectedTransitionID,ids["cut"]); XCTAssertEqual(rig.clip("D").start,.init(seconds:15))
+        // Selected, D shows its start handle up in the title band, where it trims.
+        rig.store.selectedClipID = rig.clip("D").id
+        let painted = rig.paint(), mark = TimelineRig.color(painted,15*TimelineRig.pps+2,rig.y(.v1,15))
+        XCTAssertTrue(mark.red > 200 && mark.green > 200 && mark.blue > 200,"the handle in the title band: \(mark)")
+        rig.drag(from:15+inside,through:[15.5+inside],y:band)
+        XCTAssertEqual(rig.clip("D").start,.init(seconds:15.5)); XCTAssertEqual(rig.store.undoName,"Trim clip")
     }
 
     func testRectangleSelectPressedWithoutADragPicksTheClipUnderIt() {

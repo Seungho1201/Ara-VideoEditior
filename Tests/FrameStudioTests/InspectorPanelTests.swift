@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Vision
 import XCTest
 import FrameCore
 @testable import FrameStudio
@@ -9,9 +10,18 @@ import FrameCore
     override var canBecomeKey: Bool { true }
 }
 
+/// The inspector's folding sections (SHADOW, TRANSFORM, COLOUR) unfolded, as a panel first shows them, for tests
+/// that reach into them; returns what puts the user's choice back.
+func inspectorSectionsUnfolded() -> () -> Void {
+    let keys = InspectorPanelTests.foldKeys, defaults = UserDefaults.standard
+    let saved = keys.map { defaults.object(forKey:$0) }
+    for key in keys { defaults.removeObject(forKey:key) }
+    return { for (key,value) in zip(keys,saved) { if let value { defaults.set(value,forKey:key) } else { defaults.removeObject(forKey:key) } } }
+}
+
 /// The inspector: its Rotation and Scale sliders keep the alignment point still, a title's text
-/// field holds what the title keeps, an effect that reads 0 is off, and its header and the side
-/// panel's tabs keep their lines at the panel's narrowest.
+/// field holds what the title keeps, an effect that reads 0 is off, SHADOW, TRANSFORM and COLOUR
+/// fold away, TIMING comes last, and its header and the side panel's tabs keep their lines at the panel's narrowest.
 @MainActor final class InspectorPanelTests: XCTestCase {
     private let caret = NSRange(location:NSNotFound,length:0)
     private func spin(_ milliseconds: Int) async throws { try await Task.sleep(for:.milliseconds(milliseconds)) }
@@ -222,9 +232,10 @@ import FrameCore
     // MARK: effects
 
     /// Outline width and shadow opacity switch their effects on. A value their label reads as 0 is
-    /// 0: the effect is off, its colour wells are off, and nothing is drawn.
+    /// 0: the effect is off, its colour is off, and nothing is drawn.
     func testAnEffectThatReadsZeroIsOff() async throws {
         _ = NSApplication.shared
+        let restore = inspectorSectionsUnfolded(); defer { restore() }
         let store = EditorStore()
         store.fontFolder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-inspector-fonts-\(UUID().uuidString)")
         let a = title("Effects") { $0.outlineWidth = 4; $0.shadowOpacity = 0.5 }
@@ -250,14 +261,122 @@ import FrameCore
         // A slider that switches nothing keeps small values.
         slide(\.shadowDistance,0.4,0...40,switches:false)
         XCTAssertEqual(style(store,a.id).shadowDistance,0.4)
-        // Read as 0 in the panel: the outline's colour well is off with it.
+        // Read as 0 in the panel: the outline's colour is off with it, and shows no presets.
         slide(\.outlineWidth,0.3,0...20)
         let (window,view) = host(InspectorPanel(store:store))
         defer { window.contentView = nil; window.close() }
         try await spin(150); view.layoutSubtreeIfNeeded()
-        let wells = all(NSColorWell.self,in:view).sorted { $0.convert($0.bounds,to:nil).maxY > $1.convert($1.bounds,to:nil).maxY }
-        XCTAssertEqual(wells.count,3,"text, outline and shadow colours")
-        XCTAssertEqual(wells.map(\.isEnabled),[true,false,true])
+        var shown: [Bool] = []
+        for colour in ["Text colour","Outline colour","Shadow colour"] {
+            store.colorPresetRow.click(colour,at:0,interval:0)
+            for _ in 0..<12 where store.colorPresetRow.open == colour { view.layoutSubtreeIfNeeded(); try await spin(25) }
+            shown.append(store.colorPresetRow.open == colour)
+        }
+        XCTAssertEqual(shown,[true,false,true])
+    }
+
+    // MARK: folding sections
+
+    nonisolated static let foldKeys = ["inspector.shadowOpen","inspector.transformOpen","inspector.colourOpen"]
+    /// The lines of text drawn in `view`, top to bottom, each with the top of its box in points.
+    private func lines(_ view: NSView) throws -> [(text: String, top: CGFloat)] {
+        let image = try XCTUnwrap(try painted(view).makeImage())
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate; request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage:image).perform([request])
+        return (request.results ?? []).compactMap { line in
+            line.topCandidates(1).first.map { ($0.string,(1-line.boundingBox.maxY)*view.bounds.height) }
+        }.sorted { $0.top < $1.top }
+    }
+    /// Where the line starting with `text` is. Rows' labels, not the spaced capitals of the section
+    /// titles, which the text recognizer can miss.
+    private func top(_ text: String, in lines: [(text: String, top: CGFloat)], file: StaticString = #filePath, line: UInt = #line) throws -> CGFloat {
+        try XCTUnwrap(lines.first { $0.text.hasPrefix(text) }?.top,"“\(text)” in \(lines.map(\.text))",file:file,line:line)
+    }
+
+    /// A title's inspector reads TEXT, OUTLINE, SHADOW, TRANSFORM, COLOUR, then TIMING and the
+    /// Reset button last. Folded, SHADOW says Off and TRANSFORM and COLOUR say Default or Edited;
+    /// OUTLINE has no fold and keeps its controls.
+    func testTimingComesLastAndFoldedSectionsSayWhatTheyHold() async throws {
+        _ = NSApplication.shared
+        let restore = inspectorSectionsUnfolded(); defer { restore() }
+        let store = EditorStore()
+        store.fontFolder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-inspector-fonts-\(UUID().uuidString)")
+        let a = title("Effects") { $0.outlineWidth = 4; $0.saturation = 1.4 }
+        store.edit("Fixture") { $0.clips = [a] }
+        store.selectedClipID = a.id
+        let (window,view) = host(InspectorPanel(store:store).preferredColorScheme(.dark),width:300,height:1800)
+        window.appearance = NSAppearance(named:.darkAqua)
+        defer { window.contentView = nil; window.close() }
+        for _ in 0..<12 { view.layoutSubtreeIfNeeded(); try await spin(25) }
+        var shown = try lines(view)
+        // A row from each section: TEXT, OUTLINE, SHADOW, TRANSFORM, COLOUR, TIMING, then Reset.
+        let order = try ["Font size","Outline colour","Shadow colour","Position X","Brightness","Start","Reset appearance"].map { try top($0,in:shown) }
+        XCTAssertEqual(order,order.sorted(),"\(shown.map(\.text))")
+
+        for key in Self.foldKeys { UserDefaults.standard.set(false,forKey:key) }
+        for _ in 0..<12 { view.layoutSubtreeIfNeeded(); try await spin(25) }
+        shown = try lines(view)
+        for gone in ["Position X","Brightness","Distance","Shadow colour"] { XCTAssertNil(shown.first { $0.text.hasPrefix(gone) },"\(gone) folded away") }
+        _ = try top("Width",in:shown); _ = try top("Outline colour",in:shown)    // OUTLINE does not fold
+        // Each folded title's line says what it holds; TIMING's rows and Reset still come last.
+        let folded = try ["Outline colour","Off","Default","Edited","Start","Reset appearance"].map { try top($0,in:shown) }
+        XCTAssertEqual(folded,folded.sorted(),"\(shown.map(\.text))")
+    }
+
+    /// SHADOW, TRANSFORM and COLOUR fold under their titles: their controls go, the panel gets
+    /// shorter, and each stays as it was left (kept in the defaults). Folding a colour away hides
+    /// its presets.
+    func testSectionsFoldUnderTheirTitles() async throws {
+        _ = NSApplication.shared
+        let restore = inspectorSectionsUnfolded(); defer { restore() }
+        let defaults = UserDefaults.standard
+        let store = EditorStore()
+        store.fontFolder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-inspector-fonts-\(UUID().uuidString)")
+        let a = title("Effects") { $0.outlineWidth = 4; $0.shadowOpacity = 0.5 }
+        store.edit("Fixture") { $0.clips = [a] }
+        store.selectedClipID = a.id
+        let (window,view) = host(InspectorPanel(store:store))
+        defer { window.contentView = nil; window.close() }
+        func settled(_ view: NSView) async throws -> CGFloat {
+            for _ in 0..<12 { view.layoutSubtreeIfNeeded(); try await spin(25) }
+            return try XCTUnwrap(all(NSScrollView.self,in:view).first?.documentView).frame.height
+        }
+        let open = try await settled(view)
+        store.colorPresetRow.click("Shadow colour",at:0,interval:0)
+        XCTAssertEqual(store.colorPresetRow.open,"Shadow colour")
+        // Folded as a click on the title folds it: through the defaults its switch is kept in.
+        defaults.set(false,forKey:"inspector.shadowOpen")
+        let noShadow = try await settled(view)
+        XCTAssertLessThan(noShadow,open-150,"four sliders and the colour are gone")
+        XCTAssertNil(store.colorPresetRow.open,"the folded colour's presets are hidden")
+        defaults.set(false,forKey:"inspector.transformOpen")
+        let noTransform = try await settled(view)
+        XCTAssertLessThan(noTransform,noShadow-150,"five sliders are gone")
+        defaults.set(false,forKey:"inspector.colourOpen")
+        let folded = try await settled(view)
+        XCTAssertLessThan(folded,noTransform-90,"three sliders are gone")
+        // A panel made again (another launch) keeps them folded.
+        let (again,second) = host(InspectorPanel(store:store))
+        defer { again.contentView = nil; again.close() }
+        let reopened = try await settled(second)
+        XCTAssertEqual(reopened,folded,accuracy:1)
+        for key in Self.foldKeys { defaults.set(true,forKey:key) }
+        let unfolded = try await settled(view)
+        XCTAssertEqual(unfolded,open,accuracy:1)
+        XCTAssertNil(store.colorPresetRow.open,"unfolding shows the colour as it was left: closed")
+    }
+
+    /// A folded section is its title line alone; its content is laid out only while unfolded.
+    func testAFoldedSectionIsItsTitleLine() {
+        _ = NSApplication.shared
+        func height(_ open: Bool, summary: FoldingSummary) -> CGFloat {
+            let section = FoldingSection(title:"SHADOW",isOpen:.constant(open),summary:summary) { Color.red.frame(height:120) }
+            return NSHostingController(rootView:section.frame(width:218)).sizeThatFits(in:CGSize(width:218,height:10_000)).height
+        }
+        let summaries: [FoldingSummary] = [.amount("60%",TitleColor(red:1,green:0,blue:0)),.off,.unchanged,.changed]
+        XCTAssertGreaterThan(height(true,summary:summaries[0]),120)
+        for summary in summaries { XCTAssertLessThan(height(false,summary:summary),20,"\(summary)") }
     }
 
     // MARK: header and tabs

@@ -49,7 +49,7 @@ final class SkimmingInputTests: XCTestCase {
         withTimeline { store, canvas, _ in
             let before = store.project
             store.seek(.init(seconds:3))
-            for y in [10.0,80,140] { // Ruler, empty V2, and a clip on V1.
+            for y in [10.0,80,canvas.trackLayout.row(.v1)!.top+31] { // Ruler, empty V2, and a clip on V1.
                 canvas.mouseMoved(with:event(.mouseMoved,x:120,y:y,on:canvas))
                 XCTAssertEqual(store.playhead,.init(seconds:3))
             }
@@ -108,8 +108,9 @@ final class SkimmingInputTests: XCTestCase {
         withTimeline { store, canvas, _ in
             let before = store.project
             store.seek(.init(seconds:3))
-            canvas.mouseDown(with:event(.leftMouseDown,x:100,y:140,on:canvas))
-            canvas.mouseDragged(with:event(.leftMouseDragged,x:160,y:140,on:canvas))
+            let v1 = canvas.trackLayout.row(.v1)!.top+31
+            canvas.mouseDown(with:event(.leftMouseDown,x:100,y:v1,on:canvas))
+            canvas.mouseDragged(with:event(.leftMouseDragged,x:160,y:v1,on:canvas))
             canvas.mouseMoved(with:event(.mouseMoved,x:240,on:canvas))
             XCTAssertEqual(store.playhead,.init(seconds:3))
             XCTAssertEqual(store.project,before)

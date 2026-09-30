@@ -29,8 +29,9 @@ final class TimelineSelectionTests: XCTestCase {
         defer { window.contentView = nil; window.close(); pasteboard.releaseGlobally() }
         try check(store,canvas,["A":a.id,"B":b.id,"C":c.id])
     }
-    /// Row middles: V2 85, V1 147 (ruler 28 + "+ Video" band 26 + 62 per row).
-    private let v2 = 85.0, v1 = 147.0
+    /// Row middles (31 pt down each picture's row): V2 at the top, then its sound A2, then V1.
+    private static let tracks = TrackLayout(videoTracks:2,audioTracks:2,folded:[],top:TimelineCanvas.ruler+TimelineCanvas.addBand)
+    private let v2 = tracks.row(.v2)!.top+31, v1 = tracks.row(.v1)!.top+31
     @MainActor private func mouse(_ type: NSEvent.EventType, _ seconds: Double, _ y: Double, _ flags: NSEvent.ModifierFlags = [], on canvas: TimelineCanvas) -> NSEvent {
         NSEvent.mouseEvent(with:type,location:canvas.convert(NSPoint(x:seconds*60,y:y),to:nil),modifierFlags:flags,timestamp:ProcessInfo.processInfo.systemUptime,
                            windowNumber:canvas.window!.windowNumber,context:nil,eventNumber:0,clickCount:1,pressure:1)!

@@ -15,24 +15,7 @@ struct TimelineView: View {
                 Text("TRACKS").font(.system(size:8,weight:.bold)).tracking(1).foregroundStyle(Theme.muted).frame(height:TimelineCanvas.ruler)
                 VStack(spacing:0) {
                     addTrackButton(.video)
-                    ForEach(store.project.displayLanes) { lane in
-                        HStack(spacing:7) {
-                            RoundedRectangle(cornerRadius:1).fill(lane.isVideo ? Color.blue.opacity(0.8) : Theme.accent).frame(width:3,height:22)
-                            VStack(alignment:.leading,spacing:4) { Text(lane.rawValue).font(.system(size:11,weight:.semibold)); Text(LocalizedStringKey(lane.isVideo ? (lane.number == 1 ? "Picture" : "Overlay") : "Audio")).font(.system(size:8)).foregroundStyle(Theme.muted) }
-                                .lineLimit(1).fixedSize()
-                            Spacer(minLength:0)
-                            if removable(lane) {
-                                Button { store.removeTrack(lane) } label: {
-                                    Image(systemName:"xmark").font(.system(size:8,weight:.bold)).foregroundStyle(Theme.muted)
-                                        .frame(width:16,height:18).contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain).padding(.trailing,4)
-                                .disabled(store.isExporting)
-                                .help("Remove \(lane.rawValue) · the tracks above move down")
-                                .accessibilityLabel("Remove track \(lane.rawValue)")
-                            }
-                        }.padding(.leading,12).frame(height:TimelineCanvas.rowHeight).overlay(alignment:.bottom){Divider()}
-                    }
+                    ForEach(layout.rows,id:\.lane) { row in trackName(row) }
                     addTrackButton(.audio)
                     Spacer(minLength:0)
                 }
@@ -44,10 +27,61 @@ struct TimelineView: View {
                 // Clipping only hides: without this, a "+" scrolled out of view still takes clicks
                 // on the TRACKS header and the toolbar above it.
                 .contentShape(Rectangle())
-            }.frame(width:86).background(Theme.panel)
+            }.frame(width:TimelineView.namesWidth).background(Theme.panel)
             Rectangle().fill(.white.opacity(0.08)).frame(width:1)
             TimelineSurface(store:store,scroll:scroll)
         }.background(Theme.background)
+    }
+    /// The tracks' names column: a name, its sound's switch and ✕ side by side.
+    static let namesWidth: CGFloat = 116
+    private var layout: TrackLayout { TrackLayout(store.project,folded:store.foldedSound,top:0) }
+    /// A track's name beside its row. A video track with its sound under it has, at the end of its
+    /// line (lined up with the others'), the switch that folds that sound away and opens it again.
+    /// The sound's own line is unnamed: it is part of the track above.
+    @ViewBuilder private func trackName(_ row: TrackLayout.Row) -> some View {
+        let lane = row.lane
+        HStack(spacing:0) {
+            if !row.isSound {
+                RoundedRectangle(cornerRadius:1).fill(lane.isVideo ? Color.blue.opacity(0.8) : Theme.accent).frame(width:3,height:22)
+                VStack(alignment:.leading,spacing:4) { Text(lane.rawValue).font(.system(size:11,weight:.semibold)); Text(LocalizedStringKey(lane.isVideo ? (lane.number == 1 ? "Picture" : "Overlay") : "Audio")).font(.system(size:8)).foregroundStyle(Theme.muted) }
+                    .lineLimit(1).fixedSize().padding(.leading,7)
+            }
+            Spacer(minLength:4)
+            if removable(lane), row.height >= 30 {
+                Button { store.removeTrack(lane) } label: {
+                    Image(systemName:"xmark").font(.system(size:8,weight:.bold)).foregroundStyle(Theme.muted)
+                        .frame(width:16,height:18).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).padding(.trailing,4)
+                .disabled(store.isExporting)
+                .help("Remove \(lane.rawValue) · the tracks above move down")
+                .accessibilityLabel("Remove track \(lane.rawValue)")
+            }
+            if row.hasSound { soundSwitch(lane.number).padding(.trailing,6) }
+        }
+        .padding(.leading,12)
+        .frame(height:row.height)
+        // No line between a video track and its sound: they are one track.
+        .overlay(alignment:.bottom) { if !row.hasSound { Divider() } }
+    }
+    /// Folds a video track's sound away under its picture (to a strip while it holds audio of its
+    /// own), or opens it again. The same size either way: the speaker says whether the sound shows.
+    private func soundSwitch(_ number: Int) -> some View {
+        let folded = store.foldedSound.contains(number)
+        return Button { withAnimation(.snappy(duration:0.2)) { store.toggleSound(number) } } label: {
+            HStack(spacing:3) {
+                Image(systemName:"chevron.right").font(.system(size:7,weight:.bold)).rotationEffect(.degrees(folded ? 0 : 90))
+                Image(systemName:folded ? "speaker.slash.fill" : "speaker.wave.2.fill").font(.system(size:11))
+                    .frame(width:15,alignment:.leading)
+            }
+            .foregroundStyle(folded ? Theme.muted : Theme.accent)
+            .frame(width:32,height:22).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(folded ? LocalizedStringKey("Show A\(number), the sound under V\(number)") : LocalizedStringKey("Fold A\(number), the sound under V\(number)"))
+        .accessibilityLabel(Text("Sound of V\(number)"))
+        .accessibilityValue(folded ? Text("Collapsed") : Text("Expanded"))
     }
     /// Added tracks (V3/A3 and up) can be removed while nothing is on them.
     private func removable(_ lane: Lane) -> Bool {
@@ -58,7 +92,7 @@ struct TimelineView: View {
         let count = kind == .video ? store.project.videoTrackCount : store.project.audioTrackCount
         let limit = Project.trackCounts.upperBound, atLimit = count >= limit
         let tip: LocalizedStringKey = atLimit ? (kind == .video ? "A timeline has at most \(limit) video tracks" : "A timeline has at most \(limit) audio tracks")
-                                              : kind == .video ? "Add a video track above V\(count)" : "Add an audio track below A\(count)"
+                                              : kind == .video ? "Add a video track above V\(count)" : "Add audio track A\(count+1)"
         return Button { store.addTrack(kind) } label: {
             HStack(spacing:5) { Image(systemName:"plus"); Text(kind == .video ? "Video" : "Audio") }
                 .font(.system(size:9,weight:.semibold)).foregroundStyle(Theme.muted)
@@ -75,7 +109,7 @@ struct TimelineView: View {
     /// Whether the "+ Video" (top of the column) or "+ Audio" (below the last track) button shows
     /// whole at the column's scroll position.
     private func inView(_ kind: Lane.Kind) -> Bool {
-        let top = kind == .video ? 0 : TimelineCanvas.addBand+Double(store.project.displayLanes.count)*TimelineCanvas.rowHeight
+        let top = kind == .video ? 0 : TimelineCanvas.addBand+layout.bottom
         return top-scroll.offset >= -0.5 && top+TimelineCanvas.addBand-scroll.offset <= namesHeight+0.5
     }
 }
@@ -151,18 +185,21 @@ struct TimelineSurface: NSViewRepresentable {
     /// Whether rectangle select was armed at the last update (to notice it being switched on).
     var armedForSelect = false
     /// Shared with the SwiftUI track-name column so rows line up.
-    static let ruler: Double = 28, addBand: Double = 26, rowHeight: Double = 62
-    private let ruler = TimelineCanvas.ruler, rowHeight = TimelineCanvas.rowHeight, band = TimelineCanvas.addBand
-    /// Top to bottom: V(n) … V1, A1 … A(n).
-    private var lanes: [Lane] { store?.project.displayLanes ?? [] }
-    /// A track's place in `lanes`, worked out rather than searched for: every clip drawn asks.
-    private func row(_ lane: Lane) -> Int? {
-        guard let project = store?.project, project.hasLane(lane) else { return nil }
-        return lane.isVideo ? project.videoTrackCount-lane.number : project.videoTrackCount+lane.number-1
+    nonisolated static let ruler: Double = 28, addBand: Double = 26
+    private let ruler = TimelineCanvas.ruler, band = TimelineCanvas.addBand
+    /// Where the tracks are, under the ruler and the "+ Video" band: each video track with its sound
+    /// under it. Worked out again only when the tracks or the folded sounds change: every clip drawn asks.
+    var trackLayout: TrackLayout {
+        guard let store else { return TrackLayout(videoTracks:0,audioTracks:0,folded:[],top:ruler+band) }
+        let key = LayoutKey(videos:store.project.videoTrackCount,audios:store.project.audioTrackCount,folded:store.foldedSound,ownAudio:store.ownAudioTracks)
+        if let cached = layoutCache, cached.key == key { return cached.layout }
+        let made = TrackLayout(videoTracks:key.videos,audioTracks:key.audios,folded:key.folded,ownAudio:key.ownAudio,top:ruler+band)
+        layoutCache = (key,made); return made
     }
-    private func rowTop(_ index: Int) -> Double { ruler+band+Double(index)*rowHeight }
+    private struct LayoutKey: Equatable { let videos: Int, audios: Int, folded: Set<Int>, ownAudio: Set<Int> }
+    private var layoutCache: (key: LayoutKey, layout: TrackLayout)?
     /// Ruler, the "+ Video" band, every track, the "+ Audio" band.
-    var contentHeight: Double { ruler+band*2+Double(lanes.count)*rowHeight }
+    var contentHeight: Double { trackLayout.bottom+band }
     /// The ruler stays at the top of the view while the tracks scroll under it.
     private var rulerTop: Double { visibleRect.minY }
     private enum DragMode { case move, start, end, scrub, marquee }
@@ -241,7 +278,7 @@ struct TimelineSurface: NSViewRepresentable {
         super.init(frame:frame)
         registerForDraggedTypes([TransitionDrag.pasteboardType,.string,.fileURL]); setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel(String(localized:"Multitrack timeline. Video tracks above audio tracks, up to \(Project.trackCounts.upperBound) of each. Linked audio is on the audio track numbered like its video."))
+        setAccessibilityLabel(String(localized:"Multitrack timeline, up to \(Project.trackCounts.upperBound) video and \(Project.trackCounts.upperBound) audio tracks. Each video track has its sound, the audio track numbered like it, right under it; further audio tracks are at the bottom."))
     }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func viewDidMoveToWindow() {
@@ -380,9 +417,9 @@ struct TimelineSurface: NSViewRepresentable {
     private func rect(_ transition: FrameCore.Transition) -> NSRect? {
         guard let store, let window = store.project.window(of:transition),
               let clip = (transition.from ?? transition.to).flatMap(store.project.clip),
-              let index = row(clip.lane) else { return nil }
-        let height = rowHeight-10
-        return NSRect(x:window.start.seconds*pixelsPerSecond,y:rowTop(index)+5+height*0.4,width:max(8,window.duration.seconds*pixelsPerSecond),height:height*0.6)
+              let row = trackLayout.row(clip.lane) else { return nil }
+        let height = row.boxHeight
+        return NSRect(x:window.start.seconds*pixelsPerSecond,y:row.boxTop+height*0.4,width:max(8,window.duration.seconds*pixelsPerSecond),height:height*0.6)
     }
     private func resizeHandle(_ transition: FrameCore.Transition, leading: Bool) -> NSRect? {
         guard transition.isCut || (leading ? transition.to == nil : transition.from == nil),
@@ -391,6 +428,26 @@ struct TimelineSurface: NSViewRepresentable {
         // margin makes them easy to grab without stealing the clip's title-band trim handle.
         let reach = min(7,box.width/2)
         return NSRect(x:leading ? box.minX-3 : box.maxX-reach,y:box.minY,width:reach+3,height:box.height)
+    }
+    /// A fade's end at its clip's edge (a fade in's start, a fade out's end) is the clip's edge: the
+    /// 7 pt of its strip inside the clip trim the clip, as the title band above them does.
+    private func anchoredTrim(_ transition: FrameCore.Transition) -> NSRect? {
+        guard !transition.isCut, let store, let strip = rect(transition),
+              let clip = (transition.from ?? transition.to).flatMap(store.project.clip) else { return nil }
+        let box = rect(clip), reach = min(7,box.width)
+        return NSRect(x:transition.to == nil ? box.maxX-reach : box.minX,y:strip.minY,width:reach,height:strip.height)
+    }
+    /// Where a press trims the clip at this end: 7 pt inside it, its whole height, less the part a
+    /// transition's strip takes (a cut's, or a fade's free edge reaching it). A fade anchored at
+    /// this end leaves it to the clip.
+    private func trimZone(_ clip: Clip, leading: Bool, among transitions: [FrameCore.Transition]) -> NSRect {
+        let box = rect(clip), reach = min(7,box.width)
+        var zone = NSRect(x:leading ? box.minX : box.maxX-reach,y:box.minY,width:reach,height:box.height)
+        for transition in transitions where transition.from == clip.id || transition.to == clip.id {
+            let anchored = !transition.isCut && (leading ? transition.from == nil : transition.to == nil)
+            if !anchored, let strip = rect(transition), strip.intersects(zone) { zone.size.height = max(0,strip.minY-zone.minY) }
+        }
+        return zone
     }
     /// The transitions on these clips. Placing a transition searches the clips for its own, so a
     /// pass over many keeps to those on clips near what it draws or hits.
@@ -413,20 +470,25 @@ struct TimelineSurface: NSViewRepresentable {
             addCursorRect(tracks,cursor:.crosshair); return
         }
         let visible = NSRect(x:visibleRect.minX,y:rulerTop+ruler,width:visibleRect.width,height:max(0,visibleRect.height-ruler))
-        for transition in transitions(near:visible) {
-            for leading in [true,false] {
-                if let handle = resizeHandle(transition,leading:leading) {
-                    let area = handle.intersection(visible)
-                    if !area.isEmpty { addCursorRect(area,cursor:.resizeLeftRight) }
-                }
-            }
-        }
+        for area in resizeCursorAreas(in:visible) { addCursorRect(area,cursor:.resizeLeftRight) }
+    }
+    /// Where the pointer shows it can resize: a transition's free edges, and either end of a clip
+    /// wherever a press there trims it.
+    func resizeCursorAreas(in visible: NSRect) -> [NSRect] {
+        guard let store else { return [] }
+        let near = transitions(near:visible)
+        let handles = near.flatMap { transition in [true,false].compactMap { resizeHandle(transition,leading:$0) } }
+        let ends = store.project.clips.filter { rect($0).intersects(visible) }.flatMap { clip in [true,false].map { trimZone(clip,leading:$0,among:near) } }
+        return (handles+ends).map { $0.intersection(visible) }.filter { !$0.isEmpty }
     }
     /// Resolve against the current project both while hovering and at mouse-up. The complete
     /// clip is a target; its nearest edge wins. Empty track space only reaches 24 points away.
     /// Dropping on an existing transition replaces that exact transition, including fades.
     private func transitionTarget(_ kind: TransitionKind, at point: NSPoint) -> TransitionDrop? {
-        guard let store, !store.isExporting, let lane = lane(at:point), lane.isVideo else { return nil }
+        // Over a track's sound, the transition goes on its picture: the two are one track.
+        guard let store, !store.isExporting, var lane = lane(at:point) else { return nil }
+        if !lane.isVideo, trackLayout.together(lane,lane.paired) { lane = lane.paired }
+        guard lane.isVideo else { return nil }
         let from: UUID?, to: UUID?, edgeTime: MediaTime
         if let existing = transitions(near:NSRect(origin:point,size:.zero)).first(where: { rect($0)?.contains(point) == true }) {
             from = existing.from; to = existing.to
@@ -449,17 +511,20 @@ struct TimelineSurface: NSViewRepresentable {
     }
     private func rect(_ clip:Clip) -> NSRect {
         let x = clip.start.seconds*pixelsPerSecond, width = max(2,clip.duration.seconds*pixelsPerSecond)
-        guard let index = row(clip.lane) else {
+        guard let row = trackLayout.row(clip.lane) else {
             // A track a move is about to add (linked audio following its video to A3): drawn in the
             // "+" band where that track will appear, never over an existing row.
-            return NSRect(x:x,y:(clip.lane.isVideo ? ruler : rowTop(lanes.count))+3,width:width,height:band-6)
+            return NSRect(x:x,y:(clip.lane.isVideo ? ruler : trackLayout.bottom)+3,width:width,height:band-6)
         }
-        return NSRect(x:x,y:rowTop(index)+5,width:width,height:rowHeight-10)
+        // Folded, a video's sound goes onto its picture (drawn there as a waveform): nothing of it is here.
+        if row.folded, clip.kind == .audio, clip.linkID != nil { return NSRect(x:x,y:row.boxTop,width:width,height:0) }
+        // Audio of its own in a track's sound keeps clear of the picture above; a picture's sound meets it.
+        let gap = row.isSound && clip.linkID == nil ? 1.0 : 0
+        return NSRect(x:x,y:row.boxTop+gap,width:width,height:row.boxHeight-gap)
     }
     private func lane(at point:NSPoint) -> Lane? {
         guard point.y >= rulerTop+ruler else { return nil }
-        let index = Int(floor((point.y-ruler-band)/rowHeight)), lanes = lanes
-        return point.y >= ruler+band && lanes.indices.contains(index) ? lanes[index] : nil
+        return trackLayout.lane(at:point.y)
     }
     private func time(at x:Double) -> MediaTime { .init(seconds:max(0,x/pixelsPerSecond)) }
     private func label(_ text:String,at point:NSPoint,size:CGFloat = 10,color:NSColor = .secondaryLabelColor) {
@@ -469,16 +534,20 @@ struct TimelineSurface: NSViewRepresentable {
         guard let store else { return }
         NSColor(red:0.055,green:0.065,blue:0.085,alpha:1).setFill(); dirtyRect.fill()
         let visible = visibleRect.intersection(dirtyRect)
-        let lanes = lanes
-        for index in lanes.indices {
-            let row = NSRect(x:visible.minX,y:rowTop(index),width:visible.width,height:rowHeight)
-            NSColor(white:index%2 == 0 ? 0.11 : 0.09,alpha:1).setFill(); row.fill()
-            NSColor(white:0.19,alpha:1).setStroke(); let line = NSBezierPath(); line.move(to:NSPoint(x:visible.minX,y:row.maxY)); line.line(to:NSPoint(x:visible.maxX,y:row.maxY)); line.stroke()
+        var track = 0
+        for row in trackLayout.rows {
+            // A track's picture and its sound are one track: one shade (the sound a touch darker)
+            // and no line between them.
+            if !row.isSound { track += 1 }
+            let area = NSRect(x:visible.minX,y:row.top,width:visible.width,height:row.height)
+            NSColor(white:(track%2 == 1 ? 0.11 : 0.09)-(row.isSound ? 0.015 : 0),alpha:1).setFill(); area.fill()
+            guard !row.hasSound else { continue }
+            NSColor(white:0.19,alpha:1).setStroke(); let line = NSBezierPath(); line.move(to:NSPoint(x:visible.minX,y:area.maxY)); line.line(to:NSPoint(x:visible.maxX,y:area.maxY)); line.stroke()
         }
         // The "+ Video" and "+ Audio" bands beside the track-name buttons stay empty.
         NSColor(white:0.07,alpha:1).setFill()
         NSRect(x:visible.minX,y:ruler,width:visible.width,height:band).fill()
-        NSRect(x:visible.minX,y:rowTop(lanes.count),width:visible.width,height:band).fill()
+        NSRect(x:visible.minX,y:trackLayout.bottom,width:visible.width,height:band).fill()
         let interval: Double = pixelsPerSecond > 100 ? 1 : pixelsPerSecond > 40 ? 2 : pixelsPerSecond > 15 ? 5 : 10
         let first = floor(visible.minX/pixelsPerSecond/interval)*interval
         let last = ceil(visible.maxX/pixelsPerSecond/interval)*interval
@@ -511,21 +580,21 @@ struct TimelineSurface: NSViewRepresentable {
             Theme.accentNS.setFill(); NSBezierPath(roundedRect:pill,xRadius:5,yRadius:5).fill()
             (text as NSString).draw(at:NSPoint(x:pill.minX+7,y:pill.minY+(18-size.height)/2),withAttributes:attributes)
         }
-        if let drop = transitionDrop, let index = lanes.firstIndex(of:drop.lane) {
+        if let drop = transitionDrop, let row = trackLayout.row(drop.lane) {
             let transition = drop.transition
             let x = drop.time.seconds*pixelsPerSecond
-            let area = NSRect(x:drop.window.start.seconds*pixelsPerSecond,y:rowTop(index)+5,
-                              width:max(3,drop.window.duration.seconds*pixelsPerSecond),height:rowHeight-10)
+            let area = NSRect(x:drop.window.start.seconds*pixelsPerSecond,y:row.boxTop,
+                              width:max(3,drop.window.duration.seconds*pixelsPerSecond),height:row.boxHeight)
             let highlight = NSBezierPath(roundedRect:area,xRadius:4,yRadius:4)
             Theme.accentNS.withAlphaComponent(0.3).setFill(); highlight.fill()
             Theme.accentNS.setStroke(); highlight.lineWidth = 2; highlight.stroke()
-            Theme.accentNS.setFill(); NSRect(x:x-1.5,y:rowTop(index)+2,width:3,height:rowHeight-4).fill()
+            Theme.accentNS.setFill(); NSRect(x:x-1.5,y:row.top+2,width:3,height:row.boxBottom-row.top).fill()
             let name = transition.kind.displayName
             let text = transition.isCut ? name : transition.to != nil ? String(localized:"\(name) · in") : String(localized:"\(name) · out")
             let attributes: [NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:10,weight:.semibold),.foregroundColor:NSColor.black]
             let size = (text as NSString).size(withAttributes:attributes)
             let left = max(visibleRect.minX+3,min(x-size.width/2-7,visibleRect.maxX-size.width-17))
-            let pill = NSRect(x:left,y:rowTop(index)+rowHeight/2-9,width:size.width+14,height:18)
+            let pill = NSRect(x:left,y:row.boxTop+row.boxHeight/2-11,width:size.width+14,height:18)
             Theme.accentNS.setFill(); NSBezierPath(roundedRect:pill,xRadius:9,yRadius:9).fill()
             (text as NSString).draw(at:NSPoint(x:pill.minX+7,y:pill.minY+(18-size.height)/2),withAttributes:attributes)
         }
@@ -551,14 +620,14 @@ struct TimelineSurface: NSViewRepresentable {
             Theme.accentNS.withAlphaComponent(0.9).setStroke(); path.lineWidth = 1; path.stroke()
         }
         if let gap = store.selectedGap {
-            let row = lanes.firstIndex(of:gap.lane) ?? 0
-            let box = NSRect(x:gap.start.seconds*pixelsPerSecond,y:rowTop(row)+5,
-                             width:max(3,gap.duration.seconds*pixelsPerSecond),height:rowHeight-10)
-            if box.intersects(visible) {
+            let row = trackLayout.row(gap.lane)
+            let box = NSRect(x:gap.start.seconds*pixelsPerSecond,y:row?.boxTop ?? 0,
+                             width:max(3,gap.duration.seconds*pixelsPerSecond),height:row?.boxHeight ?? 0)
+            if row != nil, box.intersects(visible) {
                 let path = NSBezierPath(roundedRect:box.insetBy(dx:1,dy:1),xRadius:4,yRadius:4)
                 NSColor.white.withAlphaComponent(0.14).setFill(); path.fill()
                 NSColor.white.setStroke(); path.lineWidth = 2; path.stroke()
-                if box.width > 132 { label(String(localized:"\(store.shortcuts.label(.closeGap)) close gap · \(store.project.frameRate.timecode(gap.duration))"),at:NSPoint(x:box.minX+8,y:box.midY-6),size:9,color:.white) }
+                if box.width > 132, box.height >= 20 { label(String(localized:"\(store.shortcuts.label(.closeGap)) close gap · \(store.project.frameRate.timecode(gap.duration))"),at:NSPoint(x:box.minX+8,y:box.midY-6),size:9,color:.white) }
             }
         }
         if let (id,lane,time) = dropped, let media = store.project.media.first(where:{$0.id == id}) {
@@ -568,8 +637,9 @@ struct TimelineSurface: NSViewRepresentable {
         if store.project.clips.isEmpty {
             // In the middle of the first row below the ruler, clear of the lines between rows. Placed
             // by the visible area, not the part repainted, so a playhead strip redraws its own piece.
-            let row = lanes.indices.first { rowTop($0) >= rulerTop+ruler } ?? 0
-            label(String(localized:"Drag media onto a video (V) or audio (A) track"),at:NSPoint(x:visibleRect.minX+24,y:rowTop(row)+rowHeight/2-8),size:13,color:NSColor(white:0.45,alpha:1))
+            if let row = trackLayout.rows.first(where: { $0.top >= rulerTop+ruler }) ?? trackLayout.rows.first {
+                label(String(localized:"Drag media onto a video (V) or audio (A) track"),at:NSPoint(x:visibleRect.minX+24,y:row.boxTop+row.boxHeight/2-8),size:13,color:NSColor(white:0.45,alpha:1))
+            }
         }
         // The ruler is pinned to the top of the view; tracks scroll underneath it.
         let top = rulerTop
@@ -648,39 +718,83 @@ struct TimelineSurface: NSViewRepresentable {
         if fit.label { text.draw(at:NSPoint(x:x,y:badge.minY+(badge.height-textHeight)/2),withAttributes:attributes) }
         return badge
     }
+    /// A clip's sound as bars 2 pt apart: mirrored about `from`, or rising from it. The bars are
+    /// anchored to the clip, never the repainted area, so a playhead-only repaint or a strip a scroll
+    /// uncovers draws the same bars from the same samples as a full draw; the neighbours whose
+    /// antialiasing crosses an edge of the area are drawn too.
+    private func drawWaveform(_ clip: Clip, box: NSRect, in area: NSRect, from base: Double, reach: Double, centred: Bool) {
+        guard let store, let id = clip.mediaID, let peaks = store.waveforms[id], !peaks.isEmpty, let media = store.project.media(for:clip) else { return }
+        let waveform = NSBezierPath()
+        let first = max(0,Int(floor((area.minX-box.minX)/2)))
+        let last = min(Int(ceil(box.width/2)),Int(ceil((area.maxX-box.minX)/2))+1)
+        if first < last {
+            for bar in first..<last {
+                let x = box.minX+Double(bar)*2
+                // A retimed clip walks the source at its own rate, or a 2x clip would
+                // draw only the first half of the audio it actually plays.
+                let source = clip.sourceStart.seconds+(x-box.minX)/pixelsPerSecond*clip.speed
+                let index = min(peaks.count-1,max(0,Int(source/max(0.001,media.duration.seconds)*Double(peaks.count))))
+                let amplitude = max(1,Double(peaks[index])*reach)
+                waveform.move(to:NSPoint(x:x,y:base-amplitude)); waveform.line(to:NSPoint(x:x,y:centred ? base+amplitude : base))
+            }
+        }
+        Theme.accentNS.withAlphaComponent(centred ? 0.85 : 0.95).setStroke(); waveform.lineWidth = 1; waveform.stroke()
+    }
+    /// A clip's rounded box, square at the top or bottom where it meets its other half. `open`: its
+    /// outline, left open along the edge where the two meet.
+    static func clipPath(_ box: NSRect, top: Bool, bottom: Bool, open: Bool = false) -> NSBezierPath {
+        let r = min(4,box.width/2,box.height/2), t = top ? r : 0, b = bottom ? r : 0
+        let path = NSBezierPath()
+        // Clockwise on screen from the top edge (the view is flipped: minY is the top). An outline
+        // open at the top starts at its top right corner; open at the bottom, at its bottom left.
+        func topEdge() { path.line(to:NSPoint(x:box.maxX-t,y:box.minY)); if t > 0 { path.appendArc(from:NSPoint(x:box.maxX,y:box.minY),to:NSPoint(x:box.maxX,y:box.minY+t),radius:t) } }
+        func right() { path.line(to:NSPoint(x:box.maxX,y:box.maxY-b)); if b > 0 { path.appendArc(from:NSPoint(x:box.maxX,y:box.maxY),to:NSPoint(x:box.maxX-b,y:box.maxY),radius:b) } }
+        func bottomEdge() { path.line(to:NSPoint(x:box.minX+b,y:box.maxY)); if b > 0 { path.appendArc(from:NSPoint(x:box.minX,y:box.maxY),to:NSPoint(x:box.minX,y:box.maxY-b),radius:b) } }
+        func left() { path.line(to:NSPoint(x:box.minX,y:box.minY+t)); if t > 0 { path.appendArc(from:NSPoint(x:box.minX,y:box.minY),to:NSPoint(x:box.minX+t,y:box.minY),radius:t) } }
+        if open && !top {
+            path.move(to:NSPoint(x:box.maxX,y:box.minY)); right(); bottomEdge(); left()
+        } else if open && !bottom {
+            path.move(to:NSPoint(x:box.minX,y:box.maxY)); left(); topEdge(); right()
+        } else {
+            path.move(to:NSPoint(x:box.minX+t,y:box.minY)); topEdge(); right(); bottomEdge(); left(); path.close()
+        }
+        return path
+    }
     /// `area` is the part being repainted: thumbnails and waveform are only drawn there.
     private func drawClip(_ clip:Clip,box:NSRect,selected:Bool,ghost:Bool,in area:NSRect) {
         guard let store else { return }
         let color: NSColor = clip.kind == .audio ? NSColor(red:0.16,green:0.28,blue:0.42,alpha:1) : clip.kind == .text ? NSColor(red:0.39,green:0.29,blue:0.51,alpha:1) : NSColor(red:0.18,green:0.31,blue:0.5,alpha:1)
+        // A picture with its sound under it, and that sound, are drawn as one clip: square where they
+        // meet, one outline around both, the name on the picture.
+        // A sound folded away is not drawn; its picture is a clip of its own, rounded all round.
+        guard box.height >= 1 else { return }
+        let row = trackLayout.row(clip.lane)
+        let joinedBelow = clip.kind != .audio && clip.linkID != nil && trackLayout.soundShows(under:clip.lane) && !trackLayout.soundFolded(under:clip.lane)
+        let joinedAbove = clip.kind == .audio && clip.linkID != nil && row?.isSound == true
+        let titled = !joinedAbove && box.height >= 30
         NSGraphicsContext.saveGraphicsState()
-        let path = NSBezierPath(roundedRect:box,xRadius:4,yRadius:4); path.addClip()
+        let path = Self.clipPath(box,top:!joinedAbove,bottom:!joinedBelow); path.addClip()
         color.withAlphaComponent(ghost ? 0.6 : 1).setFill(); box.fill()
+        if joinedAbove { NSColor.black.withAlphaComponent(0.35).setFill(); NSRect(x:box.minX,y:box.minY,width:box.width,height:1).fill() }
         if !ghost {
-            if clip.kind == .audio, let id = clip.mediaID, let peaks = store.waveforms[id], !peaks.isEmpty, let media = store.project.media(for:clip) {
-                let waveform = NSBezierPath(); let center = box.minY+35
-                // Anchor bars to the clip, never the dirty rect: playhead-only repaints and
-                // newly exposed scroll strips must use the same positions/source samples as
-                // a full draw. Include neighboring strokes whose antialiasing crosses an edge.
-                let first = max(0,Int(floor((area.minX-box.minX)/2)))
-                let last = min(Int(ceil(box.width/2)),Int(ceil((area.maxX-box.minX)/2))+1)
-                if first < last {
-                    for bar in first..<last {
-                        let x = box.minX+Double(bar)*2
-                        // A retimed clip walks the source at its own rate, or a 2x clip would
-                        // draw only the first half of the audio it actually plays.
-                        let source = clip.sourceStart.seconds+(x-box.minX)/pixelsPerSecond*clip.speed
-                        let index = min(peaks.count-1,max(0,Int(source/max(0.001,media.duration.seconds)*Double(peaks.count))))
-                        let amplitude = max(1,Double(peaks[index])*17)
-                        waveform.move(to:NSPoint(x:x,y:center-amplitude)); waveform.line(to:NSPoint(x:x,y:center+amplitude))
-                    }
-                }
-                Theme.accentNS.withAlphaComponent(0.85).setStroke(); waveform.lineWidth = 1; waveform.stroke()
+            // The waveform under the name, or on its own in a picture's sound; none in a folded strip.
+            let head = titled ? 20.0 : 0, reach = min(17,(box.height-head)/2-2)
+            if clip.kind == .audio, reach >= 3 {
+                drawWaveform(clip,box:box,in:area,from:box.minY+head+(box.height-head)/2,reach:reach,centred:true)
             } else if let id = clip.mediaID, let image = store.thumbnails[id] {
                 let strip = NSRect(x:box.minX,y:box.minY+20,width:82,height:box.height-20)
                 let first = max(0,Int((area.minX-box.minX)/82))
                 let last = min(Int(ceil(box.width/82)),Int(ceil((area.maxX-box.minX)/82)))
                 if first < last { for tile in first..<last { image.draw(in:strip.offsetBy(dx:Double(tile)*82,dy:0),from:.zero,operation:.sourceOver,fraction:0.6,respectFlipped:true,hints:nil) } }
             }
+            // Its sound folded, a video carries it along its foot, over the pictures, rising from the bottom.
+            if clip.kind == .video, clip.linkID != nil, trackLayout.soundFolded(under:clip.lane), box.height >= 30 {
+                let foot = min(16,box.height*0.3)
+                NSColor.black.withAlphaComponent(0.35).setFill(); NSRect(x:box.minX,y:box.maxY-foot,width:box.width,height:foot).fill()
+                drawWaveform(clip,box:box,in:area,from:box.maxY-1,reach:foot-3,centred:false)
+            }
+        }
+        if !ghost, titled {
             NSColor.black.withAlphaComponent(0.25).setFill(); NSRect(x:box.minX,y:box.minY,width:box.width,height:20).fill()
             let titleX = max(box.minX+7,visibleRect.minX+4)
             var titleEnd = min(box.maxX,visibleRect.maxX)-6
@@ -698,10 +812,18 @@ struct TimelineSurface: NSViewRepresentable {
         }
         NSGraphicsContext.restoreGraphicsState()
         (selected ? (ghost && !candidateValid ? NSColor.systemRed : Theme.accentNS) : color.highlight(withLevel:0.2)!).setStroke()
-        path.lineWidth = selected ? 2 : 1; path.stroke()
+        let outline = joinedBelow || joinedAbove ? Self.clipPath(box,top:!joinedAbove,bottom:!joinedBelow,open:true) : path
+        outline.lineWidth = selected ? 2 : 1; outline.stroke()
         if selected {
+            // The trim handles, where a press takes them: mid-height, or up in the title band where a
+            // transition's strip takes the middle of that end.
             NSColor.white.withAlphaComponent(0.85).setFill()
-            NSRect(x:box.minX+2,y:box.midY-8,width:2,height:16).fill(); NSRect(x:box.maxX-4,y:box.midY-8,width:2,height:16).fill()
+            let own = transitions(on:[clip.id])
+            let mark = min(16,box.height-4)
+            for leading in [true,false] where mark >= 4 {
+                let zone = trimZone(clip,leading:leading,among:ghost ? [] : own), x = leading ? box.minX+2 : box.maxX-4
+                (zone.maxY >= box.midY+mark/2 ? NSRect(x:x,y:box.midY-mark/2,width:2,height:mark) : NSRect(x:x,y:box.minY+3,width:2,height:max(0,min(14,zone.maxY-box.minY-5)))).fill()
+            }
         }
     }
     override func mouseDown(with event:NSEvent) {
@@ -725,7 +847,8 @@ struct TimelineSurface: NSViewRepresentable {
         // With Shift the press is about choosing clips, so a transition strip under it does not take it.
         for transition in store.project.transitions.reversed() where !shift {
             let leading = [true,false].first { resizeHandle(transition,leading:$0)?.contains(origin) == true }
-            guard leading != nil || rect(transition)?.contains(origin) == true else { continue }
+            // A fade's anchored end is its clip's edge: pressed there, the clip below is trimmed.
+            guard leading != nil || (rect(transition)?.contains(origin) == true && anchoredTrim(transition)?.contains(origin) != true) else { continue }
             store.selectTransition(transition.id)
             if let leading, !store.isExporting {
                 store.commitPendingEdits(); store.endInteraction(); store.pause()
@@ -1016,7 +1139,11 @@ struct TimelineSurface: NSViewRepresentable {
     private func mediaDropTarget(_ id: UUID, at point: NSPoint) -> MediaDropTarget? {
         guard let store, !store.isExporting, !store.isCapturingSnapshot,
               !store.showLauncher, !store.showExportSheet, !store.showNewProjectSheet,
-              !store.missing.contains(id), let lane = lane(at:point) else { return nil }
+              !store.missing.contains(id), var lane = lane(at:point) else { return nil }
+        // A track's picture and sound are one track: media dropped on it goes to the half it belongs on.
+        if let media = store.project.media.first(where: { $0.id == id }), (media.kind == .audio) == lane.isVideo, trackLayout.together(lane,lane.paired) {
+            lane = lane.paired
+        }
         let raw = time(at:point.x), threshold = MediaTime(seconds:8/pixelsPerSecond)
         let snapping = store.snapping && !NSEvent.modifierFlags.contains(.shift)
         let position = snapping ? Editing.snapped(raw,playhead:store.playhead,threshold:threshold,project:store.project)

@@ -19,6 +19,10 @@ struct InspectorPanel: View {
     @FocusState private var textFocused: Bool
     /// The title whose appearance slider is being dragged: its edits stay one undo step until release.
     @State private var titleDrag: UUID?
+    /// Whether the SHADOW, TRANSFORM and COLOUR sections are unfolded; kept across launches.
+    @AppStorage("inspector.shadowOpen") private var shadowOpen = true
+    @AppStorage("inspector.transformOpen") private var transformOpen = true
+    @AppStorage("inspector.colourOpen") private var colourOpen = true
     /// The characters a title keeps (Project.validated): the text field holds no more.
     static let textLimit = 2000
     /// `draft` cut to `textLimit` where it differs from `old`: what was typed or pasted is shortened,
@@ -98,7 +102,9 @@ struct InspectorPanel: View {
                                 titleControl("Width",\.outlineWidth,range:0...20,suffix:" pt",clip:clip,undoName:"Outline",switches:true)
                                 titleColor("Outline colour",\.outlineRed,\.outlineGreen,\.outlineBlue,clip:clip).disabled(!clip.style.hasOutline)
                             }
-                            section("SHADOW") {
+                            FoldingSection(title:"SHADOW",isOpen:$shadowOpen,
+                                           summary:clip.style.hasShadow ? .amount(Self.reading(clip.style.shadowOpacity,multiplier:100,switches:true)+"%",
+                                                                                  TitleColor(red:clip.style.shadowRed,green:clip.style.shadowGreen,blue:clip.style.shadowBlue)) : .off) {
                                 titleControl("Opacity",\.shadowOpacity,range:0...1,multiplier:100,suffix:"%",clip:clip,undoName:"Shadow",switches:true)
                                 Group {
                                     titleControl("Distance",\.shadowDistance,range:0...40,suffix:" pt",clip:clip,undoName:"Shadow")
@@ -107,11 +113,8 @@ struct InspectorPanel: View {
                                     titleColor("Shadow colour",\.shadowRed,\.shadowGreen,\.shadowBlue,clip:clip)
                                 }.disabled(!clip.style.hasShadow)
                             }
-                        }
-                        section("TIMING") {
-                            info("Start",store.project.frameRate.timecode(clip.start))
-                            info("Source in",store.project.frameRate.timecode(clip.sourceStart))
-                            info("Duration",store.project.frameRate.timecode(clip.duration))
+                            // A colour folded away hides its presets, and unfolds without them.
+                            .onChange(of:shadowOpen) { _,open in if !open { store.colorPresetRow.close("Shadow colour") } }
                         }
                         if clip.kind == .video || clip.kind == .audio {
                             section("SPEED") {
@@ -138,14 +141,14 @@ struct InspectorPanel: View {
                             }
                         }
                         if clip.kind != .audio {
-                            section("TRANSFORM") {
+                            FoldingSection(title:"TRANSFORM",isOpen:$transformOpen,summary:Self.isDefaultTransform(clip.style) ? .unchanged : .changed) {
                                 control("Position X",\.x,range:-1...1,multiplier:100,suffix:"%")
                                 control("Position Y",\.y,range:-1...1,multiplier:100,suffix:"%")
                                 control("Scale",\.scale,range:0.05...4,multiplier:100,suffix:"%")
                                 control("Rotation",\.rotation,range:-180...180,suffix:"°")
                                 control("Opacity",\.opacity,range:0...1,multiplier:100,suffix:"%")
                             }
-                            section("COLOUR · SDR") {
+                            FoldingSection(title:"COLOUR · SDR",isOpen:$colourOpen,summary:Self.isDefaultColour(clip.style) ? .unchanged : .changed) {
                                 control("Brightness",\.brightness,range:-1...1,multiplier:100)
                                 control("Contrast",\.contrast,range:0...3,multiplier:100,suffix:"%")
                                 control("Saturation",\.saturation,range:0...3,multiplier:100,suffix:"%")
@@ -156,6 +159,12 @@ struct InspectorPanel: View {
                                 control("Volume",\.volume,range:0...2,multiplier:100,suffix:"%")
                                 Toggle("Mute",isOn:Binding(get:{store.selectedClip?.style.muted ?? false},set:{v in store.updateStyle { $0.muted = v } })).toggleStyle(.switch).controlSize(.mini)
                             }
+                        }
+                        // Where the clip is: read-only, so below everything that changes it.
+                        section("TIMING") {
+                            info("Start",store.project.frameRate.timecode(clip.start))
+                            info("Source in",store.project.frameRate.timecode(clip.sourceStart))
+                            info("Duration",store.project.frameRate.timecode(clip.duration))
                         }
                         Button("Reset appearance") { store.updateStyle { style in let text = style.text; style = ClipStyle(); style.text = text } }.controlSize(.small)
                     }.padding(16)
@@ -356,6 +365,16 @@ struct InspectorPanel: View {
     /// A title slider's value as its label reads it: whole steps, rounded as `slide` rounds (+ 0
     /// turns −0 into 0). An effect that is on never reads 0: one saved below a step by an earlier
     /// Ara shows its tenths.
+    /// Whether a clip is placed as it came in: TRANSFORM folded says Default rather than Edited.
+    static func isDefaultTransform(_ style: ClipStyle) -> Bool {
+        let plain = ClipStyle()
+        return style.x == plain.x && style.y == plain.y && style.scale == plain.scale && style.rotation == plain.rotation && style.opacity == plain.opacity
+    }
+    /// Whether a clip's colour is as it came in, for COLOUR folded.
+    static func isDefaultColour(_ style: ClipStyle) -> Bool {
+        let plain = ClipStyle()
+        return style.brightness == plain.brightness && style.contrast == plain.contrast && style.saturation == plain.saturation
+    }
     static func reading(_ value: Double, multiplier: Double = 1, switches: Bool = false) -> String {
         let shown = value*multiplier
         if switches, shown > 0, shown.rounded() == 0 { return String(format:"%.1f",max(0.1,(shown*10).rounded()/10)) }
@@ -378,14 +397,10 @@ struct InspectorPanel: View {
                    }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(undoName.map { "\($0) \(label.lowercased())" } ?? label)))
         }
     }
+    /// A title colour: its swatch, the presets beside it, and the palette (ColorControls.swift).
     private func titleColor(_ label:String,_ red:WritableKeyPath<ClipStyle,Double>,_ green:WritableKeyPath<ClipStyle,Double>,_ blue:WritableKeyPath<ClipStyle,Double>,clip:Clip) -> some View {
-        ColorPicker(LocalizedStringKey(label),selection:Binding(get:{Color(red:clip.style[keyPath:red],green:clip.style[keyPath:green],blue:clip.style[keyPath:blue])},set:{color in
-            guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
-            // The picker re-sends its colour after a colour-space round trip; that is not an edit.
-            let s = clip.style, tolerance = 0.5/255
-            guard abs(c.redComponent-s[keyPath:red]) > tolerance || abs(c.greenComponent-s[keyPath:green]) > tolerance || abs(c.blueComponent-s[keyPath:blue]) > tolerance else { return }
-            store.updateStyleLive(clip.id,name:label) { $0[keyPath:red] = c.redComponent; $0[keyPath:green] = c.greenComponent; $0[keyPath:blue] = c.blueComponent }
-        }),supportsOpacity:false)
+        TitleColorControl(store:store,target:ColorTarget(clipID:clip.id,red:red,green:green,blue:blue,name:label),
+                          color:TitleColor(red:clip.style[keyPath:red],green:clip.style[keyPath:green],blue:clip.style[keyPath:blue]))
     }
     private func control(_ label:String,_ key:WritableKeyPath<ClipStyle,Double>,range:ClosedRange<Double>,multiplier:Double = 1,suffix:String = "") -> some View {
         VStack(spacing:5) {
@@ -674,5 +689,52 @@ struct SpeedField: View {
             .onChange(of:focused) { _,now in if !now { text = shown } }
             .help("Type a speed from 0.1x to 10x and press Return")
             .accessibilityLabel("Custom speed")
+    }
+}
+
+/// What a folded section's title line shows: the effect's amount and colour, Off, or whether the
+/// section's settings are as they came in.
+enum FoldingSummary { case amount(String, TitleColor), off, unchanged, changed }
+
+/// An inspector section that folds away under its title, which then says what it holds: the
+/// effect's amount and colour or Off, or whether its settings are changed.
+struct FoldingSection<Content: View>: View {
+    let title: String
+    @Binding var isOpen: Bool
+    let summary: FoldingSummary
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        VStack(alignment:.leading,spacing:10) {
+            Button { withAnimation(.snappy(duration:0.22)) { isOpen.toggle() } } label: {
+                // The title in line with the other sections'; the fold switch at the end of its line.
+                HStack(spacing:6) {
+                    panelTitle(title)
+                    Spacer(minLength:6)
+                    if !isOpen { folded.font(.system(size:10)).lineLimit(1).transition(.opacity) }
+                    Image(systemName:"chevron.right").font(.system(size:8,weight:.bold)).foregroundStyle(Theme.muted)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .frame(width:18,height:18).background(Theme.raised,in:Circle())
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isOpen ? LocalizedStringKey("Hide these settings") : LocalizedStringKey("Show these settings"))
+            .accessibilityLabel(Text(LocalizedStringKey(title)))
+            .accessibilityValue(isOpen ? Text("Expanded") : Text("Collapsed"))
+            if isOpen { VStack(alignment:.leading,spacing:10) { content() }.transition(.opacity) }
+        }
+        .font(.system(size:11))
+    }
+    @ViewBuilder private var folded: some View {
+        switch summary {
+        case let .amount(value,color):
+            HStack(spacing:6) {
+                Text(verbatim:value).font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted)
+                Circle().fill(Color(color)).frame(width:9,height:9).overlay(Circle().strokeBorder(.white.opacity(0.25),lineWidth:1))
+            }
+        case .off: Text("Off").foregroundStyle(Theme.muted)
+        case .unchanged: Text("Default").foregroundStyle(Theme.muted)
+        case .changed: Text("Edited").foregroundStyle(Theme.accent)
+        }
     }
 }
