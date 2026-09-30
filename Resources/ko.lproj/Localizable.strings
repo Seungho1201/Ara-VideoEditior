@@ -610,7 +610,7 @@
 "Sound of V%lld" = "V%lld 소리";
 "No favourite clips yet" = "아직 즐겨찾기한 클립이 없습니다";
 "Select a clip and click ☆ beside its name in the inspector to keep it here." = "클립을 선택하고 인스펙터에서 클립 이름 옆 ☆을 누르면 여기에 저장됩니다.";
-"Drag a clip onto the timeline. It comes with its look, and a video with its sound." = "클립을 타임라인으로 끌어 놓으십시오. 모양 설정이 그대로 들어가고, 영상은 소리도 함께 들어갑니다.";
+"Drag a clip onto the timeline. It comes with its look and transitions, and a video with its sound." = "클립을 타임라인으로 끌어 놓으십시오. 모양 설정과 전환 효과가 그대로 들어가고, 영상은 소리도 함께 들어갑니다.";
 "Remove from Favourites" = "즐겨찾기에서 삭제";
 "Remove %@ from Favourites" = "%@ 즐겨찾기에서 삭제";
 "Favourite: %@" = "즐겨찾기: %@";
@@ -624,3 +624,4 @@
 "Favourites could not be saved: %@" = "즐겨찾기를 저장하지 못했습니다: %@";
 "%@ plays %@, which can't be found. Import it again, then keep the clip again." = "%1$@의 원본 %2$@을(를) 찾을 수 없습니다. 원본을 다시 가져온 뒤 클립을 다시 즐겨찾기에 저장하십시오.";
 "Add favourite" = "즐겨찾기 클립 추가";
+"Keeps its transitions" = "전환 효과 포함";

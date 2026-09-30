@@ -240,21 +240,24 @@ public enum Editing {
     }
 }
 
-public struct EditHistory: Sendable {
-    private var past: [(String, Project)] = []
-    private var future: [(String, Project)] = []
+/// A project's undo and redo: named snapshots, at most 100 back.
+public typealias EditHistory = UndoHistory<Project>
+/// Undo and redo over named snapshots of whatever is edited, at most 100 back.
+public struct UndoHistory<State: Sendable>: Sendable {
+    private var past: [(String, State)] = []
+    private var future: [(String, State)] = []
     public init() {}
     public var canUndo: Bool { !past.isEmpty }
     public var canRedo: Bool { !future.isEmpty }
     public var undoName: String { past.last?.0 ?? "" }
     public var redoName: String { future.last?.0 ?? "" }
-    public mutating func record(_ project: Project, name: String) {
-        past.append((name, project)); if past.count > 100 { past.removeFirst() }; future.removeAll()
+    public mutating func record(_ state: State, name: String) {
+        past.append((name, state)); if past.count > 100 { past.removeFirst() }; future.removeAll()
     }
-    public mutating func undo(_ current: Project) -> Project? {
+    public mutating func undo(_ current: State) -> State? {
         guard let entry = past.popLast() else { return nil }; future.append((entry.0,current)); return entry.1
     }
-    public mutating func redo(_ current: Project) -> Project? {
+    public mutating func redo(_ current: State) -> State? {
         guard let entry = future.popLast() else { return nil }; past.append((entry.0,current)); return entry.1
     }
 }

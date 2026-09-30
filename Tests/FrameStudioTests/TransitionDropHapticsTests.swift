@@ -35,6 +35,7 @@ final class TransitionDropHapticsTests: XCTestCase {
     @MainActor private func drag(haptics: Bool, _ steps: (TransitionDropInfo, TimelineCanvas, EditorStore) -> Void) -> [NSHapticFeedbackManager.FeedbackPattern] {
         _ = NSApplication.shared
         let store = EditorStore(), saved = UserDefaults.standard.object(forKey:"timeline.scrubHaptics")
+        let restore = unfoldingEverySound(store); defer { restore() }
         store.scrubHaptics = haptics
         store.edit("Fixture") { project in
             project.frameRate = .init(30)

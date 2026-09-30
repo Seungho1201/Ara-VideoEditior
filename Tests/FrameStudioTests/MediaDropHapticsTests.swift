@@ -33,6 +33,7 @@ final class MediaDropHapticsTests: XCTestCase {
     @MainActor private func withTimeline(_ check: (EditorStore, TimelineCanvas, LibraryDropInfo, UUID) throws -> Void) rethrows {
         _ = NSApplication.shared
         let store = EditorStore(), oldHaptics = UserDefaults.standard.object(forKey:"timeline.scrubHaptics")
+        let restore = unfoldingEverySound(store); defer { restore() }
         store.scrubHaptics = true
         let media = MediaReference(name:"Drop fixture",path:"/nonexistent/ara-drop-fixture.mov",kind:.video,
                                    duration:.init(seconds:1),width:1920,height:1080,frameRate:30,hasAudio:true)

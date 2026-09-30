@@ -19,7 +19,7 @@ private struct Overlaid: View {
 /// Help mode over the whole editor: every note readable and clear of the others, controls out of
 /// view left unnamed, and no key but Esc acting while the tips are read.
 @MainActor final class HelpModeTests: XCTestCase {
-    private static let keys = ["timeline.snapping","timeline.scrubHaptics","haptics.off","haptics.skimStrength","editor.columnFractions.v1","editor.rowFractions.v1"]
+    private static let keys = ["timeline.snapping","timeline.scrubHaptics","haptics.off","haptics.skimStrength","editor.columnFractions.v1","editor.rowFractions.v1","timeline.foldedSound"]
     private var windows: [NSWindow] = []
     override func tearDown() async throws {
         for window in windows { window.contentView = nil; window.close() }

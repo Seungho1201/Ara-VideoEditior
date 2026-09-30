@@ -16,8 +16,11 @@ import FrameMedia
     private let suite = "ara.tests.projects"
     /// Ara's cache entries (thumbnails, waveforms) the test's sources may have made.
     private var cacheKeys: Set<String> = []
+    /// A new project folds every sound (kept in the defaults): put back after each test.
+    private var foldedSound: Any?
     override func setUp() async throws {
         _ = NSApplication.shared
+        foldedSound = UserDefaults.standard.object(forKey:"timeline.foldedSound")
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-project-tests-\(UUID().uuidString)",isDirectory:true)
         try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
         UserDefaults(suiteName:suite)?.removePersistentDomain(forName:suite)
@@ -29,6 +32,7 @@ import FrameMedia
             for suffix in [".jpg",".json"] { try? FileManager.default.removeItem(at:MediaPaths.cache.appendingPathComponent(key+suffix)) }
         }
         try? FileManager.default.removeItem(at:folder)
+        if let foldedSound { UserDefaults.standard.set(foldedSound,forKey:"timeline.foldedSound") } else { UserDefaults.standard.removeObject(forKey:"timeline.foldedSound") }
     }
     /// A store whose questions fail the test unless it answers them itself.
     func makeStore() -> EditorStore {

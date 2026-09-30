@@ -61,6 +61,35 @@ final class TitleDraftTests: XCTestCase {
         XCTAssertEqual(text(store),"BaseR"); XCTAssertEqual(field.string,"BaseR")
     }
 
+    /// A Hangul syllable still being composed shows in the title at once, as the field shows it, not
+    /// only once the next key completes it; a composition cancelled takes it out again.
+    @MainActor func testTheSyllableBeingComposedShowsInTheTitle() async throws {
+        let (store,window,field) = try await typing()
+        defer { window.contentView = nil; window.close() }
+        // Keys a moment apart, as typed: "한", then "ㄱ" starting the next syllable.
+        field.insertText("한",replacementRange:caret); try await spin(40)
+        field.setMarkedText("ㄱ",selectedRange:NSRange(location:1,length:0),replacementRange:caret)
+        try await spin(300)
+        XCTAssertTrue(field.hasMarkedText())
+        XCTAssertEqual(text(store),"Base한ㄱ","the syllable being composed, as the field shows it")
+        field.setMarkedText("그",selectedRange:NSRange(location:1,length:0),replacementRange:caret)
+        try await spin(300)
+        XCTAssertEqual(text(store),"Base한그")
+        // Cancelled: the input method takes the marked text away, and so does the title.
+        field.setMarkedText("",selectedRange:NSRange(location:0,length:0),replacementRange:caret)
+        field.unmarkText()
+        try await spin(300)
+        XCTAssertEqual(field.string,"Base한"); XCTAssertEqual(text(store),"Base한")
+        // Composed to the end: the field and the title agree.
+        field.setMarkedText("글",selectedRange:NSRange(location:1,length:0),replacementRange:caret)
+        field.insertText("글",replacementRange:caret)
+        try await spin(300)
+        XCTAssertFalse(field.hasMarkedText())
+        XCTAssertEqual(field.string,"Base한글"); XCTAssertEqual(text(store),"Base한글")
+        window.makeFirstResponder(nil); try await spin(200)
+        XCTAssertEqual(text(store),"Base한글")
+    }
+
     /// Reset appearance 60 ms after the last key keeps what was typed, in the title and the field.
     @MainActor func testResetAppearanceRightAfterTypingKeepsTheText() async throws {
         let (store,window,field) = try await typing()

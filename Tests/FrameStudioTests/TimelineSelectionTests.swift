@@ -13,6 +13,7 @@ final class TimelineSelectionTests: XCTestCase {
     @MainActor private func withTimeline(_ check: (EditorStore, TimelineCanvas, [String:UUID]) throws -> Void) throws {
         _ = NSApplication.shared
         let store = EditorStore()
+        let restore = unfoldingEverySound(store); defer { restore() }
         let pasteboard = NSPasteboard(name:.init("ara-selection-tests-\(UUID().uuidString)"))
         store.pasteboard = pasteboard                    // never the user's clipboard
         let a = Clip(name:"A",kind:.text,lane:.v1,start:.init(seconds:1),duration:.init(seconds:2))
@@ -132,6 +133,7 @@ final class TimelineSelectionTests: XCTestCase {
     @MainActor func testAVideoAndItsLinkedAudioAreOneSelection() throws {
         _ = NSApplication.shared
         let store = EditorStore()
+        let restore = unfoldingEverySound(store); defer { restore() }
         store.pasteboard = NSPasteboard(name:.init("ara-selection-tests-\(UUID().uuidString)"))
         defer { store.pasteboard.releaseGlobally() }
         let media = MediaReference(name:"Clip",path:"/nonexistent/clip.mov",bookmark:nil,kind:.video,duration:.init(seconds:10),width:1920,height:1080,frameRate:30,hasAudio:true)

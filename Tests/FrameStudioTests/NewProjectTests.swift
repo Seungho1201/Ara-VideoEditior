@@ -4,6 +4,13 @@ import FrameCore
 @testable import FrameStudio
 
 final class NewProjectTests: XCTestCase {
+    /// A new project folds every sound (kept in the defaults): put back after each test.
+    private var foldedSound: Any?
+    override func setUp() { super.setUp(); foldedSound = UserDefaults.standard.object(forKey:"timeline.foldedSound") }
+    override func tearDown() {
+        if let foldedSound { UserDefaults.standard.set(foldedSound,forKey:"timeline.foldedSound") } else { UserDefaults.standard.removeObject(forKey:"timeline.foldedSound") }
+        super.tearDown()
+    }
     @MainActor func testOpeningAndCancellingSetupPreservesCurrentWork() {
         _ = NSApplication.shared
         let store = EditorStore()

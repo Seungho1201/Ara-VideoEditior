@@ -80,7 +80,16 @@ struct InspectorPanel: View {
                                             let fitted = Self.fitting(draft,after:old)
                                             textDraft = fitted.text; Self.placeCaret(fitted.caret,in:fitted.text); return
                                         }
-                                        scheduleTextCommit(draft)
+                                        scheduleTextCommit(composing()?.string ?? draft)
+                                    }
+                                    // A syllable an input method is still composing (Hangul) is in the field
+                                    // but not yet in the binding: the title shows it at once all the same, and
+                                    // loses it again when the composition is cancelled.
+                                    // (The text view says nothing of marked text; its storage does.)
+                                    .onReceive(NotificationCenter.default.publisher(for:NSTextStorage.didProcessEditingNotification)) { note in
+                                        guard let storage = note.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters),
+                                              let field = focusedField(), field.textStorage === storage else { return }
+                                        scheduleTextCommit(field.string)
                                     }
                                     .onChange(of:textFocused) { _,focused in
                                         store.isEditingText = focused
@@ -271,13 +280,21 @@ struct InspectorPanel: View {
         textCommit?.cancel(); textCommit = nil
         textDraft = now; lastCommitted = now
     }
+    /// The title's text view while it has the keyboard (the text field's editor, a field editor,
+    /// is some other field's).
+    private func focusedField() -> NSTextView? {
+        guard textFocused else { return nil }
+        return NSApp.windows.lazy.compactMap { $0.firstResponder as? NSTextView }.first { !$0.isFieldEditor }
+    }
+    /// The focused text view while an input method composes in it.
+    private func composing() -> NSTextView? { focusedField().flatMap { $0.hasMarkedText() ? $0 : nil } }
     /// Commits a short moment after the last keystroke. The preview follows the typing without
     /// re-rendering the whole editor, and the text view's own state is never overwritten.
     private func scheduleTextCommit(_ draft: String) {
         guard let id = draftClipID else { return }
         textCommit?.cancel()
         textCommit = Task { @MainActor in
-            try? await Task.sleep(for:.milliseconds(160))
+            try? await Task.sleep(for:.milliseconds(80))
             guard !Task.isCancelled else { return }
             textCommit = nil      // done: a later flush must not commit this draft a second time
             commitText(draft,to:id)

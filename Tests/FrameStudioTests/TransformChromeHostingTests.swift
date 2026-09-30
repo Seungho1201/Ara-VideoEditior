@@ -72,6 +72,22 @@ import FrameCore
         let below = hit(timeline,CGPoint(x:timeline.visibleRect.midX,y:timeline.visibleRect.maxY-12))
         XCTAssertFalse(below is TransformChromeLayerView); XCTAssertFalse(below === chrome)
         XCTAssertTrue(below.map { $0 === timeline || $0.isDescendant(of:timeline) } == true,"the timeline still takes its clicks (\(String(describing:below.map { type(of:$0) })))")
+        // The centre is toned down (70%) while transforming, and whole while the point is placed.
+        func centreAlpha() throws -> CGFloat {
+            let rep = try XCTUnwrap(chrome.bitmapImageRepForCachingDisplay(in:chrome.bounds))
+            chrome.cacheDisplay(in:chrome.bounds,to:rep)
+            var most: CGFloat = 0
+            for x in stride(from:0,to:rep.pixelsWide,by:1) { for y in stride(from:0,to:rep.pixelsHigh,by:1) {
+                guard let c = rep.colorAt(x:x,y:y)?.usingColorSpace(.sRGB), c.alphaComponent > 0.05 else { continue }
+                if c.redComponent > 0.8, c.greenComponent < 0.4, c.blueComponent < 0.4 { most = max(most,c.alphaComponent) }
+            }}
+            return most
+        }
+        let toned = try centreAlpha()
+        XCTAssertEqual(toned,PreviewTransformOverlay.centreOpacity,accuracy:0.05,"the red centre at 70%")
+        store.anchorEditID = title.id; try await settle()
+        XCTAssertGreaterThan(try centreAlpha(),0.95,"whole while placed")
+        store.anchorEditID = nil; try await settle()
         // Out of transform mode the chrome is hidden and takes nothing.
         store.previewTransformID = nil; try await settle()
         XCTAssertTrue(chrome.isHidden)

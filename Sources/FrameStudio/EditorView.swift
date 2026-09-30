@@ -164,27 +164,27 @@ struct EditorView: View {
     }
     private var timeline: some View {
         VStack(spacing:0) {
-            HStack(spacing:16) {
-                panelTitle("TIMELINE")
+            // The buttons take their whole square and answer the pointer (ToolbarButtonStyle); the
+            // spacing keeps their icons where they were.
+            HStack(spacing:6) {
+                panelTitle("TIMELINE").padding(.trailing,10)
                 // What changes the project waits while an export reads it.
                 Button { store.undo() } label:{Image(systemName:"arrow.uturn.backward")}.disabled(!store.canUndo || store.isExporting).help("Undo \(shortcuts.label(.undo))").helpTip("Undo",shortcut:shortcuts.label(.undo))
                 Button { store.redo() } label:{Image(systemName:"arrow.uturn.forward")}.disabled(!store.canRedo || store.isExporting).help("Redo \(shortcuts.label(.redo))").helpTip("Redo",shortcut:shortcuts.label(.redo))
-                Divider().frame(height:18)
+                Divider().frame(height:18).padding(.horizontal,5)
                 Button { store.split() } label:{Image(systemName:"scissors")}.disabled(store.selectedClip == nil || store.isExporting).help("Split at playhead \(shortcuts.label(.split))").accessibilityLabel("Split at playhead").helpTip("Split at playhead",shortcut:shortcuts.label(.split))
                 Button(action:store.chooseSnapshot) {
                     if store.isCapturingSnapshot { ProgressView().controlSize(.mini).frame(width:16,height:16) }
                     else { Image(systemName:"camera").frame(width:16,height:16) }
                 }.disabled(!store.canCaptureSnapshot).help("Save current frame as PNG \(shortcuts.label(.snapshot))").accessibilityLabel("Capture timeline snapshot").helpTip("Save frame as PNG",shortcut:shortcuts.label(.snapshot))
-                speedMenu
+                speedMenu.modifier(ToolbarHover())
                 Button { store.addText() } label:{
                     CaptionsGlyph(lineWidth:1).stroke(style:StrokeStyle(lineWidth:1,lineCap:.round,lineJoin:.round)).frame(width:17,height:12.6)
                 }.disabled(store.isExporting).help("Add a title above the clips at the playhead \(shortcuts.label(.addText))").accessibilityLabel("Add text clip").helpTip("Add title",shortcut:shortcuts.label(.addText))
                 // Rectangle select, once: the next drag across the tracks selects what it covers.
                 Button { store.dragSelectArmed.toggle() } label:{
-                    DragSelectGlyph().frame(width:15,height:15)
-                        .padding(3).background(store.dragSelectArmed ? Theme.accent.opacity(0.22) : .clear,in:RoundedRectangle(cornerRadius:4))
-                        .foregroundStyle(store.dragSelectArmed ? Theme.accent : Color.primary)
-                }.padding(-3).disabled(store.project.clips.isEmpty)
+                    DragSelectGlyph().frame(width:15,height:15).foregroundStyle(store.dragSelectArmed ? Theme.accent : Color.primary)
+                }.buttonStyle(ToolbarButtonStyle(selected:store.dragSelectArmed)).disabled(store.project.clips.isEmpty)
                  .help(store.dragSelectArmed ? LocalizedStringKey("Drag across the timeline to select clips · Esc to cancel") : LocalizedStringKey("Select clips with a rectangle: the next drag across the timeline, no Shift needed"))
                  .accessibilityLabel("Rectangle select").accessibilityAddTraits(store.dragSelectArmed ? .isSelected : []).helpTip("Rectangle select")
                 Button { store.deleteSelection() } label:{Image(systemName:"trash")}.disabled(!store.canDeleteSelection || store.isExporting)
@@ -198,9 +198,10 @@ struct EditorView: View {
                     Image(systemName:"questionmark.circle").font(.system(size:14))
                         .foregroundStyle(store.showHelp ? Theme.accent : Color.primary)
                 }
+                .buttonStyle(ToolbarButtonStyle(selected:store.showHelp))
                 .help("Show what each control does").accessibilityLabel("Tips")
                 .helpTip("Show these tips")
-            }.font(.system(size:11,weight:.medium)).buttonStyle(.plain).padding(.horizontal,16).frame(height:42).background(Theme.panel)
+            }.font(.system(size:11,weight:.medium)).buttonStyle(ToolbarButtonStyle()).padding(.horizontal,16).frame(height:42).background(Theme.panel)
             // The clip speed slides in and out; the icons after it follow instead of jumping.
             .animation(.snappy(duration:0.28),value:store.canRetimeSelection)
             Divider()

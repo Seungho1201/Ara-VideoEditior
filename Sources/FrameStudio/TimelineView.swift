@@ -47,12 +47,14 @@ struct TimelineView: View {
                     .lineLimit(1).fixedSize().padding(.leading,7)
             }
             Spacer(minLength:4)
-            if removable(lane), row.height >= 30 {
+            if removable(lane) {
+                // A folding sound's ✕ fades with it rather than popping at a height.
                 Button { store.removeTrack(lane) } label: {
                     Image(systemName:"xmark").font(.system(size:8,weight:.bold)).foregroundStyle(Theme.muted)
                         .frame(width:16,height:18).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).padding(.trailing,4)
+                .opacity(row.height >= 30 ? 1 : 0).allowsHitTesting(row.height >= 30)
                 .disabled(store.isExporting)
                 .help("Remove \(lane.rawValue) · the tracks above move down")
                 .accessibilityLabel("Remove track \(lane.rawValue)")
@@ -69,7 +71,8 @@ struct TimelineView: View {
     private func soundSwitch(_ number: Int) -> some View {
         let folded = store.foldedSound.contains(number)
         // The same ease and length as the rows' fold on the canvas beside them.
-        return Button { withAnimation(.easeInOut(duration:TimelineCanvas.foldDuration)) { store.toggleSound(number) } } label: {
+        let curve = TimelineCanvas.foldCurve
+        return Button { withAnimation(.timingCurve(curve.x1,curve.y1,curve.x2,curve.y2,duration:TimelineCanvas.foldDuration)) { store.toggleSound(number) } } label: {
             HStack(spacing:3) {
                 Image(systemName:"chevron.right").font(.system(size:7,weight:.bold)).rotationEffect(.degrees(folded ? 0 : 90))
                 Image(systemName:folded ? "speaker.slash.fill" : "speaker.wave.2.fill").font(.system(size:11))
@@ -213,7 +216,7 @@ struct TimelineSurface: NSViewRepresentable {
     /// The time folds run on (tests set it).
     var clock: () -> CFTimeInterval = CACurrentMediaTime
     /// As long as the track names beside the rows take, with the same ease in and out.
-    nonisolated static let foldDuration = 0.28
+    nonisolated static let foldDuration = 0.32
     /// Folds or opens, over `foldDuration`, the sounds folded or opened since the last call: a
     /// video's sound slides up under its picture, or down out of it. One turned back on its way
     /// sets off again from where it is.
@@ -235,18 +238,22 @@ struct TimelineSurface: NSViewRepresentable {
     func stepFolds() {
         let now = clock()
         folds = folds.filter { now-$0.value.start < Self.foldDuration }
-        shownFolding = folds.mapValues { $0.from+($0.to-$0.from)*Self.easeInOut(max(0,(now-$0.start)/Self.foldDuration)) }
+        shownFolding = folds.mapValues { $0.from+($0.to-$0.from)*Self.foldEase(max(0,(now-$0.start)/Self.foldDuration)) }
         if folds.isEmpty { foldLink?.invalidate(); foldLink = nil; window?.invalidateCursorRects(for:self) }
         if let scroll = enclosingScrollView { setFrameSize(NSSize(width:frame.width,height:max(contentHeight,scroll.contentSize.height))) }
         needsDisplay = true
     }
-    /// SwiftUI's ease in and out (a cubic Bézier through 0.42, 0 and 0.58, 1) at `t`.
-    static func easeInOut(_ t: Double) -> Double {
-        let t = min(1,max(0,t))
+    /// How a fold moves: off at once, settling gently (a cubic Bézier through 0.2, 0.8 and 0.2, 1,
+    /// the curve the track names beside the rows are given too).
+    nonisolated static let foldCurve = (x1:0.2,y1:0.8,x2:0.2,y2:1.0)
+    /// Where along the fold the curve is at time `t` (0–1).
+    static func foldEase(_ t: Double) -> Double {
+        guard t > 0 else { return 0 }; guard t < 1 else { return 1 }
+        let c = foldCurve
         func along(_ s: Double, _ a: Double, _ b: Double) -> Double { 3*(1-s)*(1-s)*s*a+3*(1-s)*s*s*b+s*s*s }
         var low = 0.0, high = 1.0
-        for _ in 0..<30 { let middle = (low+high)/2; if along(middle,0.42,0.58) < t { low = middle } else { high = middle } }
-        return along((low+high)/2,0,1)
+        for _ in 0..<30 { let middle = (low+high)/2; if along(middle,c.x1,c.x2) < t { low = middle } else { high = middle } }
+        return along((low+high)/2,c.y1,c.y2)
     }
     private var layoutCache: (key: LayoutKey, layout: TrackLayout)?
     /// Ruler, the "+ Video" band, every track, the "+ Audio" band.
@@ -987,6 +994,7 @@ struct TimelineSurface: NSViewRepresentable {
                 group = selection; groupMoving = store.project.groupIDs(for:selection); clickedInGroup = clip.id; original = clip; candidateValid = true; mode = .move
             } else {
                 store.selectedClipID = clip.id; store.selectedGap = nil
+                showTransform(clip)
                 original = clip; candidate = clip; candidateValid = true
                 mode = edge
             }
@@ -1005,6 +1013,12 @@ struct TimelineSurface: NSViewRepresentable {
             store.selectedGap = nil; mode = .scrub; store.pause(); scrub(at:origin,with:event)
         }
         needsDisplay = true
+    }
+    /// A picture, still or title picked on the timeline is ready to transform in the preview, as a
+    /// double-click there makes it: its outline shows while the playhead is on it.
+    private func showTransform(_ clip: Clip) {
+        guard let store, clip.lane.isVideo else { return }
+        store.previewTransformID = clip.id
     }
     override func mouseDragged(with event:NSEvent) {
         guard let store else { return }
@@ -1149,7 +1163,9 @@ struct TimelineSurface: NSViewRepresentable {
         if let store, mode != .scrub, Self.sameTimeline(store.project,gestureBase) {
             if let group {
                 if moved, candidateValid, let delta = groupDelta, delta != .zero { store.moveClips(group,by:delta) }
-                else if !moved, let id = clickedInGroup { store.selectedClipID = id }      // a click picks just that one
+                else if !moved, let id = clickedInGroup {                                 // a click picks just that one
+                    store.selectedClipID = id; if let clip = store.project.clip(id) { showTransform(clip) }
+                }
             } else if let original, let candidate, moved, candidateValid {
                 if mode == .move { store.move(original.id,to:candidate.start,lane:candidate.lane) }
                 else if mode == .start { store.trim(original.id,leading:true,to:candidate.start) }

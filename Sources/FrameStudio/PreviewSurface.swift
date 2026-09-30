@@ -103,6 +103,8 @@ struct PreviewSurface: NSViewRepresentable {
     }
     static let guideColor = NSColor.systemYellow
     static let centreColor = NSColor.systemRed
+    /// How solid the centre is drawn while transforming (30% less than whole).
+    static let centreOpacity: CGFloat = 0.7
     /// Points a moving clip's alignment point can line up with: the frame's centre, and the
     /// alignment point of every other clip showing now (its linked partner aside).
     private func alignmentCenters(excluding clip: Clip, in canvas: CGRect) -> [CGPoint] {
@@ -308,8 +310,13 @@ struct PreviewSurface: NSViewRepresentable {
         cross.move(to:CGPoint(x:middle.x-arm,y:middle.y)); cross.line(to:CGPoint(x:middle.x+arm,y:middle.y))
         cross.move(to:CGPoint(x:middle.x,y:middle.y-arm)); cross.line(to:CGPoint(x:middle.x,y:middle.y+arm))
         cross.appendOval(in:CGRect(x:middle.x-radius,y:middle.y-radius,width:2*radius,height:2*radius))
+        // Toned down so it does not cover the picture it sits on; whole while it is being placed.
+        // One layer, so its dark edge and colour fade together rather than showing through each other.
+        let layer = NSGraphicsContext.current?.cgContext
+        layer?.saveGState(); layer?.setAlpha(placing ? 1 : Self.centreOpacity); layer?.beginTransparencyLayer(auxiliaryInfo:nil)
         NSColor.black.withAlphaComponent(0.6).setStroke(); cross.lineWidth = 3.5; cross.stroke()
         (guides.vertical != nil || guides.horizontal != nil ? Self.guideColor : Self.centreColor).setStroke(); cross.lineWidth = 1.5; cross.stroke()
+        layer?.endTransparencyLayer(); layer?.restoreGState()
         // 5. The rotation handle: a stem from the middle of the top edge to a round knob.
         guard !placing, showsRotationHandle(geometry) else { return }
         let rotation = rotationHandle(geometry)

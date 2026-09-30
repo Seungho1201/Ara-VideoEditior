@@ -13,6 +13,7 @@ final class SnapHapticsTests: XCTestCase {
     @MainActor private func withTimeline(haptics: Bool = true, _ check: (EditorStore, TimelineCanvas, [NSHapticFeedbackManager.FeedbackPattern]) throws -> [NSHapticFeedbackManager.FeedbackPattern]) throws -> [NSHapticFeedbackManager.FeedbackPattern] {
         _ = NSApplication.shared
         let store = EditorStore(), saved = UserDefaults.standard.object(forKey:"timeline.scrubHaptics")
+        let restore = unfoldingEverySound(store); defer { restore() }
         store.scrubHaptics = haptics
         store.edit("Fixture") { project in
             project.frameRate = .init(30)

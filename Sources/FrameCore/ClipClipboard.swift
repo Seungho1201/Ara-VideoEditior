@@ -28,7 +28,7 @@ public struct ClipClipboard: Codable, Equatable, Sendable {
     /// The transitions that go with these clips (see `transitions`). A cut that becomes a fade
     /// keeps the part of it that lay inside the copied clip (about half), so the clip's other
     /// transition keeps its length.
-    static func transitions(of ids: Set<UUID>, in project: Project) -> [Transition] {
+    public static func transitions(of ids: Set<UUID>, in project: Project) -> [Transition] {
         project.transitions.compactMap { transition in
             let from = transition.from.flatMap { ids.contains($0) ? $0 : nil }, to = transition.to.flatMap { ids.contains($0) ? $0 : nil }
             guard from != nil || to != nil else { return nil }

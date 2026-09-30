@@ -7,7 +7,14 @@ import FrameCore
 import FrameMedia
 
 @MainActor final class EditorStore: ObservableObject {
-    @Published private(set) var project = Project() { didSet { if project.clips != oldValue.clips { ownAudioTracks = TrackLayout.ownAudio(in:project) } } }
+    @Published private(set) var project = Project() {
+        didSet {
+            if project.clips != oldValue.clips { ownAudioTracks = TrackLayout.ownAudio(in:project) }
+            // A video track's sound that comes to be (a new track, from any edit) starts folded.
+            let paired = (before:min(oldValue.videoTrackCount,oldValue.audioTrackCount),now:min(project.videoTrackCount,project.audioTrackCount))
+            if project.id == oldValue.id, paired.now > paired.before { foldedSound.formUnion(paired.before+1...paired.now) }
+        }
+    }
     /// The audio tracks (by number) holding audio of their own, not a video's sound: folded under
     /// their video track, they stay a strip rather than going away.
     private(set) var ownAudioTracks: Set<Int> = []
@@ -169,7 +176,12 @@ import FrameMedia
     /// A bookmark of the open document, so ⌘S follows it when it is renamed or moved in Finder.
     private(set) var documentBookmark: Data?
     private var saved: Project?
-    private(set) var history = EditHistory()
+    /// What one undo step puts back: the project, and the favourite clips (kept for every project,
+    /// but a change to them is taken back like any other).
+    struct UndoState: Sendable { var project: Project; var favorites: [FavoriteClip] }
+    private(set) var history = UndoHistory<UndoState>()
+    /// The step's before: this project with the favourites as they are.
+    private func undoState(_ project: Project) -> UndoState { UndoState(project:project,favorites:favorites) }
     private var interactionStart: Project?
     /// A drag (in the preview, or on a slider) is open as one undo step. An undo or redo closes it,
     /// which ends a drag still going in the preview.
@@ -328,7 +340,7 @@ import FrameMedia
         do {
             var next = project; try operation(&next); next = try next.validated()   // also settles transitions
             guard next != project else { return true }
-            if interactionStart == nil { history.record(project,name:name) } else if interactionName == nil { interactionName = name }
+            if interactionStart == nil { history.record(undoState(project),name:name) } else if interactionName == nil { interactionName = name }
             // Any timeline change can move the edges a gap selection was measured from.
             project = next; selectedGap = nil; rebuild(); return true
         } catch { report(error); return false }
@@ -337,7 +349,7 @@ import FrameMedia
     /// One drag, one undo step: named after its edits ("Change speed", "Transition length"), or
     /// "Adjust clip" for direct manipulation in the preview.
     func endInteraction() {
-        if let before = interactionStart, before != project { history.record(before,name:interactionName ?? "Adjust clip") }
+        if let before = interactionStart, before != project { history.record(undoState(before),name:interactionName ?? "Adjust clip") }
         interactionStart = nil; interactionName = nil; objectWillChange.send()
         applyDeferredProxySwap()
     }
@@ -391,7 +403,7 @@ import FrameMedia
         liveEditEnd?.cancel(); liveEditEnd = nil
         guard let before = liveEditStart else { return }
         liveEditStart = nil
-        if before != project { history.record(before,name:liveEditName); objectWillChange.send() }
+        if before != project { history.record(undoState(before),name:liveEditName); objectWillChange.send() }
     }
     /// Re-renders one layer of the current preview in place, a title with `image` or with its
     /// picture as `titleImage` finds it. False when there is no settled player item to patch
@@ -497,10 +509,16 @@ import FrameMedia
         guard let media = project.media(for:clip), media.width > 0, media.height > 0 else { return nil }
         return CGSize(width:media.width,height:media.height)
     }
-    func undo() { guard !isExporting else { return }; commitPendingEdits(); endInteraction(); selectedGap = nil; if let previous = history.undo(project) { restore(previous) } }
-    func redo() { guard !isExporting else { return }; commitPendingEdits(); endInteraction(); selectedGap = nil; if let next = history.redo(project) { restore(next) } }
-    /// An undo or redo step. The project keeps its name: the name follows the document's file,
-    /// which Save and Save As rename without an undo step of their own.
+    func undo() { guard !isExporting else { return }; commitPendingEdits(); endInteraction(); selectedGap = nil; if let previous = history.undo(undoState(project)) { restore(previous) } }
+    func redo() { guard !isExporting else { return }; commitPendingEdits(); endInteraction(); selectedGap = nil; if let next = history.redo(undoState(project)) { restore(next) } }
+    /// An undo or redo step: the favourites as they were (written back to their file), and the
+    /// project unless the step left it alone.
+    private func restore(_ state: UndoState) {
+        if state.favorites != favorites { favorites = state.favorites; saveFavorites() }
+        if state.project != project { restore(state.project) }
+    }
+    /// The project of an undo or redo step. It keeps its name: the name follows the document's
+    /// file, which Save and Save As rename without an undo step of their own.
     private func restore(_ snapshot: Project) {
         var snapshot = snapshot; snapshot.name = project.name
         project = snapshot; textRevision += 1; pruneSelection(); restoreAccess(); rebuild()
@@ -718,19 +736,26 @@ import FrameMedia
         let group = project.group(for:clip.id), kept = keeps(clip)
         let picture = group.first { $0.kind != .audio } ?? clip
         let name = picture.kind == .text ? picture.style.text : picture.name
+        // One undo step, after any edit still open.
+        commitPendingEdits(); endInteraction()
+        history.record(undoState(project),name:favorites.contains(where:kept) ? "Remove from Favourites" : "Keep in Favourites")
         if favorites.contains(where:kept) {
             favorites.removeAll(where:kept)
             status = String(localized:"Removed \(name) from Favourites")
         } else {
             let sound = picture.linkID == nil ? nil : group.first { $0.kind == .audio && $0.id != picture.id }
             let media = project.media(for:picture)
-            favorites.insert(FavoriteClip(clip:picture,sound:sound,media:media,thumbnail:media.flatMap { thumbnails[$0.id] }.flatMap(Favorites.jpeg),origin:picture.id),at:0)
+            let transitions = ClipClipboard.transitions(of:Set([picture.id]+(sound.map { [$0.id] } ?? [])),in:project)
+            favorites.insert(FavoriteClip(clip:picture,sound:sound,media:media,thumbnail:media.flatMap { thumbnails[$0.id] }.flatMap(Favorites.jpeg),
+                                          transitions:transitions,origin:picture.id),at:0)
             status = String(localized:"Added \(name) to Favourites")
         }
         saveFavorites()
     }
     func removeFavorite(_ id: UUID) {
         guard let favorite = favorites.first(where: { $0.id == id }) else { return }
+        commitPendingEdits(); endInteraction()
+        history.record(undoState(project),name:"Remove from Favourites")
         favorites.removeAll { $0.id == id }
         status = String(localized:"Removed \(favorite.name) from Favourites")
         saveFavorites()
@@ -1049,8 +1074,8 @@ import FrameMedia
                     // Landing during a drag (in the preview, on a slider), the import is an undo step
                     // before the drag's, which starts from the project with the media: undoing the
                     // drag keeps them.
-                    if var start = interactionStart { history.record(start,name:"Import media"); start.media.append(media); interactionStart = start }
-                    else { history.record(project,name:"Import media") }
+                    if var start = interactionStart { history.record(undoState(start),name:"Import media"); start.media.append(media); interactionStart = start }
+                    else { history.record(undoState(project),name:"Import media") }
                     project.media.append(media); urls[media.id] = url; selectedMediaID = media.id
                     analyze(media,url:url); ensureProxies()
                 } catch { if !(error is CancellationError) { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") } }
@@ -1273,7 +1298,7 @@ import FrameMedia
         pause(); revision += 1; rebuildTask?.cancel(); importTask?.cancel(); isBuilding = false; isImporting = false
         snapshotTask?.cancel(); snapshotTask = nil; snapshotID = nil; isCapturingSnapshot = false
         for task in analysisTasks.values { task.cancel() }; analysisTasks.removeAll(); analyzed.removeAll(); documentBookmark = nil
-        player.replaceCurrentItem(with:nil); history = EditHistory(); playhead = .zero
+        player.replaceCurrentItem(with:nil); history = UndoHistory(); playhead = .zero
         seekInFlight = nil; chaseTarget = nil; seeking = false
         proxyTask?.cancel(); proxyTask = nil; proxyJob = nil; proxyProgress = nil; proxies.removeAll(); proxyFailures.removeAll()
         selectClips([]); dragSelectArmed = false; selectedGap = nil; selectedMediaID = nil; selectedTransitionID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
@@ -1311,6 +1336,7 @@ import FrameMedia
         commitPendingEdits()
         guard !isExporting, !isCapturingSnapshot, confirmDiscard() else { return false }
         resetSession(); project = next; saved = nil; documentURL = nil
+        foldedSound = Set(1...Project.trackCounts.upperBound)                 // a new project's sounds start folded
         status = String(localized:"New project · \(next.aspectRatio.dimensions(resolution:next.outputResolution)) · \(next.frameRate.label) fps")
         showNewProjectSheet = false; showLauncher = false
         return true

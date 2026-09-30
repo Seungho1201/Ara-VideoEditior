@@ -133,8 +133,9 @@ import FrameCore
         XCTAssertEqual(try height(),open,"it sets off from open")
         now += TimelineCanvas.foldDuration/2; rig.canvas.stepFolds()
         let half = try height()
-        XCTAssertEqual(half,open/2,accuracy:0.01,"half way in time, half way folded")
-        XCTAssertEqual(rig.canvas.trackLayout.soundFold(under:.v1),0.5,accuracy:0.001)
+        let eased = TimelineCanvas.foldEase(0.5)
+        XCTAssertEqual(half,open*(1-eased),accuracy:0.01,"half way in time, as far as the curve has come")
+        XCTAssertEqual(rig.canvas.trackLayout.soundFold(under:.v1),eased,accuracy:0.001)
         XCTAssertFalse(rig.canvas.trackLayout.soundFolded(under:.v1))
         // Turned back half way: it opens from where it is.
         toggle()
@@ -155,11 +156,38 @@ import FrameCore
         XCTAssertEqual(opened.minY,picture.maxY); XCTAssertEqual(opened.height,TrackLayout.soundHeight-1)
         XCTAssertTrue(between.minY > shut.minY && between.minY < opened.minY && between.maxY > shut.maxY && between.maxY < opened.maxY)
         XCTAssertEqual(between.minX,picture.minX); XCTAssertEqual(between.width,picture.width)
-        // SwiftUI's ease in and out: slow at both ends, half way at the middle.
-        XCTAssertEqual(TimelineCanvas.easeInOut(0),0,accuracy:1e-6); XCTAssertEqual(TimelineCanvas.easeInOut(1),1,accuracy:1e-6)
-        XCTAssertEqual(TimelineCanvas.easeInOut(0.5),0.5,accuracy:1e-6)
-        XCTAssertLessThan(TimelineCanvas.easeInOut(0.1),0.05); XCTAssertGreaterThan(TimelineCanvas.easeInOut(0.9),0.95)
+        // The curve: off at once, settling gently, always onward.
+        XCTAssertEqual(TimelineCanvas.foldEase(0),0,accuracy:1e-6); XCTAssertEqual(TimelineCanvas.foldEase(1),1,accuracy:1e-6)
+        XCTAssertGreaterThan(TimelineCanvas.foldEase(0.1),0.3,"a quick start"); XCTAssertGreaterThan(TimelineCanvas.foldEase(0.5),0.85)
+        let steps = stride(from:0.0,through:1,by:0.05).map(TimelineCanvas.foldEase)
+        XCTAssertEqual(steps,steps.sorted()); XCTAssertLessThan(1-TimelineCanvas.foldEase(0.9),0.01,"a gentle end")
     }
+
+    /// A video track's sound that comes to be starts folded, whatever makes it: a video track added
+    /// over an audio track already there, a title raising a new track over one. A new project starts
+    /// with every sound folded. Sounds the user has opened stay open.
+    func testNewSoundsStartFolded() throws {
+        let rig = TimelineRig { project in
+            project.audioTrackCount = 4
+            project.clips = [Clip(name:"Busy",kind:.text,lane:.v2,start:.zero,duration:.init(seconds:5))]
+        }
+        defer { rig.close() }
+        let store = rig.store
+        XCTAssertEqual(store.foldedSound,[])
+        store.addTrack(.video)                                    // V3, over A3
+        XCTAssertEqual(store.foldedSound,[3],"V3's sound")
+        store.toggleSound(3)                                      // opened by the user
+        store.edit("Busy V3") { $0.clips.append(Clip(name:"Top",kind:.text,lane:Lane(.video,3),start:.init(seconds:6),duration:.init(seconds:5))) }
+        store.seek(.init(seconds:7)); store.addText()             // V3 in use there: a new V4, over A4
+        XCTAssertEqual(store.project.videoTrackCount,4)
+        XCTAssertEqual(store.foldedSound,[4],"V4's sound folded; V3's, opened, left open")
+        XCTAssertEqual(canvasRow(rig,Lane(.audio,4))?.height,0,"no gap under the new track")
+        // A new project: every sound folded.
+        store.runAlert = { _ in .alertThirdButtonReturn }         // discard this one
+        XCTAssertTrue(try store.createProject(name:"Next",aspectRatio:.landscape,frameRate:.init(30),resolution:1080))
+        XCTAssertEqual(store.foldedSound,Set(1...Project.trackCounts.upperBound))
+    }
+    private func canvasRow(_ rig: TimelineRig, _ lane: Lane) -> TrackLayout.Row? { rig.canvas.trackLayout.row(lane) }
 
     /// The track names column holds a name, its sound's switch and ✕ side by side at their widest
     /// (V3–V8, empty and so removable), in English and in Korean: nothing is pushed out of it.

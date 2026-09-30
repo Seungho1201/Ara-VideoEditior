@@ -97,6 +97,14 @@ import FrameCore
     }
 }
 
+/// Every video track's sound open in `store`, as the timeline shows them before anything is folded;
+/// returns what puts the app's folded sounds back as they were kept (a test leaves them untouched).
+@MainActor func unfoldingEverySound(_ store: EditorStore) -> () -> Void {
+    let saved = UserDefaults.standard.object(forKey:"timeline.foldedSound")
+    store.foldedSound = []
+    return { if let saved { UserDefaults.standard.set(saved,forKey:"timeline.foldedSound") } else { UserDefaults.standard.removeObject(forKey:"timeline.foldedSound") } }
+}
+
 /// A 20 s video with sound (a made-up path: nothing here decodes it).
 func timelineTestVideo() -> MediaReference {
     MediaReference(name:"Source",path:"/nonexistent/ara-tests/Source.mov",kind:.video,duration:.init(seconds:20),
@@ -282,6 +290,37 @@ func timelineTestVideo() -> MediaReference {
         XCTAssertTrue(mark.red > 200 && mark.green > 200 && mark.blue > 200,"the handle in the title band: \(mark)")
         rig.drag(from:15+inside,through:[15.5+inside],y:band)
         XCTAssertEqual(rig.clip("D").start,.init(seconds:15.5)); XCTAssertEqual(rig.store.undoName,"Trim clip")
+    }
+
+    /// A picture or title picked on the timeline is ready to transform in the preview, as a
+    /// double-click there makes it: its outline shows while the playhead is on it. A sound, empty
+    /// track space and several clips at once end it.
+    func testAClipPickedOnTheTimelineShowsItsTransform() {
+        var ids: [String:UUID] = [:]
+        let video = timelineTestVideo()
+        let rig = TimelineRig { project in
+            project.media = [video]
+            ids["video"] = try Editing.add(mediaID:video.id,lane:.v1,at:.zero,to:&project)
+            try Editing.trim(ids["video"]!,leading:false,to:.init(seconds:4),in:&project)
+            let caption = self.title("T",.v2,1,3); ids["title"] = caption.id; project.clips.append(caption)
+        }
+        defer { rig.close() }
+        let store = rig.store, overlay = PreviewTransformOverlay(store:store)
+        func click(_ seconds: Double, _ lane: Lane, _ flags: NSEvent.ModifierFlags = []) { rig.down(seconds,rig.y(lane),flags); rig.up(seconds,rig.y(lane),flags) }
+        store.seek(.init(seconds:2))
+        click(2,.v2)
+        XCTAssertEqual(store.previewTransformID,ids["title"]); XCTAssertTrue(overlay.isTransforming,"its outline in the preview")
+        click(3,.v1)
+        XCTAssertEqual(store.previewTransformID,ids["video"]); XCTAssertTrue(overlay.isTransforming)
+        // Off the playhead: ready, the outline showing once the playhead is on it.
+        store.seek(.init(seconds:0.5)); click(2,.v2)
+        XCTAssertEqual(store.previewTransformID,ids["title"]); XCTAssertFalse(overlay.isTransforming)
+        store.seek(.init(seconds:2)); XCTAssertTrue(overlay.isTransforming)
+        // The video's sound, empty track space, a second clip Shift-clicked: none.
+        click(3,.a1); XCTAssertNil(store.previewTransformID)
+        click(2,.v2); click(10,.v2); XCTAssertNil(store.previewTransformID)
+        click(2,.v2); click(3,.v1,.shift); XCTAssertNil(store.previewTransformID)
+        XCTAssertFalse(overlay.isTransforming)
     }
 
     func testRectangleSelectPressedWithoutADragPicksTheClipUnderIt() {
