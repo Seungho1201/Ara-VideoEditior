@@ -92,21 +92,73 @@ import FrameCore
         }
         defer { rig.close() }
         rig.store.waveforms[video.id] = (0..<2000).map { Float(($0*37)%101)/100 }
-        /// Bright blue pixels (the waveform's) along the picture's last 12 points, inside the clip.
-        func lit() throws -> Int {
+        /// Pixels along the picture's last 12 points, inside the clip, that pass `test`.
+        func count(_ test: @escaping ((red: Int, green: Int, blue: Int)) -> Bool) throws -> Int {
             let row = try XCTUnwrap(rig.canvas.trackLayout.row(.v1)), image = rig.paint()
-            return (Int(row.boxBottom-12)..<Int(row.boxBottom-2)).reduce(0) { count, y in
-                count+(10..<230).filter { TimelineRig.color(image,Double($0),Double(y)).blue > 150 }.count
+            return (Int(row.boxBottom-12)..<Int(row.boxBottom-2)).reduce(0) { total, y in
+                total+(10..<230).filter { test(TimelineRig.color(image,Double($0),Double(y))) }.count
             }
         }
+        func lit() throws -> Int { try count { $0.blue > 150 } }                     // the waveform's bright blue
         XCTAssertEqual(try lit(),0,"open: the picture's foot is plain")
         rig.store.toggleSound(1)
         XCTAssertGreaterThan(try lit(),100,"folded: its sound along the foot")
+        // Its bar is clear folded: a red picture shows through between the waveform's bars.
+        rig.store.thumbnails[video.id] = NSImage(size:NSSize(width:16,height:9),flipped:false) { NSColor.red.setFill(); $0.fill(); return true }
+        XCTAssertGreaterThan(try count { $0.red > 120 && $0.green < 90 },300,"the picture under the folded sound")
         XCTAssertEqual(rig.canvas.trackLayout.row(.a1)?.height,0)
         // Nothing of the sound is left to pick apart: a press at the picture's foot picks the video.
         let row = try XCTUnwrap(rig.canvas.trackLayout.row(.v1))
         rig.down(2,row.boxBottom-3); rig.up(2,row.boxBottom-3)
         XCTAssertEqual(rig.store.selectedClipID,id)
+    }
+
+    /// A sound folds and opens over a moment, as the track names beside it do: part-way there in
+    /// time it is part-way folded, and turned back on its way it sets off from where it is.
+    func testASoundFoldsAndOpensOverAMoment() throws {
+        let video = timelineTestVideo()
+        let rig = TimelineRig { project in
+            project.media = [video]
+            let id = try Editing.add(mediaID:video.id,lane:.v1,at:.zero,to:&project)
+            try Editing.trim(id,leading:false,to:.init(seconds:4),in:&project)
+        }
+        defer { rig.close() }
+        var now = 100.0
+        rig.canvas.clock = { now }
+        func height() throws -> Double { try XCTUnwrap(rig.canvas.trackLayout.row(.a1)).height }
+        func toggle() { rig.store.toggleSound(1); rig.canvas.animateFolds(to:rig.store.foldedSound) }
+        rig.canvas.animateFolds(to:rig.store.foldedSound)             // what the timeline first shows: no move
+        let open = try height()
+        toggle()
+        XCTAssertEqual(try height(),open,"it sets off from open")
+        now += TimelineCanvas.foldDuration/2; rig.canvas.stepFolds()
+        let half = try height()
+        XCTAssertEqual(half,open/2,accuracy:0.01,"half way in time, half way folded")
+        XCTAssertEqual(rig.canvas.trackLayout.soundFold(under:.v1),0.5,accuracy:0.001)
+        XCTAssertFalse(rig.canvas.trackLayout.soundFolded(under:.v1))
+        // Turned back half way: it opens from where it is.
+        toggle()
+        XCTAssertEqual(try height(),half,accuracy:0.01)
+        now += TimelineCanvas.foldDuration/4; rig.canvas.stepFolds()
+        XCTAssertGreaterThan(try height(),half); XCTAssertLessThan(try height(),open)
+        now += TimelineCanvas.foldDuration; rig.canvas.stepFolds()
+        XCTAssertEqual(try height(),open)
+        // Folded to the end: gone, the video carrying its sound.
+        toggle()
+        now += TimelineCanvas.foldDuration+0.01; rig.canvas.stepFolds()
+        XCTAssertEqual(try height(),0); XCTAssertTrue(rig.canvas.trackLayout.soundFolded(under:.v1))
+        // The sound is a bar of its own: over the picture's foot folded, under the picture open, part-way
+        // down in between; the picture stays as it is.
+        let picture = NSRect(x:0,y:100,width:120,height:52)
+        let shut = rig.canvas.soundBar(of:picture,fold:1), opened = rig.canvas.soundBar(of:picture,fold:0), between = rig.canvas.soundBar(of:picture,fold:0.5)
+        XCTAssertEqual(shut.maxY,picture.maxY); XCTAssertGreaterThan(shut.minY,picture.minY+picture.height/2)
+        XCTAssertEqual(opened.minY,picture.maxY); XCTAssertEqual(opened.height,TrackLayout.soundHeight-1)
+        XCTAssertTrue(between.minY > shut.minY && between.minY < opened.minY && between.maxY > shut.maxY && between.maxY < opened.maxY)
+        XCTAssertEqual(between.minX,picture.minX); XCTAssertEqual(between.width,picture.width)
+        // SwiftUI's ease in and out: slow at both ends, half way at the middle.
+        XCTAssertEqual(TimelineCanvas.easeInOut(0),0,accuracy:1e-6); XCTAssertEqual(TimelineCanvas.easeInOut(1),1,accuracy:1e-6)
+        XCTAssertEqual(TimelineCanvas.easeInOut(0.5),0.5,accuracy:1e-6)
+        XCTAssertLessThan(TimelineCanvas.easeInOut(0.1),0.05); XCTAssertGreaterThan(TimelineCanvas.easeInOut(0.9),0.95)
     }
 
     /// The track names column holds a name, its sound's switch and ✕ side by side at their widest

@@ -90,7 +90,11 @@ import FrameMedia
     @Published var selectedGap: TimelineGap?
     /// A transition picked on the timeline; exclusive with a clip or gap selection.
     @Published var selectedTransitionID: UUID?
-    enum SidePanel: String, CaseIterable { case inspector = "INSPECTOR", transitions = "TRANSITIONS" }
+    enum SidePanel: String, CaseIterable {
+        case inspector = "INSPECTOR", transitions = "TRANSITIONS", favorites = "FAVOURITES"
+        /// The panels named as tabs; the favourites open from the star beside them.
+        static let tabs: [SidePanel] = [.inspector,.transitions]
+    }
     @Published var sidePanel: SidePanel = .inspector
     /// Help mode: callouts over the editor (the timeline's ? button).
     @Published var showHelp = false
@@ -145,6 +149,10 @@ import FrameMedia
     @Published private(set) var isAddingFonts = false
     /// Where added fonts are kept (tests point it elsewhere).
     var fontFolder = FontLibrary.folder
+    /// Clips kept to use again in any project, newest first.
+    @Published private(set) var favorites: [FavoriteClip] = Favorites.load(from:Favorites.file)
+    /// Where the favourites are kept (tests point it elsewhere); read again when set.
+    var favoritesFile = Favorites.file { didSet { favorites = Favorites.load(from:favoritesFile) } }
     var exportHeight: Int { project.outputResolution }
     @Published var message: String?
     @Published var status = String(localized:"Import media to start editing") { didSet { statusWrites &+= 1 } }
@@ -691,6 +699,86 @@ import FrameMedia
         var result: UUID?
         guard edit("Add clip", { result = try Editing.add(mediaID:id,lane:target,at:time ?? end,to:&$0) }) else { return false }
         selectedClipID = result; status = String(localized:"Added \(media.name) to \(target.rawValue)")
+        return true
+    }
+    // MARK: favourites
+
+    /// Whether this clip (or the video it is the sound of) is kept in the favourites, or was put
+    /// in from one still kept.
+    func isFavorite(_ clip: Clip) -> Bool { favorites.contains(where:keeps(clip)) }
+    /// Whether a favourite is this clip's: kept from it (or its video), or the one it came from.
+    private func keeps(_ clip: Clip) -> (FavoriteClip) -> Bool {
+        let group = project.group(for:clip.id)+[clip]
+        let ids = Set(group.map(\.id)), from = Set(group.compactMap(\.favoriteID))
+        return { ids.contains($0.origin) || from.contains($0.id) }
+    }
+    /// Keeps a clip in the favourites, or lets it go when it is kept. A video goes with its sound
+    /// (its sound alone keeps the video), its source and a still of it.
+    func toggleFavorite(_ clip: Clip) {
+        let group = project.group(for:clip.id), kept = keeps(clip)
+        let picture = group.first { $0.kind != .audio } ?? clip
+        let name = picture.kind == .text ? picture.style.text : picture.name
+        if favorites.contains(where:kept) {
+            favorites.removeAll(where:kept)
+            status = String(localized:"Removed \(name) from Favourites")
+        } else {
+            let sound = picture.linkID == nil ? nil : group.first { $0.kind == .audio && $0.id != picture.id }
+            let media = project.media(for:picture)
+            favorites.insert(FavoriteClip(clip:picture,sound:sound,media:media,thumbnail:media.flatMap { thumbnails[$0.id] }.flatMap(Favorites.jpeg),origin:picture.id),at:0)
+            status = String(localized:"Added \(name) to Favourites")
+        }
+        saveFavorites()
+    }
+    func removeFavorite(_ id: UUID) {
+        guard let favorite = favorites.first(where: { $0.id == id }) else { return }
+        favorites.removeAll { $0.id == id }
+        status = String(localized:"Removed \(favorite.name) from Favourites")
+        saveFavorites()
+    }
+    private func saveFavorites() {
+        do { try Favorites.save(favorites,to:favoritesFile) }
+        catch { message = String(localized:"Favourites could not be saved: \(error.localizedDescription)") }
+    }
+    /// The source a favourite plays here: this project's at the same path, or its own, to be added.
+    /// Nil when this project has that source but it is missing.
+    private func favoriteMedia(_ favorite: FavoriteClip) -> (id: UUID?, adding: MediaReference?)? {
+        guard var media = favorite.media else { return (nil,nil) }
+        let path = ProjectHistory.normalized(media.path)
+        if let existing = project.media.first(where: { ProjectHistory.normalized($0.path) == path }) {
+            return missing.contains(existing.id) ? nil : (existing.id,nil)
+        }
+        if project.media.contains(where: { $0.id == media.id }) { media.id = UUID() }
+        return (media.id,media)
+    }
+    /// Whether a favourite fits on `lane` at `time`, for the timeline's drop highlight.
+    func favoriteFits(_ id: UUID, lane: Lane, at time: MediaTime) -> Bool {
+        guard !isExporting, let favorite = favorites.first(where: { $0.id == id }), let media = favoriteMedia(favorite) else { return false }
+        var preview = project
+        guard (try? Favorites.place(favorite,lane:lane,at:time,mediaID:media.id,adding:media.adding,in:&preview)) != nil else { return false }
+        return (try? preview.validated()) != nil
+    }
+    /// Puts a favourite on `lane` at `time`, as one undo step. A source this project lacks comes
+    /// with it, found through its bookmark; one that cannot be found keeps it out, and says so.
+    @discardableResult func placeFavorite(_ id: UUID, lane: Lane, at time: MediaTime) -> Bool {
+        guard !isExporting, let favorite = favorites.first(where: { $0.id == id }) else { return false }
+        guard let media = favoriteMedia(favorite) else { message = String(localized:"Relink this source in the library before adding it."); return false }
+        var adding = media.adding, url: URL?
+        if let source = adding {
+            let resolved = MediaPaths.resolve(source)
+            guard !resolved.needsRelink, FileManager.default.isReadableFile(atPath:resolved.url.path) else {
+                message = String(localized:"\(favorite.name) plays \(source.name), which can't be found. Import it again, then keep the clip again.")
+                return false
+            }
+            if resolved.stale { adding?.path = resolved.url.path }
+            url = resolved.url; hold(resolved.url); urls[source.id] = resolved.url
+        }
+        var placed: UUID?
+        guard edit("Add favourite", { placed = try Favorites.place(favorite,lane:lane,at:time,mediaID:media.id,adding:adding,in:&$0) }) else {
+            if let source = adding { urls[source.id] = nil }
+            return false
+        }
+        if let source = adding, let url { analyze(source,url:url); ensureProxies() }
+        selectedClipID = placed; status = String(localized:"Added \(favorite.name) to \(lane.rawValue)")
         return true
     }
     /// A new empty track above the top video track, or below the bottom audio track.

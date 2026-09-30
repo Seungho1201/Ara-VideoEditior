@@ -433,7 +433,11 @@ struct ClipHeader: View {
     private var placing: Bool { store.anchorEditID == clip.id }
     var body: some View {
         VStack(alignment:.leading,spacing:6) {
-            Text(clip.name).font(.system(size:13,weight:.semibold)).lineLimit(2)
+            HStack(alignment:.top,spacing:6) {
+                Text(clip.name).font(.system(size:13,weight:.semibold)).lineLimit(2)
+                Spacer(minLength:4)
+                favoriteButton
+            }
             // One line: a narrow panel shortens it rather than break "V1 · Video" in two.
             HStack { Text(verbatim:"\(clip.lane.rawValue) · \(clip.kind.displayName)"); if clip.linkID != nil { Image(systemName:"link"); Text("Linked A/V") } }
                 .font(.system(size:10)).foregroundStyle(Theme.accent).lineLimit(1)
@@ -446,6 +450,18 @@ struct ClipHeader: View {
                 }.padding(.top,4)
             }
         }
+    }
+    /// Keeps the clip in the favourites (the ★ at the panel's top right), or lets it go.
+    private var favoriteButton: some View {
+        let kept = store.isFavorite(clip)
+        return Button { store.toggleFavorite(clip) } label: {
+            Image(systemName:kept ? "star.fill" : "star").font(.system(size:14,weight:.semibold))
+                .foregroundStyle(kept ? Color(red:1,green:0.84,blue:0.04) : Theme.muted)
+                .frame(width:24,height:22).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(kept ? "Remove from Favourites" : "Keep in Favourites, to drag onto any project's timeline")
+        .accessibilityLabel(kept ? Text("Remove from Favourites") : Text("Keep in Favourites"))
     }
     private var adjustButton: some View {
         Button { withAnimation(.snappy(duration:0.2)) { store.editAnchor(clip) } } label: {

@@ -68,7 +68,8 @@ struct TimelineView: View {
     /// own), or opens it again. The same size either way: the speaker says whether the sound shows.
     private func soundSwitch(_ number: Int) -> some View {
         let folded = store.foldedSound.contains(number)
-        return Button { withAnimation(.snappy(duration:0.2)) { store.toggleSound(number) } } label: {
+        // The same ease and length as the rows' fold on the canvas beside them.
+        return Button { withAnimation(.easeInOut(duration:TimelineCanvas.foldDuration)) { store.toggleSound(number) } } label: {
             HStack(spacing:3) {
                 Image(systemName:"chevron.right").font(.system(size:7,weight:.bold)).rotationEffect(.degrees(folded ? 0 : 90))
                 Image(systemName:folded ? "speaker.slash.fill" : "speaker.wave.2.fill").font(.system(size:11))
@@ -154,6 +155,7 @@ struct TimelineSurface: NSViewRepresentable {
         let oldZoom = canvas.pixelsPerSecond
         canvas.store = store; canvas.pixelsPerSecond = store.zoom
         canvas.synchronizeScrubbing()
+        canvas.animateFolds(to:store.foldedSound)
         canvas.setFrameSize(NSSize(width:max(scroll.contentSize.width,(max(20,store.project.duration.seconds)+8)*store.zoom),
                                    height:max(canvas.contentHeight,scroll.contentSize.height)))
         if oldZoom != store.zoom {
@@ -191,12 +193,61 @@ struct TimelineSurface: NSViewRepresentable {
     /// under it. Worked out again only when the tracks or the folded sounds change: every clip drawn asks.
     var trackLayout: TrackLayout {
         guard let store else { return TrackLayout(videoTracks:0,audioTracks:0,folded:[],top:ruler+band) }
-        let key = LayoutKey(videos:store.project.videoTrackCount,audios:store.project.audioTrackCount,folded:store.foldedSound,ownAudio:store.ownAudioTracks)
+        let key = LayoutKey(videos:store.project.videoTrackCount,audios:store.project.audioTrackCount,folded:store.foldedSound,ownAudio:store.ownAudioTracks,folding:shownFolding)
         if let cached = layoutCache, cached.key == key { return cached.layout }
-        let made = TrackLayout(videoTracks:key.videos,audioTracks:key.audios,folded:key.folded,ownAudio:key.ownAudio,top:ruler+band)
+        let made = TrackLayout(videoTracks:key.videos,audioTracks:key.audios,folded:key.folded,ownAudio:key.ownAudio,folding:key.folding,top:ruler+band)
         layoutCache = (key,made); return made
     }
-    private struct LayoutKey: Equatable { let videos: Int, audios: Int, folded: Set<Int>, ownAudio: Set<Int> }
+    private struct LayoutKey: Equatable { let videos: Int, audios: Int, folded: Set<Int>, ownAudio: Set<Int>, folding: [Int:Double] }
+
+    // MARK: sounds folding and opening
+
+    /// A sound on its way: how far folded it was when it set off (0 open, 1 folded), where it goes, when.
+    private struct Fold { let from: Double, to: Double, start: CFTimeInterval }
+    private var folds: [Int:Fold] = [:]
+    /// How far each sound on its way is folded, as shown now.
+    private var shownFolding: [Int:Double] = [:]
+    /// The folded sounds last shown; nil until the timeline is first shown (nothing moves then).
+    private var shownFolded: Set<Int>?
+    private var foldLink: CADisplayLink?
+    /// The time folds run on (tests set it).
+    var clock: () -> CFTimeInterval = CACurrentMediaTime
+    /// As long as the track names beside the rows take, with the same ease in and out.
+    nonisolated static let foldDuration = 0.28
+    /// Folds or opens, over `foldDuration`, the sounds folded or opened since the last call: a
+    /// video's sound slides up under its picture, or down out of it. One turned back on its way
+    /// sets off again from where it is.
+    func animateFolds(to folded: Set<Int>) {
+        defer { shownFolded = folded }
+        guard let shown = shownFolded, shown != folded else { return }
+        let now = clock()
+        for number in shown.symmetricDifference(folded) {
+            let from = shownFolding[number] ?? (shown.contains(number) ? 1 : 0)
+            folds[number] = Fold(from:from,to:folded.contains(number) ? 1 : 0,start:now)
+        }
+        stepFolds()
+        if foldLink == nil, !folds.isEmpty, window != nil {
+            let link = displayLink(target:self,selector:#selector(foldTick)); link.add(to:.main,forMode:.common); foldLink = link
+        }
+    }
+    @objc private func foldTick() { stepFolds() }
+    /// Moves the sounds on their way to where they are now; the ones arrived stop there.
+    func stepFolds() {
+        let now = clock()
+        folds = folds.filter { now-$0.value.start < Self.foldDuration }
+        shownFolding = folds.mapValues { $0.from+($0.to-$0.from)*Self.easeInOut(max(0,(now-$0.start)/Self.foldDuration)) }
+        if folds.isEmpty { foldLink?.invalidate(); foldLink = nil; window?.invalidateCursorRects(for:self) }
+        if let scroll = enclosingScrollView { setFrameSize(NSSize(width:frame.width,height:max(contentHeight,scroll.contentSize.height))) }
+        needsDisplay = true
+    }
+    /// SwiftUI's ease in and out (a cubic Bézier through 0.42, 0 and 0.58, 1) at `t`.
+    static func easeInOut(_ t: Double) -> Double {
+        let t = min(1,max(0,t))
+        func along(_ s: Double, _ a: Double, _ b: Double) -> Double { 3*(1-s)*(1-s)*s*a+3*(1-s)*s*s*b+s*s*s }
+        var low = 0.0, high = 1.0
+        for _ in 0..<30 { let middle = (low+high)/2; if along(middle,0.42,0.58) < t { low = middle } else { high = middle } }
+        return along((low+high)/2,0,1)
+    }
     private var layoutCache: (key: LayoutKey, layout: TrackLayout)?
     /// Ruler, the "+ Video" band, every track, the "+ Audio" band.
     var contentHeight: Double { trackLayout.bottom+band }
@@ -243,6 +294,8 @@ struct TimelineSurface: NSViewRepresentable {
     }
     private var transitionResize: TransitionResize?
     private var dropped: (UUID,Lane,MediaTime)?
+    /// A favourite clip dragged in, where it would land.
+    private var favoriteDrop: MediaDropTarget?
     private var mediaDropFeedback = MediaDropFeedback()
     /// A dragged clip, edge or transition catching a snap.
     private var snapFeedback = SnapFeedback()
@@ -276,7 +329,7 @@ struct TimelineSurface: NSViewRepresentable {
     override var acceptsFirstResponder: Bool { true }
     override init(frame:NSRect) {
         super.init(frame:frame)
-        registerForDraggedTypes([TransitionDrag.pasteboardType,.string,.fileURL]); setAccessibilityElement(true)
+        registerForDraggedTypes([TransitionDrag.pasteboardType,Favorites.pasteboardType,.string,.fileURL]); setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel(String(localized:"Multitrack timeline, up to \(Project.trackCounts.upperBound) video and \(Project.trackCounts.upperBound) audio tracks. Each video track has its sound, the audio track numbered like it, right under it; further audio tracks are at the bottom."))
     }
@@ -285,6 +338,8 @@ struct TimelineSurface: NSViewRepresentable {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
         resetScrubbing()
+        // Out of its window, the sounds on their way arrive at once.
+        if window == nil { folds = [:]; shownFolding = [:]; foldLink?.invalidate(); foldLink = nil }
     }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -354,7 +409,7 @@ struct TimelineSurface: NSViewRepresentable {
         // A menu or window change can swallow mouseUp. A subsequent button-free
         // move ends that interrupted gesture; never commit its stale drag candidate.
         if event.type == .mouseMoved, pressedMouseButtons() == 0,
-           mode != nil || transitionResize != nil || dropped != nil || transitionDrop != nil {
+           mode != nil || transitionResize != nil || dropped != nil || transitionDrop != nil || favoriteDrop != nil {
             mode = nil; original = nil; candidate = nil; transitionResize = nil; moved = false
             candidateValid = true
             clearGroupGesture()
@@ -517,7 +572,11 @@ struct TimelineSurface: NSViewRepresentable {
             return NSRect(x:x,y:(clip.lane.isVideo ? ruler : trackLayout.bottom)+3,width:width,height:band-6)
         }
         // Folded, a video's sound goes onto its picture (drawn there as a waveform): nothing of it is here.
-        if row.folded, clip.kind == .audio, clip.linkID != nil { return NSRect(x:x,y:row.boxTop,width:width,height:0) }
+        // Folding, it flattens up into the picture: as tall as it is still open, even where the row
+        // stays a strip for audio of its own.
+        if row.isSound, row.fold > 0, clip.kind == .audio, clip.linkID != nil {
+            return NSRect(x:x,y:row.boxTop,width:width,height:row.fold >= 1 ? 0 : min(row.boxHeight,(TrackLayout.soundHeight-1)*(1-row.fold)))
+        }
         // Audio of its own in a track's sound keeps clear of the picture above; a picture's sound meets it.
         let gap = row.isSound && clip.linkID == nil ? 1.0 : 0
         return NSRect(x:x,y:row.boxTop+gap,width:width,height:row.boxHeight-gap)
@@ -557,12 +616,19 @@ struct TimelineSurface: NSViewRepresentable {
         }
         let linked = store.project.groupIDs(for:store.selectedClipIDs), reach = transitionReach(visible)
         var near = Set<UUID>()
+        var laid: [(picture: Clip, sound: Clip)] = []
         for clip in store.project.clips {
             let box = rect(clip)
             if box.intersects(reach) { near.insert(clip.id) }
+            // A video's sound folded (or on its way) is a bar of its own, laid over the picture after them all.
+            if clip.kind == .audio, clip.linkID != nil, (trackLayout.row(clip.lane)?.fold ?? 0) > 0 {
+                if let picture = store.project.group(for:clip.id).first(where: { $0.kind == .video }) { laid.append((picture,clip)) }
+                continue
+            }
             guard box.intersects(visible) else { continue }
             drawClip(clip,box:box,selected:linked.contains(clip.id),ghost:false,in:visible)
         }
+        for (picture,sound) in laid { drawSoundBar(sound,of:picture,selected:linked.contains(sound.id),in:visible) }
         let resizing = transitionResize.flatMap { Self.sameTimeline(store.project,$0.base) ? $0 : nil }
         for transition in transitions(on:near) {
             let displayed = resizing.flatMap { $0.original.id == transition.id ? $0.candidate : nil } ?? transition
@@ -633,6 +699,14 @@ struct TimelineSurface: NSViewRepresentable {
         if let (id,lane,time) = dropped, let media = store.project.media.first(where:{$0.id == id}) {
             let clip = Clip(mediaID:id,name:media.name,kind:media.kind,lane:lane,start:time,duration:media.duration)
             Theme.accentNS.withAlphaComponent(0.3).setFill(); NSBezierPath(roundedRect:rect(clip),xRadius:4,yRadius:4).fill()
+        }
+        if let drop = favoriteDrop, let favorite = store.favorites.first(where: { $0.id == drop.id }) {
+            // Where the favourite, and a video's sound under it, would go.
+            var ghost = favorite.clip; ghost.lane = drop.lane; ghost.start = drop.time; ghost.linkID = favorite.sound == nil ? nil : UUID()
+            var ghosts = [ghost]
+            if favorite.sound != nil { var sound = ghost; sound.kind = .audio; sound.lane = drop.lane.paired; ghosts.append(sound) }
+            Theme.accentNS.withAlphaComponent(0.3).setFill()
+            for ghost in ghosts where rect(ghost).height >= 1 { NSBezierPath(roundedRect:rect(ghost),xRadius:4,yRadius:4).fill() }
         }
         if store.project.clips.isEmpty {
             // In the middle of the first row below the ruler, clear of the lines between rows. Placed
@@ -718,27 +792,64 @@ struct TimelineSurface: NSViewRepresentable {
         if fit.label { text.draw(at:NSPoint(x:x,y:badge.minY+(badge.height-textHeight)/2),withAttributes:attributes) }
         return badge
     }
+    /// The star on a clip put in from the favourites, in the favourites' yellow.
+    private static let favoriteStar: NSImage = NSImage(systemSymbolName:"star.fill",accessibilityDescription:nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:9,weight:.bold).applying(.init(paletteColors:[NSColor(red:1,green:0.84,blue:0.04,alpha:1)]))) ?? NSImage()
     /// A clip's sound as bars 2 pt apart: mirrored about `from`, or rising from it. The bars are
     /// anchored to the clip, never the repainted area, so a playhead-only repaint or a strip a scroll
     /// uncovers draws the same bars from the same samples as a full draw; the neighbours whose
     /// antialiasing crosses an edge of the area are drawn too.
     private func drawWaveform(_ clip: Clip, box: NSRect, in area: NSRect, from base: Double, reach: Double, centred: Bool) {
-        guard let store, let id = clip.mediaID, let peaks = store.waveforms[id], !peaks.isEmpty, let media = store.project.media(for:clip) else { return }
         let waveform = NSBezierPath()
-        let first = max(0,Int(floor((area.minX-box.minX)/2)))
-        let last = min(Int(ceil(box.width/2)),Int(ceil((area.maxX-box.minX)/2))+1)
-        if first < last {
-            for bar in first..<last {
-                let x = box.minX+Double(bar)*2
-                // A retimed clip walks the source at its own rate, or a 2x clip would
-                // draw only the first half of the audio it actually plays.
-                let source = clip.sourceStart.seconds+(x-box.minX)/pixelsPerSecond*clip.speed
-                let index = min(peaks.count-1,max(0,Int(source/max(0.001,media.duration.seconds)*Double(peaks.count))))
-                let amplitude = max(1,Double(peaks[index])*reach)
-                waveform.move(to:NSPoint(x:x,y:base-amplitude)); waveform.line(to:NSPoint(x:x,y:centred ? base+amplitude : base))
-            }
+        forEachBar(clip,box:box,in:area) { x, peak in
+            let amplitude = max(1,peak*reach)
+            waveform.move(to:NSPoint(x:x,y:base-amplitude)); waveform.line(to:NSPoint(x:x,y:centred ? base+amplitude : base))
         }
         Theme.accentNS.withAlphaComponent(centred ? 0.85 : 0.95).setStroke(); waveform.lineWidth = 1; waveform.stroke()
+    }
+    /// Each bar's place along the clip and its peak (0–1), in the part of the clip within `area`.
+    private func forEachBar(_ clip: Clip, box: NSRect, in area: NSRect, _ body: (Double, Double) -> Void) {
+        guard let store, let id = clip.mediaID, let peaks = store.waveforms[id], !peaks.isEmpty, let media = store.project.media(for:clip) else { return }
+        let first = max(0,Int(floor((area.minX-box.minX)/2)))
+        let last = min(Int(ceil(box.width/2)),Int(ceil((area.maxX-box.minX)/2))+1)
+        guard first < last else { return }
+        for bar in first..<last {
+            let x = box.minX+Double(bar)*2
+            // A retimed clip walks the source at its own rate, or a 2x clip would
+            // draw only the first half of the audio it actually plays.
+            let source = clip.sourceStart.seconds+(x-box.minX)/pixelsPerSecond*clip.speed
+            let index = min(peaks.count-1,max(0,Int(source/max(0.001,media.duration.seconds)*Double(peaks.count))))
+            body(x,Double(peaks[index]))
+        }
+    }
+    /// How solid a video's sound is drawn open (10% see-through); folding, it clears to nothing.
+    static let soundOpacity = 0.9
+    /// How tall a video's folded sound is, laid over the picture's foot.
+    private static func foot(of box: NSRect) -> Double { min(16,box.height*0.3) }
+    /// Where a video's sound is drawn while folded, or on its way: a bar of its own over the
+    /// picture's foot when folded, coming down out of it to its place under the picture as it
+    /// opens (growing to its full height) and going back up as it folds. The picture stays as it is.
+    func soundBar(of picture: NSRect, fold: Double) -> NSRect {
+        let top = picture.maxY-Self.foot(of:picture)*fold, bottom = picture.maxY+(TrackLayout.soundHeight-1)*(1-fold)
+        return NSRect(x:picture.minX,y:top,width:picture.width,height:bottom-top)
+    }
+    private func drawSoundBar(_ sound: Clip, of picture: Clip, selected: Bool, in area: NSRect) {
+        let fold = trackLayout.soundFold(under:picture.lane), box = rect(picture)
+        guard fold > 0, box.height >= 30 else { return }
+        let bar = soundBar(of:box,fold:fold)
+        guard bar.intersects(area) else { return }
+        let color = NSColor(red:0.16,green:0.28,blue:0.42,alpha:1)
+        NSGraphicsContext.saveGraphicsState()
+        let path = Self.clipPath(bar,top:false,bottom:true); path.addClip()
+        // Clear when folded, the pictures showing through under the waveform; nearly solid open.
+        color.withAlphaComponent(Self.soundOpacity*(1-fold)).setFill(); bar.fill()
+        NSColor.black.withAlphaComponent(0.35*(1-fold)).setFill(); NSRect(x:bar.minX,y:bar.minY,width:bar.width,height:1).fill()
+        let reach = min(17,bar.height/2-2)
+        if reach >= 2 { drawWaveform(sound,box:bar,in:area,from:bar.midY,reach:reach,centred:true) }
+        NSGraphicsContext.restoreGraphicsState()
+        // Its sides and foot outlined as its picture is: one clip.
+        (selected ? Theme.accentNS : color.highlight(withLevel:0.2)!).setStroke()
+        let outline = Self.clipPath(bar,top:false,bottom:true,open:true); outline.lineWidth = selected ? 2 : 1; outline.stroke()
     }
     /// A clip's rounded box, square at the top or bottom where it meets its other half. `open`: its
     /// outline, left open along the edge where the two meet.
@@ -769,12 +880,13 @@ struct TimelineSurface: NSViewRepresentable {
         // A sound folded away is not drawn; its picture is a clip of its own, rounded all round.
         guard box.height >= 1 else { return }
         let row = trackLayout.row(clip.lane)
-        let joinedBelow = clip.kind != .audio && clip.linkID != nil && trackLayout.soundShows(under:clip.lane) && !trackLayout.soundFolded(under:clip.lane)
+        // Joined while its sound is open; folded or on its way, the sound is a bar laid over it.
+        let joinedBelow = clip.kind != .audio && clip.linkID != nil && trackLayout.soundShows(under:clip.lane) && trackLayout.soundFold(under:clip.lane) == 0
         let joinedAbove = clip.kind == .audio && clip.linkID != nil && row?.isSound == true
         let titled = !joinedAbove && box.height >= 30
         NSGraphicsContext.saveGraphicsState()
         let path = Self.clipPath(box,top:!joinedAbove,bottom:!joinedBelow); path.addClip()
-        color.withAlphaComponent(ghost ? 0.6 : 1).setFill(); box.fill()
+        color.withAlphaComponent(ghost ? 0.6 : joinedAbove ? Self.soundOpacity : 1).setFill(); box.fill()
         if joinedAbove { NSColor.black.withAlphaComponent(0.35).setFill(); NSRect(x:box.minX,y:box.minY,width:box.width,height:1).fill() }
         if !ghost {
             // The waveform under the name, or on its own in a picture's sound; none in a folded strip.
@@ -787,21 +899,20 @@ struct TimelineSurface: NSViewRepresentable {
                 let last = min(Int(ceil(box.width/82)),Int(ceil((area.maxX-box.minX)/82)))
                 if first < last { for tile in first..<last { image.draw(in:strip.offsetBy(dx:Double(tile)*82,dy:0),from:.zero,operation:.sourceOver,fraction:0.6,respectFlipped:true,hints:nil) } }
             }
-            // Its sound folded, a video carries it along its foot, over the pictures, rising from the bottom.
-            if clip.kind == .video, clip.linkID != nil, trackLayout.soundFolded(under:clip.lane), box.height >= 30 {
-                let foot = min(16,box.height*0.3)
-                NSColor.black.withAlphaComponent(0.35).setFill(); NSRect(x:box.minX,y:box.maxY-foot,width:box.width,height:foot).fill()
-                drawWaveform(clip,box:box,in:area,from:box.maxY-1,reach:foot-3,centred:false)
-            }
         }
         if !ghost, titled {
             NSColor.black.withAlphaComponent(0.25).setFill(); NSRect(x:box.minX,y:box.minY,width:box.width,height:20).fill()
-            let titleX = max(box.minX+7,visibleRect.minX+4)
+            var titleX = max(box.minX+7,visibleRect.minX+4)
             var titleEnd = min(box.maxX,visibleRect.maxX)-6
             // The speed outranks the name on a short clip: the badge takes its corner whenever it
             // fits, and the title gets what is left, truncated, or nothing when that is a sliver.
             if clip.speed != 1, let badge = speedBadge(clip.speed,right:min(box.maxX,visibleRect.maxX)-4,top:box.minY+3,after:max(box.minX,visibleRect.minX)) {
                 titleEnd = badge.minX-6
+            }
+            // Put in from the favourites: a star before the name.
+            if clip.favoriteID != nil, titleEnd-titleX >= 12 {
+                Self.favoriteStar.draw(in:NSRect(x:titleX,y:box.minY+4.5,width:11,height:11),from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
+                titleX += 14
             }
             if titleEnd-titleX >= 18 {
                 let title = (clip.linkID == nil ? "" : "↔ ")+(clip.kind == .text ? clip.style.text : clip.name)
@@ -1137,19 +1248,28 @@ struct TimelineSurface: NSViewRepresentable {
     /// Validate the position used by both the ghost and the final drop. Haptics must
     /// never advertise a missing source, incompatible track or occupied linked lane.
     private func mediaDropTarget(_ id: UUID, at point: NSPoint) -> MediaDropTarget? {
-        guard let store, !store.isExporting, !store.isCapturingSnapshot,
-              !store.showLauncher, !store.showExportSheet, !store.showNewProjectSheet,
-              !store.missing.contains(id), var lane = lane(at:point) else { return nil }
-        // A track's picture and sound are one track: media dropped on it goes to the half it belongs on.
-        if let media = store.project.media.first(where: { $0.id == id }), (media.kind == .audio) == lane.isVideo, trackLayout.together(lane,lane.paired) {
-            lane = lane.paired
+        guard let store, !store.missing.contains(id), let media = store.project.media.first(where: { $0.id == id }) else { return nil }
+        return dropTarget(id,audio:media.kind == .audio,at:point) { lane, position in
+            var preview = store.project
+            return (try? Editing.add(mediaID:id,lane:lane,at:position,to:&preview)) != nil
         }
+    }
+    /// A favourite clip over the timeline: where it would land, as media does.
+    private func favoriteDropTarget(_ id: UUID, at point: NSPoint) -> MediaDropTarget? {
+        guard let store, let favorite = store.favorites.first(where: { $0.id == id }) else { return nil }
+        return dropTarget(id,audio:favorite.clip.kind == .audio,at:point) { store.favoriteFits(id,lane:$0,at:$1) }
+    }
+    /// Where something dragged in would land at `point`, if `fits` says it can: on the half of the
+    /// track it belongs on (a track's picture and sound are one track), snapped as the drag is.
+    private func dropTarget(_ id: UUID, audio: Bool, at point: NSPoint, fits: (Lane, MediaTime) -> Bool) -> MediaDropTarget? {
+        guard let store, !store.isExporting, !store.isCapturingSnapshot,
+              !store.showLauncher, !store.showExportSheet, !store.showNewProjectSheet, var lane = lane(at:point) else { return nil }
+        if audio == lane.isVideo, trackLayout.together(lane,lane.paired) { lane = lane.paired }
         let raw = time(at:point.x), threshold = MediaTime(seconds:8/pixelsPerSecond)
         let snapping = store.snapping && !NSEvent.modifierFlags.contains(.shift)
         let position = snapping ? Editing.snapped(raw,playhead:store.playhead,threshold:threshold,project:store.project)
                                 : store.project.frameRate.quantize(raw)
-        var preview = store.project
-        guard (try? Editing.add(mediaID:id,lane:lane,at:position,to:&preview)) != nil else { return nil }
+        guard fits(lane,position) else { return nil }
         // Checking the actual edges also recognizes a pointer exactly on an edge;
         // ordinary frame rounding alone must not produce an alignment cue.
         let edges = [.zero,store.playhead] + store.project.clips.flatMap { [$0.start,$0.end] }
@@ -1165,7 +1285,7 @@ struct TimelineSurface: NSViewRepresentable {
         return draggingUpdated(sender)
     }
     override func draggingUpdated(_ sender:any NSDraggingInfo) -> NSDragOperation {
-        dropped = nil; transitionDrop = nil
+        dropped = nil; transitionDrop = nil; favoriteDrop = nil
         var feedbackTarget: MediaDropTarget?
         defer {
             needsDisplay = true
@@ -1181,6 +1301,11 @@ struct TimelineSurface: NSViewRepresentable {
             if transitionDropFeedback.cue(for:edge,at:ProcessInfo.processInfo.systemUptime,enabled:store?.haptics(.transitions) == true) { performHaptic(.alignment) }
             return transitionDrop == nil ? [] : .copy
         }
+        if let id = Favorites.id(from:sender.draggingPasteboard) {
+            guard let target = favoriteDropTarget(id,at:point) else { return [] }
+            favoriteDrop = target; feedbackTarget = target
+            return .copy
+        }
         if let value = sender.draggingPasteboard.string(forType:.string), let id = UUID(uuidString:value) {
             guard let target = mediaDropTarget(id,at:point) else { return [] }
             dropped = (target.id,target.lane,target.time); feedbackTarget = target
@@ -1189,7 +1314,7 @@ struct TimelineSurface: NSViewRepresentable {
         return sender.draggingPasteboard.canReadObject(forClasses:[NSURL.self],options:[.urlReadingFileURLsOnly:true]) ? .copy : []
     }
     private func clearDropFeedback() {
-        dropped = nil; transitionDrop = nil; needsDisplay = true
+        dropped = nil; transitionDrop = nil; favoriteDrop = nil; needsDisplay = true
         _ = mediaDropFeedback.cue(for:nil,at:ProcessInfo.processInfo.systemUptime,enabled:false)
         _ = transitionDropFeedback.cue(for:nil,at:ProcessInfo.processInfo.systemUptime,enabled:false)
     }
@@ -1205,6 +1330,13 @@ struct TimelineSurface: NSViewRepresentable {
             let applied = store.applyTransition(kind,from:drop.transition.from,to:drop.transition.to)
             if applied { window?.makeFirstResponder(self); if store.haptics(.transitions) { performHaptic(.generic) } }
             return applied
+        }
+        if let id = Favorites.id(from:sender.draggingPasteboard) {
+            guard let target = favoriteDropTarget(id,at:convert(sender.draggingLocation,from:nil)),
+                  store.placeFavorite(id,lane:target.lane,at:target.time) else { return false }
+            if store.haptics(.mediaDrop) { performHaptic(.generic) }
+            window?.makeFirstResponder(self)
+            return true
         }
         if let value = sender.draggingPasteboard.string(forType:.string), let id = UUID(uuidString:value) {
             // Re-evaluate at mouse-up: the location or project may have changed

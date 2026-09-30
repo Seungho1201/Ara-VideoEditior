@@ -154,6 +154,9 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
     /// so going back to 1x gives the same frames back, also after a frame rate change. Edits that
     /// change the source range clear it; older versions ignore it.
     public var retimedSourceLength: MediaTime?
+    /// The favourite clip this one was put in from: the timeline marks it with a star. Older
+    /// versions ignore it.
+    public var favoriteID: UUID?
     public var end: MediaTime { start + duration }
     /// How much of the source this clip consumes. Equal to `duration` at 1x.
     public var sourceLength: MediaTime { speed == 1 ? duration : duration.scaled(by: speed) }
@@ -170,7 +173,7 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
         self.mediaID = mediaID; self.name = name; self.kind = kind; self.lane = lane; self.start = start
         self.sourceStart = sourceStart; self.duration = duration; self.speed = speed; self.linkID = linkID
     }
-    private enum CodingKeys: String, CodingKey { case id, mediaID, name, kind, lane, start, sourceStart, duration, speed, linkID, style, retimedSourceLength }
+    private enum CodingKeys: String, CodingKey { case id, mediaID, name, kind, lane, start, sourceStart, duration, speed, linkID, style, retimedSourceLength, favoriteID }
     /// Hand-written so documents saved before per-clip speed still load: Swift's synthesized
     /// decoder ignores stored-property defaults and would reject every older file.
     public init(from decoder: any Decoder) throws {
@@ -187,6 +190,7 @@ public struct Clip: Codable, Hashable, Sendable, Identifiable {
         linkID = try c.decodeIfPresent(UUID.self, forKey: .linkID)
         style = try c.decode(ClipStyle.self, forKey: .style)
         retimedSourceLength = try c.decodeIfPresent(MediaTime.self, forKey: .retimedSourceLength)
+        favoriteID = try c.decodeIfPresent(UUID.self, forKey: .favoriteID)
     }
 }
 

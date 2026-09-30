@@ -4,7 +4,7 @@ import CoreImage
 import FrameCore
 import FrameMedia
 
-/// The right-hand panel: the inspector, or the transitions to drag onto the timeline.
+/// The right-hand panel: the inspector, or the transitions or favourite clips to drag onto the timeline.
 struct SidePanel: View {
     @ObservedObject var store: EditorStore
     var body: some View {
@@ -14,6 +14,7 @@ struct SidePanel: View {
             switch store.sidePanel {
             case .inspector: InspectorPanel(store:store)
             case .transitions: TransitionLibrary(store:store)
+            case .favorites: FavoritesPanel(store:store)
             }
         }.background(Theme.panel)
     }
@@ -26,7 +27,7 @@ struct SidePanelTabs: View {
     var body: some View {
         HStack(spacing:0) {
             HStack(spacing:16) {
-                ForEach(EditorStore.SidePanel.allCases,id:\.self) { tab in
+                ForEach(EditorStore.SidePanel.tabs,id:\.self) { tab in
                     let tip = tab == .inspector ? "Settings of the selected clip" : "Transitions: drag onto a cut"
                     Button { store.sidePanel = tab } label: {
                         Text(LocalizedStringKey(tab.rawValue)).font(.system(size:10,weight:.bold)).tracking(1.7)
@@ -39,7 +40,18 @@ struct SidePanelTabs: View {
                 }
             }.layoutPriority(1)
             Spacer(minLength:12)
-            Image(systemName:store.sidePanel == .inspector ? "slider.horizontal.3" : "square.on.square").foregroundStyle(Theme.muted)
+            // The favourite clips: open them, and a second click goes back to the inspector.
+            let open = store.sidePanel == .favorites
+            Button { store.sidePanel = open ? .inspector : .favorites } label: {
+                Image(systemName:open ? "star.fill" : "star").font(.system(size:13,weight:.semibold))
+                    .foregroundStyle(open ? Color(red:1,green:0.84,blue:0.04) : Theme.muted)
+                    .frame(width:24,height:20).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(open ? "Back to the inspector" : "Favourite clips: drag them onto the timeline")
+            // No help-mode note: right under Export, whose note's line runs where this one's would.
+            .accessibilityLabel("Favourite clips")
+            .accessibilityAddTraits(open ? .isSelected : [])
         }.padding(.horizontal,16).padding(.top,16).padding(.bottom,12)
     }
 }

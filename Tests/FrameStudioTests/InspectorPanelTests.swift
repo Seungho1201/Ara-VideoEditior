@@ -311,16 +311,16 @@ func inspectorSectionsUnfolded() -> () -> Void {
         for _ in 0..<12 { view.layoutSubtreeIfNeeded(); try await spin(25) }
         var shown = try lines(view)
         // A row from each section: TEXT, OUTLINE, SHADOW, TRANSFORM, COLOUR, TIMING, then Reset.
-        let order = try ["Font size","Outline colour","Shadow colour","Position X","Brightness","Start","Reset appearance"].map { try top($0,in:shown) }
+        let order = try ["Font size","Width","Shadow colour","Position X","Brightness","Start","Reset appearance"].map { try top($0,in:shown) }
         XCTAssertEqual(order,order.sorted(),"\(shown.map(\.text))")
 
         for key in Self.foldKeys { UserDefaults.standard.set(false,forKey:key) }
         for _ in 0..<12 { view.layoutSubtreeIfNeeded(); try await spin(25) }
         shown = try lines(view)
         for gone in ["Position X","Brightness","Distance","Shadow colour"] { XCTAssertNil(shown.first { $0.text.hasPrefix(gone) },"\(gone) folded away") }
-        _ = try top("Width",in:shown); _ = try top("Outline colour",in:shown)    // OUTLINE does not fold
+        _ = try top("Width",in:shown)    // OUTLINE does not fold
         // Each folded title's line says what it holds; TIMING's rows and Reset still come last.
-        let folded = try ["Outline colour","Off","Default","Edited","Start","Reset appearance"].map { try top($0,in:shown) }
+        let folded = try ["Width","Off","Default","Edited","Start","Reset appearance"].map { try top($0,in:shown) }
         XCTAssertEqual(folded,folded.sorted(),"\(shown.map(\.text))")
     }
 

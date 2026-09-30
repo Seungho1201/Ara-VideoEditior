@@ -17,8 +17,10 @@ struct TrackLayout: Equatable {
         let hasSound: Bool
         /// A video track's sound, under it.
         let isSound: Bool
-        /// A sound folded to a strip.
+        /// A sound folded (or folding) away.
         let folded: Bool
+        /// How far a sound is folded as shown: 0 open, 1 folded; in between while it folds or opens.
+        var fold: Double = 0
         var bottom: Double { top+height }
         var boxBottom: Double { boxTop+boxHeight }
     }
@@ -31,8 +33,9 @@ struct TrackLayout: Equatable {
     private let index: [Lane:Int]
 
     /// `folded`: the numbers of the tracks whose sound is folded; `ownAudio`: of those, the ones
-    /// holding audio of their own, which stay a strip. `top`: where the first row starts.
-    init(videoTracks: Int, audioTracks: Int, folded: Set<Int>, ownAudio: Set<Int> = [], top: Double) {
+    /// holding audio of their own, which stay a strip. `folding`: how far the sounds on their way
+    /// are folded (0 open, 1 folded). `top`: where the first row starts.
+    init(videoTracks: Int, audioTracks: Int, folded: Set<Int>, ownAudio: Set<Int> = [], folding: [Int:Double] = [:], top: Double) {
         var rows: [Row] = [], y = top
         for number in stride(from:videoTracks,through:1,by:-1) {
             let picture = Lane(.video,number)
@@ -43,8 +46,9 @@ struct TrackLayout: Equatable {
             // The picture's clips reach its bottom edge, where their sound carries on below them.
             rows.append(Row(lane:picture,top:y,height:Self.pictureHeight,boxTop:y+1,boxHeight:Self.pictureHeight-1,hasSound:true,isSound:false,folded:false))
             y += Self.pictureHeight
-            let shut = folded.contains(number), height = !shut ? Self.soundHeight : ownAudio.contains(number) ? Self.foldedHeight : 0
-            rows.append(Row(lane:Lane(.audio,number),top:y,height:height,boxTop:y,boxHeight:max(0,height-1),hasSound:false,isSound:true,folded:shut))
+            let shut = folded.contains(number), fold = folding[number] ?? (shut ? 1 : 0)
+            let height = Self.soundHeight+((ownAudio.contains(number) ? Self.foldedHeight : 0)-Self.soundHeight)*fold
+            rows.append(Row(lane:Lane(.audio,number),top:y,height:height,boxTop:y,boxHeight:max(0,height-1),hasSound:false,isSound:true,folded:shut,fold:fold))
             y += height
         }
         for number in stride(from:videoTracks+1,through:audioTracks,by:1) {
@@ -67,7 +71,9 @@ struct TrackLayout: Equatable {
     /// Whether a video track's sound shows under it, open or as a strip.
     func soundShows(under picture: Lane) -> Bool { row(picture)?.hasSound == true && (row(picture.paired)?.height ?? 0) > 0 }
     /// Whether a video track's sound is folded: its videos carry their own sound on their pictures.
-    func soundFolded(under picture: Lane) -> Bool { row(picture)?.hasSound == true && row(picture.paired)?.folded == true }
+    func soundFolded(under picture: Lane) -> Bool { soundFold(under:picture) >= 1 }
+    /// How far a video track's sound is folded as shown (0 open, 1 folded).
+    func soundFold(under picture: Lane) -> Double { row(picture)?.hasSound == true ? row(picture.paired)?.fold ?? 0 : 0 }
     /// Whether two tracks are one track's picture and sound.
     func together(_ a: Lane, _ b: Lane) -> Bool {
         a.number == b.number && a.isVideo != b.isVideo && (row(a)?.hasSound == true || row(b)?.hasSound == true)
