@@ -31,6 +31,10 @@ final class TransitionTests: XCTestCase {
         XCTAssertNotEqual(Editing.snapTarget(beside,excludingTransition:own,playhead:.init(seconds:30),threshold:.init(seconds:0.06),project:p),ownWindow.start)
         // Moving the title: its own fade goes with it and is no target.
         XCTAssertNil(Editing.snapTarget(titleWindow.start+MediaTime(seconds:0.02),excluding:title,playhead:.init(seconds:30),threshold:.init(seconds:0.03),project:p))
+        // Moving (or placing) another clip: it lines up with clips, never inside a fade.
+        XCTAssertNil(Editing.snapTarget(near,toTransitions:false,playhead:.init(seconds:30),threshold:threshold,project:p),"the title's fade start is no target")
+        XCTAssertEqual(Editing.snapped(near,toTransitions:false,playhead:.init(seconds:30),threshold:threshold,project:p),p.frameRate.quantize(near))
+        XCTAssertEqual(Editing.snapTarget(.init(seconds:4.04),toTransitions:false,playhead:.init(seconds:30),threshold:threshold,project:p),.init(seconds:4),"a clip's edge still is")
         _ = a
     }
 

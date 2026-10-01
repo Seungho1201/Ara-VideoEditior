@@ -220,18 +220,19 @@ public enum Editing {
         project = try candidate.validated()
     }
     public static func snapped(_ time: MediaTime, duration: MediaTime = .zero, excluding id: UUID? = nil,
-                               playhead: MediaTime, threshold: MediaTime, project: Project) -> MediaTime {
-        project.frameRate.quantize(snapTarget(time,duration:duration,excluding:id,playhead:playhead,threshold:threshold,project:project) ?? time)
+                               toTransitions: Bool = true, playhead: MediaTime, threshold: MediaTime, project: Project) -> MediaTime {
+        project.frameRate.quantize(snapTarget(time,duration:duration,excluding:id,toTransitions:toTransitions,playhead:playhead,threshold:threshold,project:project) ?? time)
     }
     /// What `snapped` lands on: a clip edge, a transition's start or end, the playhead or the
     /// start (the position that puts the dragged span's start or end on it), or nil when nothing
-    /// is within `threshold`. `excludingTransition` is the one being resized.
+    /// is within `threshold`. `excludingTransition` is the one being resized. A clip moved or
+    /// placed (`toTransitions` false) lines up with clips, not with the insides of their fades.
     public static func snapTarget(_ time: MediaTime, duration: MediaTime = .zero, excluding id: UUID? = nil,
-                                  excludingTransition transitionID: UUID? = nil,
+                                  excludingTransition transitionID: UUID? = nil, toTransitions: Bool = true,
                                   playhead: MediaTime, threshold: MediaTime, project: Project) -> MediaTime? {
         let excluded = Set(id.map { project.group(for: $0).map(\.id) } ?? [])
         // A transition on a clip being moved moves with it; its old place is no target.
-        let transitionEdges = project.transitions.filter { transition in
+        let transitionEdges = !toTransitions ? [] : project.transitions.filter { transition in
             transition.id != transitionID && ![transition.from,transition.to].contains { $0.map(excluded.contains) == true }
         }.compactMap(project.window).flatMap { [$0.start,$0.end] }
         let edges = [.zero,playhead] + project.clips.filter { !excluded.contains($0.id) }.flatMap { [$0.start,$0.end] } + transitionEdges

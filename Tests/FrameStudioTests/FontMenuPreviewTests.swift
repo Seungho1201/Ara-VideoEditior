@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 import FrameMedia
 @testable import FrameStudio
@@ -57,5 +58,45 @@ final class FontMenuPreviewTests: XCTestCase {
         let first = menu.items.map(ObjectIdentifier.init)
         coordinator.menuNeedsUpdate(menu)
         XCTAssertEqual(menu.items.map(ObjectIdentifier.init),first)
+    }
+
+    /// The menu buttons show the title's font in that font: the family's name in the face chosen,
+    /// its style too. A symbol font, or a face without the name's letters (a Latin script face and
+    /// a Korean style name), shows it in the system font.
+    @MainActor func testTheButtonsShowTheChosenFontInItsFace() async throws {
+        _ = NSApplication.shared
+        func shown(_ face: String) async throws -> [String:String] {
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-button-fonts-\(UUID().uuidString)")
+            let controls = TitleFontControls(fontName:face,revision:0,addedFolder:folder,isAdding:false,apply:{ _ in },addFonts:{})
+            let window = NSWindow(contentRect:NSRect(x:0,y:0,width:300,height:120),styleMask:.borderless,backing:.buffered,defer:false)
+            window.isReleasedWhenClosed = false
+            let view = NSHostingView(rootView:controls.frame(width:300))
+            view.frame = window.contentLayoutRect; window.contentView = view
+            defer { window.contentView = nil; window.close() }
+            for _ in 0..<6 { view.layoutSubtreeIfNeeded(); try await Task.sleep(for:.milliseconds(20)) }
+            func buttons(_ view: NSView) -> [NSPopUpButton] { ((view as? NSPopUpButton).map { [$0] } ?? [])+view.subviews.flatMap(buttons) }
+            var faces: [String:String] = [:]
+            for button in buttons(view) {
+                let item = (button.cell as? NSPopUpButtonCell)?.menuItem
+                faces[item?.title ?? ""] = (item?.attributedTitle?.attribute(.font,at:0,effectiveRange:nil) as? NSFont)?.fontName ?? "system"
+            }
+            return faces
+        }
+        if FontLibrary.face("SnellRoundhand-Bold") != nil {
+            let snell = try await shown("SnellRoundhand-Bold")
+            XCTAssertEqual(snell["Snell Roundhand"],"SnellRoundhand-Bold","the family in the face chosen: \(snell)")
+            XCTAssertEqual(snell.count,2)
+        }
+        if FontLibrary.face("Webdings") != nil {
+            let webdings = try await shown("Webdings")
+            XCTAssertEqual(webdings["Webdings"],"system","pictures, not letters")
+        }
+        if FontLibrary.face("Zapfino") != nil {
+            let title = try XCTUnwrap(FontPopUp.Coordinator.buttonTitle("Zapfino",in:"Zapfino"))
+            let font = try XCTUnwrap(title.attribute(.font,at:0,effectiveRange:nil) as? NSFont)
+            XCTAssertLessThan(font.pointSize,12,"a very tall face is made smaller for the button")
+            XCTAssertGreaterThanOrEqual(font.pointSize,8,"but stays readable")
+        }
+        XCTAssertNil(FontPopUp.Coordinator.buttonTitle("볼드체",in:"Didot"),"no Hangul in Didot: the system font")
     }
 }

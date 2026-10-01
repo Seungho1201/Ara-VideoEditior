@@ -127,6 +127,7 @@
 "None" = "없음";
 "OK" = "확인";
 "OUTLINE" = "외곽선";
+"TITLE STYLE" = "자막 스타일";
 "Opacity" = "불투명도";
 "Open" = "열기";
 "Open Project…" = "프로젝트 열기…";
@@ -627,3 +628,5 @@
 "%@ plays %@, which can't be found. Import it again, then keep the clip again." = "%1$@의 원본 %2$@을(를) 찾을 수 없습니다. 원본을 다시 가져온 뒤 클립을 다시 즐겨찾기에 저장하십시오.";
 "Add favourite" = "즐겨찾기 클립 추가";
 "Keeps its transitions" = "전환 효과 포함";
+"Font size in points" = "글자 크기(pt)";
+"Outline width in points" = "외곽선 두께(pt)";

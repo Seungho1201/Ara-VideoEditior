@@ -320,17 +320,17 @@ func inspectorSectionsUnfolded() -> () -> Void {
         defer { window.contentView = nil; window.close() }
         for _ in 0..<12 { view.layoutSubtreeIfNeeded(); try await spin(25) }
         var shown = try lines(view)
-        // A row from each section: TEXT, OUTLINE, SHADOW, TRANSFORM, COLOUR, TIMING, then Reset.
-        let order = try ["Font size","Width","Shadow colour","Position X","Brightness","Start","Reset appearance"].map { try top($0,in:shown) }
+        // A row from each section: TEXT's look, OUTLINE, SHADOW, TRANSFORM, COLOUR, TIMING, then Reset.
+        let order = try ["Style","OUTLINE","Shadow colour","Position X","Brightness","Start","Reset appearance"].map { try top($0,in:shown) }
         XCTAssertEqual(order,order.sorted(),"\(shown.map(\.text))")
 
         for key in Self.foldKeys { UserDefaults.standard.set(false,forKey:key) }
         for _ in 0..<12 { view.layoutSubtreeIfNeeded(); try await spin(25) }
         shown = try lines(view)
         for gone in ["Position X","Brightness","Distance","Shadow colour"] { XCTAssertNil(shown.first { $0.text.hasPrefix(gone) },"\(gone) folded away") }
-        _ = try top("Width",in:shown)    // OUTLINE does not fold
+        XCTAssertGreaterThan(try top("4",in:shown),try top("OUTLINE",in:shown),"OUTLINE does not fold: its width still shows")
         // Each folded title's line says what it holds; TIMING's rows and Reset still come last.
-        let folded = try ["Width","Off","Default","Edited","Start","Reset appearance"].map { try top($0,in:shown) }
+        let folded = try ["OUTLINE","Off","Default","Edited","Start","Reset appearance"].map { try top($0,in:shown) }
         XCTAssertEqual(folded,folded.sorted(),"\(shown.map(\.text))")
     }
 
@@ -372,6 +372,74 @@ func inspectorSectionsUnfolded() -> () -> Void {
         store.placeAnchor(of:a.id,x:100,y:200)
         XCTAssertTrue(store.anchorPixel(of:store.project.clips[0]) == (100,200),"the point lands where typed")
         XCTAssertEqual(style(store,a.id).anchorX,0.5,"the point stays where it is in the clip")
+    }
+
+    /// A title's colour, size slider and size share a line; the size is typed too (one undo step).
+    /// While the colour's presets are shown the slider and the size make way for them.
+    func testTheColourSliderAndSizeShareALine() async throws {
+        _ = NSApplication.shared
+        let store = EditorStore()
+        store.fontFolder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-inspector-fonts-\(UUID().uuidString)")
+        let a = title("Size") { $0.fontSize = 72 }
+        store.edit("Fixture") { $0.clips = [a] }
+        store.selectedClipID = a.id
+        try await settle(store)
+        let (window,view) = host(InspectorPanel(store:store))
+        defer { window.contentView = nil; window.close(); store.pause() }
+        try await spin(150)
+        func fields() -> [NSTextField] { all(NSTextField.self,in:view).filter(\.isEditable) }
+        let size = try XCTUnwrap(fields().first { $0.stringValue == "72" },"\(fields().map(\.stringValue))")
+        XCTAssertTrue(window.makeFirstResponder(size)); try await spin(60)
+        XCTAssertTrue(store.isEditingText,"the frame keys stand down while the size is typed")
+        let editor = try XCTUnwrap(size.currentEditor() as? NSTextView)
+        editor.selectAll(nil); editor.insertText("120",replacementRange:caret); editor.insertNewline(nil)
+        try await spin(150)
+        XCTAssertEqual(style(store,a.id).fontSize,120); XCTAssertEqual(store.undoName,"Font size")
+        editor.selectAll(nil); editor.insertText("999",replacementRange:caret); editor.insertNewline(nil)
+        try await spin(150)
+        XCTAssertEqual(style(store,a.id).fontSize,300,"kept within the slider's reach")
+        window.makeFirstResponder(nil); try await spin(60)
+        // The colour's presets take the line: the size steps aside, and comes back.
+        store.colorPresetRow.click("Text colour",at:0,interval:0.5)
+        for _ in 0..<10 { view.layoutSubtreeIfNeeded(); try await spin(25) }
+        XCTAssertNil(fields().first { $0.stringValue == "300" },"out of the presets' way")
+        store.colorPresetRow.close("Text colour")
+        for _ in 0..<10 { view.layoutSubtreeIfNeeded(); try await spin(25) }
+        XCTAssertNotNil(fields().first { $0.stringValue == "300" })
+        store.undo(); store.undo()
+        XCTAssertEqual(style(store,a.id).fontSize,72,"each typed size was one step")
+    }
+
+    /// The outline's colour, width slider and width share a line as the text's colour and size do.
+    /// A width typed that reads 0 switches the outline off; its presets have the line while shown.
+    func testTheOutlineColourAndWidthShareALine() async throws {
+        _ = NSApplication.shared
+        let store = EditorStore()
+        store.fontFolder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-inspector-fonts-\(UUID().uuidString)")
+        let a = title("Outline") { $0.fontSize = 72; $0.outlineWidth = 4 }
+        store.edit("Fixture") { $0.clips = [a] }
+        store.selectedClipID = a.id
+        try await settle(store)
+        let (window,view) = host(InspectorPanel(store:store))
+        defer { window.contentView = nil; window.close(); store.pause() }
+        try await spin(150)
+        func fields() -> [NSTextField] { all(NSTextField.self,in:view).filter(\.isEditable) }
+        func type(_ text: String, into field: NSTextField) async throws {
+            XCTAssertTrue(window.makeFirstResponder(field)); try await spin(40)
+            let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+            editor.selectAll(nil); editor.insertText(text,replacementRange:caret); editor.insertNewline(nil)
+            try await spin(150)
+        }
+        let width = try XCTUnwrap(fields().first { $0.stringValue == "4" },"\(fields().map(\.stringValue))")
+        try await type("0.3",into:width)
+        XCTAssertEqual(style(store,a.id).outlineWidth,0,"reads 0: off"); XCTAssertEqual(store.undoName,"Outline")
+        try await type("2.5",into:width)
+        XCTAssertEqual(style(store,a.id).outlineWidth,2.5); XCTAssertEqual(width.stringValue,"2.5")
+        window.makeFirstResponder(nil); try await spin(60)
+        store.colorPresetRow.click("Outline colour",at:0,interval:0.5)
+        for _ in 0..<10 { view.layoutSubtreeIfNeeded(); try await spin(25) }
+        XCTAssertNil(fields().first { $0.stringValue == "2.5" },"out of the presets' way")
+        XCTAssertNotNil(fields().first { $0.stringValue == "72" },"the text's size stays: only the outline's line is taken")
     }
 
     /// SHADOW, TRANSFORM and COLOUR fold under their titles: their controls go, the panel gets
@@ -477,12 +545,12 @@ func inspectorSectionsUnfolded() -> () -> Void {
             func linear(_ v: Int) -> Double { let v = Double(v)/255; return v <= 0.04045 ? v/12.92 : pow((v+0.055)/1.055,2.4) }
             return 0.2126*linear(c.red)+0.7152*linear(c.green)+0.0722*linear(c.blue)
         }
-        // The buttons' row, found by Done's accent fill; Reset is to the right of Done.
+        // The buttons' row, found by Done's accent fill; Reset is the 28-point button right of Done.
         let rows = (0..<context.height).filter { accent(Int(18*scale),$0) }
         let top = try XCTUnwrap(rows.first,"the Done button"), bottom = try XCTUnwrap(rows.last), middle = (top+bottom)/2
         let doneEnd = try XCTUnwrap((0..<Int(150*scale)).last { accent($0,middle) })
         var brightest = 0.0, counts: [Int:Int] = [:], shades: [Int:Double] = [:]
-        for y in (top+3)..<(bottom-3) { for x in (doneEnd+Int(10*scale))..<Int(240*scale) {
+        for y in (top+3)..<(bottom-3) { for x in (doneEnd+Int(9*scale))..<(doneEnd+Int(31*scale)) {
             let l = luminance(x,y), key = Int(l*10_000)
             brightest = max(brightest,l); counts[key,default:0] += 1; shades[key] = l
         }}

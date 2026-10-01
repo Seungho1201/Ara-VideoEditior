@@ -225,6 +225,30 @@ func timelineTestVideo() -> MediaReference {
         XCTAssertEqual(rig.clip("A").end,.init(seconds:12)); XCTAssertEqual(rig.cues,[])
     }
 
+    /// A clip moved past another clip's fade lines up with clips, not with the fade's inside: near
+    /// the fade's start it follows the pointer, with no tick. Near a clip's edge it still catches.
+    func testAMovedClipDoesNotSnapToTransitions() {
+        var fade: UUID?
+        let rig = TimelineRig { project in
+            let a = self.title("A",.v1,0,4), b = self.title("B",.v2,6,2)
+            project.clips = [a,b]
+            fade = try Editing.setTransition(.crossDissolve,duration:.init(seconds:1),from:a.id,to:nil,in:&project)   // 3–4 s
+        }
+        defer { rig.close() }
+        XCTAssertNotNil(fade)
+        rig.store.seek(.init(seconds:30))
+        let lane = rig.y(.v2)
+        // B's start taken to 3.05 s, beside the fade's start at 3 s.
+        rig.drag(from:7,through:[6,4.05],y:lane)
+        XCTAssertEqual(rig.clip("B").start,rig.store.project.frameRate.quantize(.init(seconds:3.05)),"not pulled onto the fade's start")
+        XCTAssertEqual(rig.cues,[])
+        // Beside A's end at 4 s it catches, with a tick.
+        // (The move shortened the timeline, which pulled the playhead in: it goes back out of reach.)
+        rig.store.undo(); rig.store.seek(.init(seconds:30)); rig.cues = []
+        rig.drag(from:7,through:[6,5.05],y:lane)
+        XCTAssertEqual(rig.clip("B").start,.init(seconds:4)); XCTAssertEqual(rig.cues,[.alignment])
+    }
+
     func testNoTickWhenAGroupIsStoppedShortOfItsSnapTarget() {
         let rig = TimelineRig { $0.clips = [self.title("A",.v1,1,2),self.title("B",.v2,3.5,2),self.title("Far",.v2,30,1)] }
         defer { rig.close() }

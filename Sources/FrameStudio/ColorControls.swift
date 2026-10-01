@@ -161,6 +161,11 @@ struct TitleColorControl: View {
     @ObservedObject var store: EditorStore
     let target: ColorTarget
     let color: TitleColor
+    /// The colour's name before the swatch; left out on a line that says what it is otherwise.
+    var showsName = true
+    /// Whether the room for the presets is kept while they are hidden. A line with more on it
+    /// (the title's size) lets them have it only while they are shown.
+    var roomWhenClosed = true
     @Environment(\.isEnabled) private var isEnabled
     /// The width beside the swatch, where the presets go.
     @State private var room: CGFloat = 0
@@ -175,10 +180,10 @@ struct TitleColorControl: View {
     var body: some View {
         let shown = Self.presetsFitting(room)
         HStack(spacing:0) {
-            Text(LocalizedStringKey(target.name)).lineLimit(1).fixedSize()
-            swatch.padding(.leading,6).zIndex(1)
+            if showsName { Text(LocalizedStringKey(target.name)).lineLimit(1).fixedSize() }
+            swatch.padding(.leading,showsName ? 6 : 0).zIndex(1)
             // The presets are laid over the room beside the swatch, so showing them moves nothing.
-            Color.clear.frame(maxWidth:.infinity).frame(height:26)
+            Color.clear.frame(maxWidth:roomWhenClosed || isOpen ? .infinity : 0).frame(height:26)
                 .onGeometryChange(for:CGFloat.self) { $0.size.width } action: { room = $0 }
                 .overlay(alignment:.leading) {
                     HStack(spacing:0) {

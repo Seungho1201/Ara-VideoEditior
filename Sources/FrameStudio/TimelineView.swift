@@ -1100,7 +1100,7 @@ struct TimelineSurface: NSViewRepresentable {
             var others = store.project; others.clips.removeAll { groupMoving.contains($0.id) }
             var target: MediaTime?
             if store.snapping && !event.modifierFlags.contains(.shift) {
-                target = Editing.snapTarget(position,duration:original.duration,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:others)
+                target = Editing.snapTarget(position,duration:original.duration,toTransitions:false,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:others)
             }
             position = store.project.frameRate.quantize(target ?? position)
             let delta = position-original.start
@@ -1128,7 +1128,9 @@ struct TimelineSurface: NSViewRepresentable {
         var position = (mode == .end ? original.end : original.start)+delta
         var target: MediaTime?
         if store.snapping && !event.modifierFlags.contains(.shift) {
-            target = Editing.snapTarget(position,duration:mode == .move ? original.duration : .zero,excluding:original.id,playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:store.project)
+            // A moved clip lines up with clips, not with transitions; a trimmed edge may meet either.
+            target = Editing.snapTarget(position,duration:mode == .move ? original.duration : .zero,excluding:original.id,toTransitions:mode != .move,
+                                        playhead:store.playhead,threshold:.init(seconds:8/pixelsPerSecond),project:store.project)
         }
         position = store.project.frameRate.quantize(target ?? position)
         guard mode == .move else {
@@ -1346,7 +1348,7 @@ struct TimelineSurface: NSViewRepresentable {
         if audio == lane.isVideo, trackLayout.together(lane,lane.paired) { lane = lane.paired }
         let raw = time(at:point.x), threshold = MediaTime(seconds:8/pixelsPerSecond)
         let snapping = store.snapping && !NSEvent.modifierFlags.contains(.shift)
-        let position = snapping ? Editing.snapped(raw,playhead:store.playhead,threshold:threshold,project:store.project)
+        let position = snapping ? Editing.snapped(raw,toTransitions:false,playhead:store.playhead,threshold:threshold,project:store.project)
                                 : store.project.frameRate.quantize(raw)
         guard fits(lane,position) else { return nil }
         // Checking the actual edges also recognizes a pointer exactly on an edge;

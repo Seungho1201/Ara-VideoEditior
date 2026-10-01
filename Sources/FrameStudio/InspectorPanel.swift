@@ -91,25 +91,26 @@ struct InspectorContent: View, Equatable {
             } else if let clip = store.selectedClip {
                 ScrollView {
                     VStack(alignment:.leading,spacing:18) {
-                        // The name, a title's text (what it says comes first), then where the clip sits.
+                        // The name, a title's text under TEXT (what it says comes first), where the clip
+                        // sits, a title's font; then how a title looks.
                         VStack(alignment:.leading,spacing:12) {
                             ClipHeader(store:store,clip:clip)
-                            if clip.kind == .text { textBox(clip) }
+                            if clip.kind == .text { section("TEXT") { textBox(clip) } }
                             if clip.lane.isVideo { AlignmentControls(store:store,clip:clip) }
-                        }
-                        // How a title looks.
-                        if clip.kind == .text {
-                            section("TEXT") {
+                            if clip.kind == .text {
                                 TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
                                                   isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
-                                                  addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable()
-                                titleControl("Font size",\.fontSize,range:8...300,suffix:" pt",clip:clip)
-                                titleColor("Text colour",\.red,\.green,\.blue,clip:clip)
+                                                  addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable().font(.system(size:11))
+                            }
+                        }
+                        if clip.kind == .text {
+                            section("TITLE STYLE") {
+                                titleLine("Text colour",\.red,\.green,\.blue,amount:\.fontSize,range:8...300,step:1,undoName:"Font size",label:"Font size",clip:clip)
                             }
                             // Width and opacity switch the effect on; the rest wait until it is.
                             section("OUTLINE") {
-                                titleControl("Width",\.outlineWidth,range:0...20,suffix:" pt",clip:clip,undoName:"Outline",switches:true)
-                                titleColor("Outline colour",\.outlineRed,\.outlineGreen,\.outlineBlue,clip:clip).disabled(!clip.style.hasOutline)
+                                titleLine("Outline colour",\.outlineRed,\.outlineGreen,\.outlineBlue,amount:\.outlineWidth,range:0...20,step:0.5,undoName:"Outline",
+                                          label:"Outline width",switches:true,colourOn:clip.style.hasOutline,clip:clip)
                             }
                             FoldingSection(title:"SHADOW",isOpen:$shadowOpen,
                                            summary:clip.style.hasShadow ? .amount(Self.reading(clip.style.shadowOpacity,multiplier:100,switches:true)+"%",
@@ -456,6 +457,19 @@ struct InspectorContent: View, Equatable {
                    }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(undoName.map { "\($0) \(label.lowercased())" } ?? label)))
         }
     }
+    /// A title's colour and an amount on one line: the swatch (its presets open over the line),
+    /// the amount's slider and the amount typed. The text's colour with its size, the outline's
+    /// colour with its width; the swatch is dimmed while the amount leaves the colour off.
+    private func titleLine(_ colour: String, _ red: WritableKeyPath<ClipStyle,Double>, _ green: WritableKeyPath<ClipStyle,Double>, _ blue: WritableKeyPath<ClipStyle,Double>,
+                           amount key: WritableKeyPath<ClipStyle,Double>, range: ClosedRange<Double>, step: Double, undoName: String, label: String,
+                           switches: Bool = false, colourOn: Bool = true, clip: Clip) -> some View {
+        HStack(spacing:8) {
+            TitleColorControl(store:store,target:ColorTarget(clipID:clip.id,red:red,green:green,blue:blue,name:colour),
+                              color:TitleColor(red:clip.style[keyPath:red],green:clip.style[keyPath:green],blue:clip.style[keyPath:blue]),
+                              showsName:false,roomWhenClosed:false).disabled(!colourOn)
+            TitleAmountControls(store:store,clipID:clip.id,key:key,range:range,step:step,undoName:undoName,label:label,colour:colour,switches:switches)
+        }
+    }
     /// A title colour: its swatch, the presets beside it, and the palette (ColorControls.swift).
     private func titleColor(_ label:String,_ red:WritableKeyPath<ClipStyle,Double>,_ green:WritableKeyPath<ClipStyle,Double>,_ blue:WritableKeyPath<ClipStyle,Double>,clip:Clip) -> some View {
         TitleColorControl(store:store,target:ColorTarget(clipID:clip.id,red:red,green:green,blue:blue,name:label),
@@ -509,9 +523,57 @@ struct ClipHeader: View {
     }
 }
 
+/// An amount beside its colour (a title's size, its outline's width): the slider (one drag is one
+/// undo step), and the amount typed in points (Return or leaving the field sets it, one undo step).
+/// Out of the way while the colour's presets are shown, so they have the line.
+struct TitleAmountControls: View {
+    @ObservedObject var store: EditorStore
+    let clipID: UUID
+    let key: WritableKeyPath<ClipStyle,Double>
+    let range: ClosedRange<Double>
+    /// What a drag of the slider moves in (a whole point of size, half a point of outline), so the
+    /// number beside it reads clean. Typed values are kept as typed.
+    let step: Double
+    let undoName: String
+    /// What VoiceOver calls the slider ("Font size", "Outline width").
+    let label: String
+    /// The colour whose presets this makes way for.
+    let colour: String
+    /// An amount that switches its effect on: one that reads 0 is 0 (InspectorContent.slide).
+    var switches = false
+    @State private var dragging = false
+    @FocusState private var typing: Bool
+    private var amount: Double { store.project.clips.first { $0.id == clipID }?.style[keyPath:key] ?? range.lowerBound }
+    private func set(_ value: Double) {
+        InspectorContent.slide(key,to:value,range:range,switches:switches,of:clipID,name:undoName,closesWhenIdle:!dragging,in:store)
+    }
+    var body: some View {
+        if store.colorPresetRow.open != colour {
+            HStack(spacing:8) {
+                Slider(value:Binding(get:{ amount },set:{ set(($0/step).rounded()*step) }),in:range,onEditingChanged:{ active in
+                    // The title's typed text lands first, as its own step.
+                    if active { store.commitPendingEdits(); dragging = true } else { dragging = false; store.endLiveEdit() }
+                }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(label)))
+                HStack(spacing:3) {
+                    // Whole points, with a tenth for a fraction (an outline just switched on).
+                    TextField("",value:Binding(get:{ (amount*10).rounded()/10 },set:{ set($0); store.endLiveEdit() }),
+                              format:.number.precision(.fractionLength(0...1)).grouping(.never))
+                        .textFieldStyle(.plain).multilineTextAlignment(.trailing).font(.system(size:10,design:.monospaced))
+                        .frame(width:30).padding(.horizontal,5).frame(height:AlignmentControls.height).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                        .focused($typing).onChange(of:typing) { _,now in store.textFocusChanged(now) }
+                        .onDisappear { if typing { store.textFocusChanged(false) } }
+                        .accessibilityLabel(Text(LocalizedStringKey(label+" in points")))
+                    Text(verbatim:"pt").font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted)
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+}
+
 /// Where a picture's alignment point is: turning and scaling go about it, and moving lines it up
-/// with the frame's centre and other clips' points. The buttons that place it (side by side while
-/// they fit), and its coordinates on a line of their own, so the lines stay at any panel width.
+/// with the frame's centre and other clips' points. One line, narrow enough for the narrowest panel:
+/// the button that places it (its mark alone), Reset while placing, and its coordinates.
 struct AlignmentControls: View {
     @ObservedObject var store: EditorStore
     let clip: Clip
@@ -519,16 +581,16 @@ struct AlignmentControls: View {
     @FocusState private var typing: Coordinate?
     enum Coordinate: Hashable { case x, y }
     private var placing: Bool { store.anchorEditID == clip.id }
+    /// The height of the buttons and fields on the line.
+    static let height: CGFloat = 24
     var body: some View {
-        VStack(alignment:.leading,spacing:6) {
-            ViewThatFits(in:.horizontal) {
-                HStack(spacing:6) { adjustButton; resetButton }
-                VStack(alignment:.leading,spacing:5) { adjustButton; resetButton }
-            }
+        HStack(spacing:6) {
+            adjustButton; resetButton
+            Spacer(minLength:8)
             coordinates
-                .onChange(of:typing) { _,now in store.textFocusChanged(now != nil) }
-                .onDisappear { if typing != nil { store.textFocusChanged(false) } }
         }
+        .onChange(of:typing) { _,now in store.textFocusChanged(now != nil) }
+        .onDisappear { if typing != nil { store.textFocusChanged(false) } }
     }
     /// Where the alignment point is, in whole pixels of the frame from its top-left corner (the
     /// clip's middle until the point is moved). Typing a number moves the clip there; the arrow
@@ -544,7 +606,7 @@ struct AlignmentControls: View {
                 return axis == .x ? at.x : at.y
             },set:{ pixel in store.placeAnchor(of:clip.id,x:axis == .x ? pixel : nil,y:axis == .y ? pixel : nil) }),format:.number.grouping(.never))
                 .textFieldStyle(.plain).multilineTextAlignment(.trailing).font(.system(size:10,design:.monospaced))
-                .frame(width:40).padding(.horizontal,6).padding(.vertical,5).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                .frame(width:40).padding(.horizontal,6).frame(height:Self.height).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
                 .focused($typing,equals:axis).disabled(store.isExporting)
                 .accessibilityLabel(axis == .x ? Text("Alignment point X in pixels") : Text("Alignment point Y in pixels"))
                 .help("Where the alignment point is, in pixels from the frame's top-left corner. Type a number to move the clip there.")
@@ -552,24 +614,28 @@ struct AlignmentControls: View {
     }
     private var adjustButton: some View {
         Button { withAnimation(.snappy(duration:0.2)) { store.editAnchor(clip) } } label: {
-            Label(placing ? "Done" : "Adjust alignment point",systemImage:placing ? "checkmark.circle.fill" : "scope")
-                .font(.system(size:10,weight:.semibold)).lineLimit(1).fixedSize().padding(.horizontal,8).padding(.vertical,5)
+            Image(systemName:placing ? "checkmark" : "scope").font(.system(size:12,weight:.semibold))
+                .frame(width:28,height:Self.height)
                 .foregroundStyle(placing ? Theme.background : Color.primary)
                 .background(placing ? Theme.accent : Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(store.isExporting || store.isCapturingSnapshot)
-        .help("Click, then click or drag in the preview to place the alignment point. It catches the centre, corners and edges.")
+        .accessibilityLabel(placing ? Text("Done") : Text("Adjust alignment point"))
+        .help(placing ? Text("Done") : Text("Click, then click or drag in the preview to place the alignment point. It catches the centre, corners and edges."))
     }
     /// Only while placing the point. With nothing to reset it is dimmed once, as disabled, and not
     /// again on top, so it stays legible.
     @ViewBuilder private var resetButton: some View {
         if placing {
             Button { store.resetAnchor(clip) } label: {
-                Label("Reset alignment point",systemImage:"arrow.counterclockwise")
-                    .font(.system(size:10,weight:.semibold)).lineLimit(1).fixedSize().padding(.horizontal,8).padding(.vertical,5)
+                Image(systemName:"arrow.counterclockwise").font(.system(size:12,weight:.semibold))
+                    .frame(width:28,height:Self.height)
                     .background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain).disabled(!clip.style.hasAnchor || store.isExporting)
+            .accessibilityLabel(Text("Reset alignment point"))
             .help("Put the alignment point back in the middle of the clip")
             .transition(.opacity)
         }
@@ -612,44 +678,64 @@ struct TitleFontControls: View, Equatable {
         let current = FontLibrary.face(fontName)
         let menu = FontMenu.families(revision,addedIn:addedFolder)
         let listed = Set((menu.added+menu.system).map(\.name))
+        // A family that can show its own name (not a symbol font) shows the choice in its face.
+        let readable = current.map { FontMenu.previewFace(of:FontLibrary.Family(name:$0.family,displayName:$0.familyDisplayName)) != nil } ?? false
         VStack(alignment:.leading,spacing:10) {
             HStack {
-                Text("Font").foregroundStyle(Theme.muted); Spacer()
+                label("Font"); Spacer()
                 // Each family in its own face, so the menu shows what it offers.
                 FontPopUp(entries:familyEntries(current:current,menu:menu,listed:listed),selected:current?.family ?? FontMenu.missingTag,
-                          title:current?.familyDisplayName ?? missingTitle,label:String(localized:"Font family")) { family in
+                          title:current?.familyDisplayName ?? missingTitle,titleFace:readable ? current?.postScriptName : nil,label:String(localized:"Font family")) { family in
                     guard family != FontMenu.missingTag, family != current?.family,
                           let face = FontLibrary.closestFace(inFamily:family,toWeight:current?.weight ?? 0.4,italic:current?.isItalic ?? false) else { return }
                     apply(face.postScriptName)
                 }.frame(maxWidth:170)
+                addButton
             }
             if let current {
                 let faces = FontLibrary.faces(ofFamily:current.family)
                 let repeated = Dictionary(grouping:faces,by:\.style).filter { $0.value.count > 1 }.keys
                 if faces.count > 1 {
                     HStack {
-                        Text("Style").foregroundStyle(Theme.muted); Spacer()
+                        label("Style"); Spacer()
                         // Two faces with one style name (a static file and a variable font of the
                         // same family) are told apart by their PostScript names.
-                        let readable = FontMenu.previewFace(of:FontLibrary.Family(name:current.family,displayName:current.familyDisplayName)) != nil
                         let entries = faces.map { face in
                             FontPopUp.Entry.item(tag:face.postScriptName,title:repeated.contains(face.style) ? "\(face.style) · \(face.postScriptName)" : face.style,
                                                  face:readable ? face.postScriptName : nil)
                         }
-                        FontPopUp(entries:entries,selected:current.postScriptName,title:current.style,label:String(localized:"Font style")) { name in
+                        FontPopUp(entries:entries,selected:current.postScriptName,title:current.style,titleFace:readable ? current.postScriptName : nil,label:String(localized:"Font style")) { name in
                             if name != current.postScriptName { apply(name) }
                         }.frame(maxWidth:170)
+                        Color.clear.frame(width:Self.addSize,height:1)      // lines up with the font menu above
+
                     }
                 }
             } else {
                 Text("“\(fontName)” isn't on this Mac, so the title is shown in Helvetica Neue Bold. Add the font to use it again.")
                     .font(.system(size:9)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
             }
-            HStack(spacing:8) {
-                Button("Add Font…",action:addFonts).controlSize(.small).disabled(isAdding)
-                    .help("TTF, OTF or TTC files, or the ZIP they came in. Ara keeps its own copy, and the new font is put on this title.")
-                if isAdding { ProgressView().controlSize(.mini).accessibilityLabel("Adding fonts") }
+        }
+    }
+    static let addSize: CGFloat = 24
+    /// A row's name, as wide as the wider of the two, so the two menus line up in a narrow panel too.
+    private func label(_ name: LocalizedStringKey) -> some View {
+        ZStack(alignment:.leading) { Text("Font").hidden(); Text("Style").hidden(); Text(name).foregroundStyle(Theme.muted) }
+    }
+    /// Add Font… as a + beside the font menu; while fonts are being added, a spinner in its place.
+    @ViewBuilder private var addButton: some View {
+        if isAdding {
+            ProgressView().controlSize(.mini).frame(width:Self.addSize,height:Self.addSize).accessibilityLabel("Adding fonts")
+        } else {
+            Button(action:addFonts) {
+                Image(systemName:"plus").font(.system(size:12,weight:.semibold))
+                    .frame(width:Self.addSize,height:Self.addSize)
+                    .background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Add Font…"))
+            .help("TTF, OTF or TTC files, or the ZIP they came in. Ara keeps its own copy, and the new font is put on this title.")
         }
     }
 }
@@ -700,9 +786,10 @@ struct TitleFontControls: View, Equatable {
 }
 
 
-/// A pop-up menu whose items are drawn in their own fonts. The button shows the choice in the
-/// system font (a script or display face would overflow it), and the items are made when the
-/// menu opens, so selecting a title never waits for some 250 fonts to load.
+/// A pop-up menu whose items are drawn in their own fonts. The button shows the choice in its own
+/// face too (`titleFace`), sized to fit the button; a face that cannot draw the name (a symbol
+/// font) leaves it in the system font. The items are made when the menu opens, so selecting a title
+/// never waits for some 250 fonts to load.
 struct FontPopUp: NSViewRepresentable {
     enum Entry: Equatable {
         case header(String)
@@ -713,6 +800,8 @@ struct FontPopUp: NSViewRepresentable {
     let entries: [Entry]
     let selected: String
     let title: String
+    /// The face the button shows `title` in, if any.
+    var titleFace: String? = nil
     let label: String
     let choose: (String) -> Void
 
@@ -720,6 +809,8 @@ struct FontPopUp: NSViewRepresentable {
         var entries: [Entry] = [], selected = "", choose: (String) -> Void = { _ in }
         weak var button: NSPopUpButton?
         private var built: (entries: [Entry], selected: String)?
+        /// The title and face the button shows.
+        var shown: (title: String, face: String?)?
         /// The shared font objects, one per face, at a size that fits a menu row.
         private static var fonts: [String:NSFont] = [:]
         static func previewFont(_ face: String) -> NSFont? {
@@ -730,6 +821,18 @@ struct FontPopUp: NSViewRepresentable {
             if height > 26, let smaller = NSFont(name:face,size:max(10,13*26/height)) { font = smaller }
             fonts[face] = font
             return font
+        }
+        /// The button's title in `face`, small enough for the button and cut short at its end; nil
+        /// when the face cannot draw every character of it.
+        static func buttonTitle(_ title: String, in face: String) -> NSAttributedString? {
+            guard var font = NSFont(name:face,size:12) else { return nil }
+            let text = Array(title.utf16)
+            var glyphs = [CGGlyph](repeating:0,count:text.count)
+            guard !text.isEmpty, CTFontGetGlyphsForCharacters(font as CTFont,text,&glyphs,text.count) else { return nil }
+            let height = font.ascender-font.descender
+            if height > 15, let smaller = NSFont(name:face,size:max(8,12*15/height)) { font = smaller }
+            let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail
+            return NSAttributedString(string:title,attributes:[.font:font,.paragraphStyle:paragraph])
         }
         func menuNeedsUpdate(_ menu: NSMenu) {
             guard built?.entries != entries || built?.selected != selected else { return }
@@ -772,7 +875,12 @@ struct FontPopUp: NSViewRepresentable {
     func updateNSView(_ button: NSPopUpButton, context: Context) {
         let coordinator = context.coordinator
         coordinator.entries = entries; coordinator.selected = selected; coordinator.choose = choose
-        if let cell = button.cell as? NSPopUpButtonCell, cell.menuItem?.title != title { cell.menuItem = NSMenuItem(title:title,action:nil,keyEquivalent:""); button.needsDisplay = true }
+        if let cell = button.cell as? NSPopUpButtonCell, coordinator.shown?.title != title || coordinator.shown?.face != titleFace {
+            coordinator.shown = (title,titleFace)
+            let item = NSMenuItem(title:title,action:nil,keyEquivalent:"")
+            if let titleFace, let styled = Coordinator.buttonTitle(title,in:titleFace) { item.attributedTitle = styled }
+            cell.menuItem = item; button.needsDisplay = true
+        }
         button.setAccessibilityLabel(label); button.toolTip = title
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
