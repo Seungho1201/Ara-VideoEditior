@@ -132,7 +132,7 @@ struct TimelineSurface: NSViewRepresentable {
         view.drawsBackground = false; view.scrollerStyle = .legacy
         // No rubber band vertically: the name column follows the canvas's settled offset only.
         view.verticalScrollElasticity = .none
-        let canvas = TimelineCanvas(); canvas.store = store; view.documentView = canvas
+        let canvas = TimelineCanvas(); canvas.store = store; canvas.pickDelay = 0.03; view.documentView = canvas
         // Tracks that no longer fit scroll vertically; the name column follows the same offset.
         view.contentView.postsBoundsChangedNotifications = true
         let model = scroll, coordinator = context.coordinator
@@ -155,7 +155,7 @@ struct TimelineSurface: NSViewRepresentable {
     func updateNSView(_ scroll:NSScrollView,context:Context) {
         guard let canvas = scroll.documentView as? TimelineCanvas else { return }
         context.coordinator.updating = true; defer { context.coordinator.updating = false }
-        let oldZoom = canvas.pixelsPerSecond
+        let oldZoom = canvas.pixelsPerSecond, oldSize = canvas.frame.size
         canvas.store = store; canvas.pixelsPerSecond = store.zoom
         canvas.synchronizeScrubbing()
         canvas.animateFolds(to:store.foldedSound)
@@ -177,14 +177,31 @@ struct TimelineSurface: NSViewRepresentable {
         // Arming rectangle select gives the timeline the keyboard, so Esc reaches it.
         if store.dragSelectArmed, !canvas.armedForSelect, let window = canvas.window { window.makeFirstResponder(canvas) }
         canvas.armedForSelect = store.dragSelectArmed
-        canvas.needsDisplay = true
+        if canvas.frame.size != oldSize { canvas.needsDisplay = true }
+        canvas.redrawIfChanged()
         canvas.window?.invalidateCursorRects(for:canvas)
     }
 }
 
 @MainActor final class TimelineCanvas: NSView, NSUserInterfaceValidations {
-    weak var store: EditorStore? { didSet { if store !== oldValue { followPlayhead() } } }
+    weak var store: EditorStore? { didSet { if store !== oldValue { followPlayhead(); drawn = nil } } }
+    /// The longest a pick on release waits for the preview's new frame.
+    static let pickWaitsForPreview: CFTimeInterval = 0.25
     private var playheadWatch: AnyCancellable?
+    /// What the canvas draws from the store, as last drawn. An editor update that changes none of
+    /// it (most do not: a status note, the inspector, a build) leaves the canvas alone; redrawing
+    /// it on every one took a third of each update. Its own gestures redraw it themselves.
+    struct Drawn: Equatable {
+        var project: Project, selected: Set<UUID>, transition: UUID?, gap: TimelineGap?, playing: Bool
+        var thumbnails: [UUID:NSImage], waveforms: [UUID:[Float]], closeGap: String, zoom: Double, folded: Set<Int>
+    }
+    private var drawn: Drawn?
+    func redrawIfChanged() {
+        guard let store else { return }
+        let now = Drawn(project:store.project,selected:store.selectedClipIDs,transition:store.selectedTransitionID,gap:store.selectedGap,playing:store.isPlaying,
+                        thumbnails:store.thumbnails,waveforms:store.waveforms,closeGap:store.shortcuts.label(.closeGap),zoom:store.zoom,folded:store.foldedSound)
+        if now != drawn { drawn = now; needsDisplay = true }
+    }
     var pixelsPerSecond: Double = 64
     var revealPlayheadRequest = 0
     /// Whether rectangle select was armed at the last update (to notice it being switched on).
@@ -280,6 +297,14 @@ struct TimelineSurface: NSViewRepresentable {
     private var groupDelta: MediaTime?
     /// Pressed on one of several selected clips: if it is let go without moving, just that one is selected.
     private var clickedInGroup: UUID?
+    /// A clip pressed on: drawn picked at once, picked in the store on release. The inspector
+    /// redrawn for another clip took a beat from the start of the drag.
+    private var pendingPick: UUID?
+    /// How long after a release the clip pressed on is picked: in the app a frame or two, so the
+    /// drop shows before the inspector is redrawn; at once where nothing draws (tests).
+    var pickDelay: TimeInterval = 0
+    /// While a pick waits on that, the clip drawn picked.
+    private var waitingPick: UUID?
     /// Shift-drag over empty track space: the rectangle, and what was selected before it.
     private var marquee: NSRect?
     private var marqueeBase: Set<UUID> = []
@@ -403,11 +428,13 @@ struct TimelineSurface: NSViewRepresentable {
     /// Drops a move, trim or marquee whose timeline changed under it, quietly: the change (an
     /// undo, say) is what the user asked for, and the drag no longer describes the timeline.
     private func dropGesture() {
+        pendingPick = nil
         mode = nil; original = nil; candidate = nil; candidateValid = true; moved = false; gestureBase = nil
         clearGroupGesture(); needsDisplay = true; window?.invalidateCursorRects(for:self)
     }
     /// Esc: lets go of a move, trim, marquee, scrub or transition resize in progress, applying nothing.
     private func cancelDrag() {
+        pendingPick = nil
         resetScrubbing(); transitionResize = nil
         mode = nil; candidate = nil; original = nil; moved = false
         clearGroupGesture(); needsDisplay = true; window?.invalidateCursorRects(for:self)
@@ -418,7 +445,7 @@ struct TimelineSurface: NSViewRepresentable {
         if event.type == .mouseMoved, pressedMouseButtons() == 0,
            mode != nil || transitionResize != nil || dropped != nil || transitionDrop != nil || favoriteDrop != nil {
             mode = nil; original = nil; candidate = nil; transitionResize = nil; moved = false
-            candidateValid = true
+            candidateValid = true; pendingPick = nil
             clearGroupGesture()
             clearDropFeedback()
             resetScrubbing()
@@ -621,7 +648,7 @@ struct TimelineSurface: NSViewRepresentable {
             let x = second*pixelsPerSecond
             NSColor(white:0.22,alpha:1).setStroke(); let line = NSBezierPath(); line.move(to:NSPoint(x:x,y:ruler)); line.line(to:NSPoint(x:x,y:bounds.height)); line.lineWidth = 0.5; line.stroke()
         }
-        let linked = store.project.groupIDs(for:store.selectedClipIDs), reach = transitionReach(visible)
+        let linked = store.project.groupIDs(for:(pendingPick ?? waitingPick).map { [$0] } ?? store.selectedClipIDs), reach = transitionReach(visible)
         var near = Set<UUID>()
         var laid: [(picture: Clip, sound: Clip)] = []
         for clip in store.project.clips {
@@ -947,7 +974,7 @@ struct TimelineSurface: NSViewRepresentable {
     override func mouseDown(with event:NSEvent) {
         guard let store else { return }
         resetScrubbing()
-        mode = nil; original = nil; candidate = nil; transitionResize = nil; trimStop = nil
+        mode = nil; original = nil; candidate = nil; transitionResize = nil; trimStop = nil; pendingPick = nil; waitingPick = nil
         group = nil; groupMoving = []; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil; snapFeedback = SnapFeedback()
         window?.makeFirstResponder(self); origin = convert(event.locationInWindow,from:nil); moved = false
         if origin.y < rulerTop+ruler { mode = .scrub; store.pause(); scrub(at:origin,with:event); return }
@@ -993,8 +1020,7 @@ struct TimelineSurface: NSViewRepresentable {
                 // Dragging one of several selected clips moves them all together.
                 group = selection; groupMoving = store.project.groupIDs(for:selection); clickedInGroup = clip.id; original = clip; candidateValid = true; mode = .move
             } else {
-                store.selectedClipID = clip.id; store.selectedGap = nil
-                showTransform(clip)
+                if store.selectedClipID == clip.id { store.selectedGap = nil; showTransform(clip) } else { pendingPick = clip.id }
                 original = clip; candidate = clip; candidateValid = true
                 mode = edge
             }
@@ -1159,8 +1185,45 @@ struct TimelineSurface: NSViewRepresentable {
         if let resize = transitionResize, let store, moved, Self.sameTimeline(store.project,resize.base) {
             store.setTransitionDuration(resize.original.id,to:resize.candidate.duration)
         }
+        // The drag's edit lands, and the preview is built from it at once: once, on release, never
+        // while the drag goes on (a build every moment of a drag made it late).
+        if let store { store.landDrag { landGesture(in:store) } }
+        // The clip pressed on is picked after its edit, and a moment later in the app: the drop is
+        // drawn first, then the preview's new frame, and the inspector redrawn for the clip (tens of
+        // milliseconds) comes after them rather than holding them up.
+        if let id = pendingPick {
+            let pick = { [weak self] in
+                // A press since (another pick, a click on empty space) has the say.
+                guard let self, self.waitingPick == id || self.pickDelay == 0, let store = self.store, let clip = store.project.clip(id) else { return }
+                self.waitingPick = nil
+                store.selectedClipID = id; store.selectedGap = nil; self.showTransform(clip)
+            }
+            if pickDelay > 0 {
+                waitingPick = id
+                let start = CACurrentMediaTime()
+                func later(_ delay: Double) {
+                    DispatchQueue.main.asyncAfter(deadline:.now()+delay) { [weak self] in
+                        MainActor.assumeIsolated {
+                            // Not past a preview that takes long, nor one this pick no longer stands for.
+                            if let self, self.waitingPick == id, self.store?.previewIsSettling == true, CACurrentMediaTime()-start < Self.pickWaitsForPreview { later(0.01) } else { pick() }
+                        }
+                    }
+                }
+                later(pickDelay)
+            } else { pick() }
+        }
+        pendingPick = nil
+        // The toolbar's rectangle select is for one drag.
+        if mode == .marquee, let store, store.dragSelectArmed { store.dragSelectArmed = false }
+        mode = nil; original = nil; candidate = nil; transitionResize = nil; moved = false; gestureBase = nil; needsDisplay = true
+        group = nil; groupMoving = []; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil
+        resetScrubbing()
+        window?.invalidateCursorRects(for:self)
+    }
+    /// What a drag ending lands: a move, trim or group move, or a click's pick.
+    private func landGesture(in store: EditorStore) {
         // A timeline changed under the gesture (an undo mid-drag) leaves it nothing to apply.
-        if let store, mode != .scrub, Self.sameTimeline(store.project,gestureBase) {
+        if mode != .scrub, Self.sameTimeline(store.project,gestureBase) {
             if let group {
                 if moved, candidateValid, let delta = groupDelta, delta != .zero { store.moveClips(group,by:delta) }
                 else if !moved, let id = clickedInGroup {                                 // a click picks just that one
@@ -1177,12 +1240,6 @@ struct TimelineSurface: NSViewRepresentable {
                 store.selectClips(marqueeBase.union([clip.id]))
             }
         }
-        // The toolbar's rectangle select is for one drag.
-        if mode == .marquee, let store, store.dragSelectArmed { store.dragSelectArmed = false }
-        mode = nil; original = nil; candidate = nil; transitionResize = nil; moved = false; gestureBase = nil; needsDisplay = true
-        group = nil; groupMoving = []; groupGhosts = []; groupDelta = nil; clickedInGroup = nil; marquee = nil
-        resetScrubbing()
-        window?.invalidateCursorRects(for:self)
     }
     // Standard Edit menu actions follow the responder chain. Text fields keep their
     // native text clipboard; these actions belong only to the focused timeline.

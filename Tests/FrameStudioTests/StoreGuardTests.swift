@@ -162,6 +162,12 @@ import FrameCore
         store.togglePlayback()
         try await waitForPreview(store)
         XCTAssertFalse(store.isPlaying,"Space during the build is a pause"); XCTAssertEqual(store.player.rate,0)
+        // Stopped, Space during a build plays: the build lands with playback, waiting on nothing.
+        store.updateStyle { $0.opacity = 0.6 }
+        XCTAssertTrue(store.isBuilding)
+        store.togglePlayback()
+        try await waitForPreview(store)
+        XCTAssertTrue(store.isPlaying,"Space during the build plays once it is up")
     }
 }
 

@@ -3,8 +3,41 @@ import AppKit
 import FrameCore
 import FrameMedia
 
+/// The inspector, redrawn when what it shows changes rather than on every change to the store
+/// (a clip dropped elsewhere on the timeline, playback, a status note): redrawing its controls
+/// took half of each editor update.
 struct InspectorPanel: View {
     @ObservedObject var store: EditorStore
+    var body: some View { InspectorContent(store:store,inputs:InspectorInputs(store)).equatable() }
+}
+
+/// Everything `InspectorContent` reads from the store. Its own small views (the clip header, the
+/// colour swatches, the speed field) watch the store themselves.
+struct InspectorInputs: Equatable {
+    var transition: FrameCore.Transition?
+    var clip: Clip?
+    var gap: TimelineGap?
+    var multiple: Bool
+    var frameRate: FrameRate
+    var textRevision: Int, fontsRevision: Int
+    var fontFolder: URL
+    var isAddingFonts: Bool, isExporting: Bool
+    /// The project and selection, only while a transition or several clips are shown: those read them.
+    var context: Project?, selection: Set<UUID>?
+    @MainActor init(_ store: EditorStore) {
+        transition = store.selectedTransition; clip = store.selectedClip; gap = store.selectedGap; multiple = store.hasMultipleSelection
+        frameRate = store.project.frameRate
+        textRevision = store.textRevision; fontsRevision = store.fontsRevision; fontFolder = store.fontFolder
+        isAddingFonts = store.isAddingFonts; isExporting = store.isExporting
+        let wide = transition != nil || (clip == nil && multiple)
+        context = wide ? store.project : nil; selection = wide ? store.selectionForEditing : nil
+    }
+}
+
+struct InspectorContent: View, Equatable {
+    let store: EditorStore
+    let inputs: InspectorInputs
+    nonisolated static func == (a: InspectorContent, b: InspectorContent) -> Bool { a.store === b.store && a.inputs == b.inputs }
     @ObservedObject private var shortcuts = ShortcutSettings.shared
     /// The title being typed. The text view binds to this, never to the store: writing the
     /// store's value back into an NSTextView mid-composition cancels Hangul (and any IME) input.
@@ -294,7 +327,7 @@ struct InspectorPanel: View {
         guard let id = draftClipID else { return }
         textCommit?.cancel()
         textCommit = Task { @MainActor in
-            try? await Task.sleep(for:.milliseconds(80))
+            try? await Task.sleep(for:.milliseconds(40))
             guard !Task.isCancelled else { return }
             textCommit = nil      // done: a later flush must not commit this draft a second time
             commitText(draft,to:id)
@@ -609,6 +642,16 @@ struct TitleFontControls: View, Equatable {
         let face = FontLibrary.previewFace(of:family)
         previews[family.name] = .some(face)
         return face
+    }
+    /// Reads the families off the main actor ahead of the first title's inspector: some 50 ms
+    /// otherwise spent as the inspector first shows a title, while a dropped clip waits on it.
+    static func warm(_ revision: Int, addedIn folder: URL) {
+        guard cache?.revision != revision else { return }
+        Task.detached(priority:.utility) {
+            let all = FontLibrary.families(), added = Set(FontLibrary.addedFaces(in:folder).map(\.family))
+            let split = (all.filter { added.contains($0.name) },all.filter { !added.contains($0.name) })
+            await MainActor.run { if cache?.revision != revision { cache = (revision,split.0,split.1) } }
+        }
     }
     static func families(_ revision: Int, addedIn folder: URL) -> (added: [FontLibrary.Family], system: [FontLibrary.Family]) {
         if let cache, cache.revision == revision { return (cache.added,cache.system) }

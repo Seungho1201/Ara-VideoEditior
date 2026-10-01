@@ -311,7 +311,7 @@ import FrameMedia
             return store.colorPresetRow.open == colour
         }
         func off(_ key: WritableKeyPath<ClipStyle,Double>) {
-            InspectorPanel.slide(key,to:0,range:0...20,switches:true,of:a.id,name:"Effect",closesWhenIdle:false,in:store); store.endLiveEdit()
+            InspectorContent.slide(key,to:0,range:0...20,switches:true,of:a.id,name:"Effect",closesWhenIdle:false,in:store); store.endLiveEdit()
         }
         try await layout()
         store.colorPresetRow.click("Outline colour",at:0,interval:0.5); try await layout()

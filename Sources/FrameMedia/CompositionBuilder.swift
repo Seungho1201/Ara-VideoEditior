@@ -20,7 +20,8 @@ public final class RenderBundle: @unchecked Sendable {
         self.composition = composition; self.videoComposition = videoComposition; self.audioMix = audioMix
         self.duration = duration; self.size = size; self.frameRate = frameRate; self.sources = sources
     }
-    @MainActor public func playerItem() -> AVPlayerItem {
+    /// Made on any thread: the editor makes it beside the build, off the main actor.
+    public func playerItem() -> AVPlayerItem {
         let item = AVPlayerItem(asset:composition); item.videoComposition = videoComposition; item.audioMix = audioMix
         item.audioTimePitchAlgorithm = .spectral
         // A seek completes once its composed frame is on screen, not when the timing moves: the

@@ -29,6 +29,8 @@ struct EditorView: View {
         .sheet(isPresented:$store.showExportSheet) { ExportSettingsView(store:store) }
         .sheet(isPresented:$store.showNewProjectSheet) { NewProjectView(store:store) }
         .sheet(isPresented:Binding(get:{store.isExporting},set:{_ in})) { exportProgress }
+        // The font list a title's inspector shows, read ahead in the background.
+        .task(id:store.fontsRevision) { FontMenu.warm(store.fontsRevision,addedIn:store.fontFolder) }
     }
     private var editor: some View {
         VStack(spacing:0) {
@@ -140,7 +142,9 @@ struct EditorView: View {
                         Text(blocked ? "Use Relink in the media library to restore playback." : "Import a file, then drag it onto the timeline.").font(.system(size:12)).foregroundStyle(Theme.muted)
                     }.foregroundStyle(.white.opacity(0.8))
                 } else { PreviewSurface(store:store).helpTip("Double-click a clip to move, resize and rotate it",.inside) }
-                if store.isBuilding { VStack { Spacer(); HStack(spacing:8) { ProgressView().controlSize(.mini); Text("Updating preview").font(.system(size:11)) }.padding(9).background(.black.opacity(0.7),in:Capsule()).padding(12) } }
+                // The preview holds its last frame while it is rebuilt, so a quick build shows no
+                // note at all; only one that runs long says so.
+                BuildingBadge(state:store.building)
             }.aspectRatio(store.project.aspectRatio.value,contentMode:.fit).padding(.horizontal,50).frame(maxWidth:.infinity,maxHeight:.infinity)
             HStack(spacing:8) {
                 PlayheadTimecode(clock:store.clock,rate:store.project.frameRate)
@@ -151,7 +155,7 @@ struct EditorView: View {
                     Button { store.step(-1) } label: { Image(systemName:"backward.frame").frame(width:26,height:28) }
                         .help("Previous frame \(shortcuts.label(.previousFrame))").accessibilityLabel("Previous frame").helpTip("Previous frame",shortcut:shortcuts.label(.previousFrame))
                     Button { store.togglePlayback() } label: { Image(systemName:store.isPlaying ? "pause.fill" : "play.fill").frame(width:28,height:28) }
-                        .help("Play / Pause \(shortcuts.label(.playPause))").accessibilityLabel(store.isPlaying ? Text("Pause") : Text("Play")).disabled(store.isBuilding).helpTip("Play / Pause",shortcut:shortcuts.label(.playPause))
+                        .help("Play / Pause \(shortcuts.label(.playPause))").accessibilityLabel(store.isPlaying ? Text("Pause") : Text("Play")).helpTip("Play / Pause",shortcut:shortcuts.label(.playPause))
                     Button { store.step(1) } label: { Image(systemName:"forward.frame").frame(width:26,height:28) }
                         .help("Next frame \(shortcuts.label(.nextFrame))").accessibilityLabel("Next frame").helpTip("Next frame",shortcut:shortcuts.label(.nextFrame))
                     Button(action:store.goToSelectedClipEnd) { Image(systemName:"forward.end.fill").frame(width:26,height:28) }
@@ -396,6 +400,27 @@ private struct DragSelectGlyph: View {
             arrow.move(to:CGPoint(x:to.x-head,y:to.y)); arrow.addLine(to:to); arrow.addLine(to:CGPoint(x:to.x,y:to.y+head))
             context.stroke(arrow,with:.foreground,style:StrokeStyle(lineWidth:line,lineCap:.round,lineJoin:.round))
         }
+    }
+}
+
+/// Watches the build on its own, so a build beginning and ending redraws only this.
+private struct BuildingBadge: View {
+    @ObservedObject var state: BuildState
+    var body: some View { if state.active { BuildingNote() } }
+}
+
+/// "Updating preview", once a build has run long enough to be noticed.
+struct BuildingNote: View {
+    static let delay: Duration = .milliseconds(500)
+    @State private var shown = false
+    var body: some View {
+        VStack {
+            Spacer()
+            HStack(spacing:8) { ProgressView().controlSize(.mini); Text("Updating preview").font(.system(size:11)) }
+                .padding(9).background(.black.opacity(0.7),in:Capsule()).padding(12)
+        }
+        .opacity(shown ? 1 : 0)
+        .task { try? await Task.sleep(for:Self.delay); withAnimation(.easeOut(duration:0.2)) { shown = true } }
     }
 }
 

@@ -9,6 +9,7 @@ import FrameMedia
 @MainActor final class EditorStore: ObservableObject {
     @Published private(set) var project = Project() {
         didSet {
+            clipsStamp &+= 1
             if project.clips != oldValue.clips { ownAudioTracks = TrackLayout.ownAudio(in:project) }
             // A video track's sound that comes to be (a new track, from any edit) starts folded.
             let paired = (before:min(oldValue.videoTrackCount,oldValue.audioTrackCount),now:min(project.videoTrackCount,project.audioTrackCount))
@@ -141,7 +142,14 @@ import FrameMedia
     /// Whether this kind of haptic plays.
     func haptics(_ kind: HapticKind) -> Bool { scrubHaptics && !hapticsOff.contains(kind) }
     @Published var isPlaying = false
-    @Published var isBuilding = false
+    /// Whether the preview is being rebuilt. Left out of the store's own updates: a build begins
+    /// and ends with nearly every edit, and redrawing the whole editor for each (tens of ms) held
+    /// up both the drop and the new frame. The few views that show it watch `building`.
+    var isBuilding: Bool {
+        get { building.active }
+        set { if building.active != newValue { building.active = newValue } }
+    }
+    let building = BuildState()
     @Published var isImporting = false
     @Published var isExporting = false
     @Published private(set) var isCapturingSnapshot = false
@@ -254,8 +262,26 @@ import FrameMedia
     private var mountObserver: NSObjectProtocol?
     private var itemObservation: NSKeyValueObservation?
     let player = AVPlayer()
+    /// The picture on screen when a rebuilt player item replaced the old one, held over the
+    /// preview until the new item's first frame is up (its first seek lands): the swap shows no
+    /// blank moment, and an edit looks done the moment it is made. Nil when nothing is held.
+    let heldFrame = CurrentValueSubject<PreviewFrame?,Never>(nil)
+    /// A rebuilt preview is not up yet: being built, or its first frame not on screen.
+    var previewIsSettling: Bool { isBuilding || heldFrame.value != nil }
+    /// Reads back the current item's frames for `heldFrame`.
+    private var frameOutput: AVPlayerItemVideoOutput?
+    /// The seek after which the held frame can go.
+    private var holdSeek: Int?
     var dirty: Bool { project != saved }
-    var selectedClip: Clip? { project.clips.first { $0.id == selectedClipID } }
+    /// Asked for by every inspector control on every update, so found once per selection or edit.
+    var selectedClip: Clip? {
+        if let cached = selectedCache, cached.id == selectedClipID, cached.clips == clipsStamp { return cached.clip }
+        let clip = project.clips.first { $0.id == selectedClipID }
+        selectedCache = (selectedClipID,clipsStamp,clip); return clip
+    }
+    private var selectedCache: (id: UUID?, clips: Int, clip: Clip?)?
+    /// Counts the project's changes, for `selectedCache`.
+    private var clipsStamp = 0
     var selectedMedia: MediaReference? { project.media.first { $0.id == selectedMediaID } }
     var canUndo: Bool { history.canUndo || (liveEditStart.map { $0 != project } ?? false) }
     var undoName: String { liveEditStart != nil ? liveEditName : history.undoName }
@@ -280,7 +306,8 @@ import FrameMedia
     var canPasteClip: Bool { pasteboard.availableType(from:[Self.clipPasteboardType]) != nil }
     /// Runs a question and returns the button chosen (tests answer it without a window).
     var runAlert: @MainActor (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
-    var canCaptureSnapshot: Bool { project.duration > .zero && missingInUse.isEmpty && !isBuilding && !isCapturingSnapshot && !isExporting }
+    /// A snapshot is drawn from the project, not the player, so a preview being rebuilt does not stop it.
+    var canCaptureSnapshot: Bool { project.duration > .zero && missingInUse.isEmpty && !isCapturingSnapshot && !isExporting }
     /// `registry` is the start screen's list (tests give it their own defaults).
     init(registry: ProjectRegistry = ProjectRegistry()) {
         self.registry = registry
@@ -877,6 +904,7 @@ import FrameMedia
     private func seekLanded(_ token: Int) {
         guard seekRevision == token, seekInFlight != nil else { return }
         seekInFlight = nil
+        if let hold = holdSeek, token >= hold { releaseFrame() }
         if chaseTarget != nil { issueSeek() } else { seeking = false }
     }
     /// Sends the chased position now, superseding the seek in flight, so playback starts
@@ -897,14 +925,41 @@ import FrameMedia
     func pause() { player.pause(); resumeAfterBuild = false; if isPlaying { isPlaying = false }; applyDeferredProxySwap() }
     func togglePlayback() {
         guard !isExporting else { return }
-        // Mid-rebuild the key pauses what the build would resume, as it would the playback itself.
-        guard !isBuilding else { if resumeAfterBuild { pause() }; return }
+        // Mid-rebuild the key starts or stops the playback the build lands with, as it would the
+        // playback itself: the preview coming up never makes it wait.
+        if isBuilding {
+            if resumeAfterBuild { pause() }
+            else { previewTransformID = nil; if playhead >= project.duration { seek(.zero) }; resumeAfterBuild = true; revealPlayheadRequest += 1 }
+            return
+        }
         guard player.currentItem != nil else { return }
         if isPlaying { pause() }
         else {
             previewTransformID = nil; if playhead >= project.duration { seek(.zero) }; settleSeek(); player.play(); isPlaying = true
             revealPlayheadRequest += 1                  // playing from a playhead scrolled out of view: show it
         }
+    }
+    /// Reads back the frame on screen, off the main actor, to hold over the preview while the
+    /// player item is replaced.
+    private func readFrame() -> Task<PreviewFrame?,Never>? {
+        guard let item = player.currentItem, let output = frameOutput else { return nil }
+        let reader = FrameReader(output:output), time = item.currentTime()
+        return Task.detached(priority:.userInitiated) { reader.frame(at:time) }
+    }
+    private func releaseFrame() {
+        holdSeek = nil
+        if heldFrame.value != nil { heldFrame.send(nil) }
+    }
+    /// The preview emptied (no clips, a missing source, a failed build, another document).
+    private func clearPlayer() { player.replaceCurrentItem(with:nil); frameOutput = nil; releaseFrame() }
+    /// The least time between two builds of the preview, and when the last began.
+    static let rebuildSpacing: CFTimeInterval = 0.14
+    private var lastRebuild: CFTimeInterval = 0
+    /// Lands a drag's edit (or none) with the preview built from it at once: the drag showed
+    /// nothing in the preview while it went on, so its end waits on no spacing.
+    func landDrag(_ commit: () -> Void) {
+        lastRebuild = 0
+        commit()
     }
     private func rebuild() {
         // A used source moved or deleted in Finder since it was read is looked for again first, and
@@ -916,38 +971,61 @@ import FrameMedia
         rebuildTask?.cancel(); let resume = isPlaying || resumeAfterBuild; pause()
         resumeAfterBuild = resume                // after pause(), which clears it
         playhead = project.frameRate.quantize(min(playhead,project.duration))
-        guard !project.clips.isEmpty else { player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false; return }
+        guard !project.clips.isEmpty else { clearPlayer(); isBuilding = false; resumeAfterBuild = false; return }
         guard missingInUse.isEmpty else {
-            player.replaceCurrentItem(with:nil); isBuilding = false; resumeAfterBuild = false
+            clearPlayer(); isBuilding = false; resumeAfterBuild = false
             status = String(localized:"Missing sources: \(missingInUse.count) · Use Relink in the library"); return
         }
-        let snapshot = project, mediaURLs = urls, pictures = proxies
+        let snapshot = project, mediaURLs = urls, pictures = proxies, builder = builder
         isBuilding = true
+        // An edit after a quiet moment shows at once; edits close behind it (a key held, a run of
+        // nudges) are gathered into one build at most every `rebuildSpacing`, rather than each
+        // replacing the player item.
+        let wait = max(0,Self.rebuildSpacing-(CACurrentMediaTime()-lastRebuild))
+        // The build, its player item and the read-back of the frame on screen all start now, off
+        // the main actor: none waits for the editor to finish redrawing for the edit.
+        let make: @Sendable () async throws -> PreparedPreview = { PreparedPreview(try await builder.build(snapshot,urls:mediaURLs,videoURLs:pictures)) }
+        let early = wait > 0 ? nil : Task.detached(priority:.userInitiated,operation:make)
+        if early != nil { lastRebuild = CACurrentMediaTime() }
+        let still = readFrame()
         rebuildTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self else { early?.cancel(); return }
             do {
-                try await Task.sleep(for:.milliseconds(140))
-                let bundle = try await builder.build(snapshot,urls:mediaURLs,videoURLs:pictures)
+                let job: Task<PreparedPreview,Error>
+                if let early { job = early } else {
+                    try await Task.sleep(for:.seconds(wait))
+                    lastRebuild = CACurrentMediaTime()
+                    job = Task.detached(priority:.userInitiated,operation:make)
+                }
+                let prepared = try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
+                let held = await still?.value
                 try Task.checkCancellation()
                 guard revision == token else { return }
-                let item = bundle.playerItem()
+                let item = prepared.item
                 itemObservation = item.observe(\.status,options:[.new]) { [weak self] item,_ in
                     if item.status == .failed {
                         let text = item.error?.localizedDescription ?? String(localized:"Preview failed.")
                         Task { @MainActor in self?.message = text }
                     }
                 }
-                player.replaceCurrentItem(with:item); isBuilding = false; seek(playhead)
+                // One that could not be read back (the item not drawn yet) leaves any frame held.
+                if let held { heldFrame.send(held) }
+                frameOutput = prepared.output
+                player.replaceCurrentItem(with:item); isBuilding = false; seek(playhead); holdSeek = seekRevision
                 // Only if still wanted: a pause during the build (Space, a scrub) cleared it.
                 if resumeAfterBuild { resumeAfterBuild = false; player.play(); isPlaying = true }
                 // A note written since the build began (by the edit that asked for it) stays.
-                if statusWrites == writes { status = String(localized:"Clips: \(project.clips.filter { $0.kind != .audio || $0.linkID == nil }.count) · SDR Rec.709") }
+                // Unchanged, it is left alone: writing it redraws the editor.
+                if statusWrites == writes {
+                    let note = String(localized:"Clips: \(project.clips.filter { $0.kind != .audio || $0.linkID == nil }.count) · SDR Rec.709")
+                    if status != note { status = note }
+                }
             } catch {
                 guard revision == token else { return }; isBuilding = false; resumeAfterBuild = false
                 guard !(error is CancellationError) else { return }
                 // A source that went away while this build ran is followed or marked missing, not reported.
                 if recheckSources(Set(project.clips.compactMap(\.mediaID))) { rebuild(); return }
-                player.replaceCurrentItem(with:nil); report(error)
+                clearPlayer(); report(error)
             }
         }
     }
@@ -1298,7 +1376,7 @@ import FrameMedia
         pause(); revision += 1; rebuildTask?.cancel(); importTask?.cancel(); isBuilding = false; isImporting = false
         snapshotTask?.cancel(); snapshotTask = nil; snapshotID = nil; isCapturingSnapshot = false
         for task in analysisTasks.values { task.cancel() }; analysisTasks.removeAll(); analyzed.removeAll(); documentBookmark = nil
-        player.replaceCurrentItem(with:nil); history = UndoHistory(); playhead = .zero
+        clearPlayer(); history = UndoHistory(); playhead = .zero
         seekInFlight = nil; chaseTarget = nil; seeking = false
         proxyTask?.cancel(); proxyTask = nil; proxyJob = nil; proxyProgress = nil; proxies.removeAll(); proxyFailures.removeAll()
         selectClips([]); dragSelectArmed = false; selectedGap = nil; selectedMediaID = nil; selectedTransitionID = nil; thumbnails.removeAll(); waveforms.removeAll(); urls.removeAll(); missing.removeAll()
@@ -1529,4 +1607,33 @@ import FrameMedia
     @Published fileprivate(set) var time = MediaTime.zero { didSet { moved.send((oldValue,time)) } }
     /// For AppKit views: sent after each move, with where the playhead was and where it is now.
     let moved = PassthroughSubject<(old: MediaTime, new: MediaTime),Never>()
+}
+
+/// The preview build's progress, for the views that show it (see `EditorStore.isBuilding`).
+@MainActor final class BuildState: ObservableObject {
+    @Published fileprivate(set) var active = false
+}
+
+/// A built preview with its player item, made off the main actor. The item is handed to the
+/// main actor once, untouched until then.
+private struct PreparedPreview: @unchecked Sendable {
+    let item: AVPlayerItem
+    let output = AVPlayerItemVideoOutput(pixelBufferAttributes:nil)
+    init(_ bundle: RenderBundle) { item = bundle.playerItem(); item.add(output) }
+}
+
+/// A frame the player showed: its own pixel buffer, whose surface carries the frame's colour
+/// tags. Shown as it is, so holding it copies nothing and it looks exactly as the player showed it.
+struct PreviewFrame: @unchecked Sendable {
+    let buffer: CVPixelBuffer
+    /// Nil for a buffer not backed by one (the player's always are).
+    init?(_ buffer: CVPixelBuffer) { guard CVPixelBufferGetIOSurface(buffer) != nil else { return nil }; self.buffer = buffer }
+    var surface: IOSurface { CVPixelBufferGetIOSurface(buffer)!.takeUnretainedValue() }
+    var width: Int { CVPixelBufferGetWidth(buffer) }
+}
+
+/// Reads a frame back from a player item's video output (usable from any thread).
+private struct FrameReader: @unchecked Sendable {
+    let output: AVPlayerItemVideoOutput
+    func frame(at time: CMTime) -> PreviewFrame? { output.copyPixelBuffer(forItemTime:time,itemTimeForDisplay:nil).flatMap(PreviewFrame.init) }
 }

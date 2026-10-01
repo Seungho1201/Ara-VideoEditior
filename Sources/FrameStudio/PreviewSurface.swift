@@ -19,9 +19,13 @@ struct PreviewSurface: NSViewRepresentable {
 
 @MainActor final class PreviewEditorView: NSView {
     let playerView = AVPlayerView()
+    /// The last frame, over the player while a rebuilt item comes up (`EditorStore.heldFrame`).
+    let held = HeldFrameView()
     let overlay: PreviewTransformOverlay
     let chrome = TransformChromeView(frame:.zero)
     private var playheadWatch: AnyCancellable?
+    private var heldWatch: AnyCancellable?
+    private var buildWatch: AnyCancellable?
     init(store: EditorStore) {
         overlay = PreviewTransformOverlay(store:store)
         super.init(frame:.zero)
@@ -29,7 +33,13 @@ struct PreviewSurface: NSViewRepresentable {
         clipsToBounds = true
         playerView.controlsStyle = .none; playerView.videoGravity = .resizeAspect; playerView.player = store.player
         playerView.allowsVideoFrameAnalysis = false
-        addSubview(playerView); addSubview(overlay)
+        addSubview(playerView); addSubview(held); addSubview(overlay)
+        heldWatch = store.heldFrame.sink { [weak self] frame in MainActor.assumeIsolated { self?.held.show(frame) } }
+        // A build ending no longer redraws the editor: the outline, which waits for the new player
+        // item's pictures, looks again here (after the change; `$active` tells before it).
+        buildWatch = store.building.$active.dropFirst().filter { !$0 }.receive(on:DispatchQueue.main).sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.overlay.refresh() }
+        }
         // The playhead no longer re-renders the editor; the transform chrome, which shows the
         // frame under the playhead and only while it is inside the clip, follows it directly.
         playheadWatch = store.clock.moved.sink { [weak self] _ in
@@ -40,7 +50,7 @@ struct PreviewSurface: NSViewRepresentable {
         }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func layout() { super.layout(); playerView.frame = bounds; overlay.frame = bounds; overlay.needsDisplay = true; chrome.needsDisplay = true }
+    override func layout() { super.layout(); playerView.frame = bounds; held.frame = bounds; overlay.frame = bounds; overlay.needsDisplay = true; chrome.needsDisplay = true }
     private var windowObserver: NSObjectProtocol?
     private var layerObserver: NSObjectProtocol?
     private var lastWindowRect = CGRect.null
@@ -535,5 +545,35 @@ struct PreviewSurface: NSViewRepresentable {
         } else if store?.shortcuts.command(matching:event) == .snapping {
             if !event.isARepeat { store?.snapping.toggle() }
         } else { super.keyDown(with:event) }
+    }
+}
+
+/// A still of the preview's last frame, fitted as the player fits its video. It shows at once and
+/// gives way to the new frame under it with a short fade, so an edit's preview simply changes.
+@MainActor final class HeldFrameView: NSView {
+    static let fade: CFTimeInterval = 0.12
+    override init(frame: NSRect) {
+        super.init(frame:frame)
+        wantsLayer = true; layer?.contentsGravity = .resizeAspect; isHidden = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    /// The frame shown, kept so its buffer is not handed back to the player's pool meanwhile.
+    private(set) var shown: PreviewFrame?
+    func show(_ frame: PreviewFrame?) {
+        guard let layer else { return }
+        if let frame {
+            shown = frame
+            layer.removeAllAnimations(); layer.contents = frame.surface; layer.opacity = 1; isHidden = false
+        } else if !isHidden, layer.opacity > 0 {
+            CATransaction.begin()
+            CATransaction.setCompletionBlock { [weak self] in
+                MainActor.assumeIsolated { guard let self, self.layer?.opacity == 0 else { return }; self.isHidden = true; self.layer?.contents = nil; self.shown = nil }
+            }
+            let fade = CABasicAnimation(keyPath:"opacity"); fade.fromValue = 1; fade.toValue = 0; fade.duration = Self.fade
+            fade.timingFunction = CAMediaTimingFunction(name:.easeOut)
+            layer.opacity = 0; layer.add(fade,forKey:"fade")
+            CATransaction.commit()
+        }
     }
 }

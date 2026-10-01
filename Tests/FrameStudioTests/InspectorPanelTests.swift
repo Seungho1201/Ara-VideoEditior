@@ -42,7 +42,7 @@ func inspectorSectionsUnfolded() -> () -> Void {
     private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x-b.x,a.y-b.y) }
     /// What the slider's binding does with each value of a drag, closed as its release closes it.
     private func drag(_ key: WritableKeyPath<ClipStyle,Double>, _ values: [Double], range: ClosedRange<Double>, _ id: UUID, in store: EditorStore) {
-        for value in values { InspectorPanel.slide(key,to:value,range:range,of:id,name:"Adjust clip",closesWhenIdle:false,in:store) }
+        for value in values { InspectorContent.slide(key,to:value,range:range,of:id,name:"Adjust clip",closesWhenIdle:false,in:store) }
         store.endLiveEdit()
     }
     private func host<Root: View>(_ root: Root, width: CGFloat = 300, height: CGFloat = 1400) -> (NSWindow, NSHostingView<Root>) {
@@ -145,18 +145,18 @@ func inspectorSectionsUnfolded() -> () -> Void {
     // MARK: a title's text
 
     func testFittingKeepsTheTextAroundWhatWasTyped() {
-        let limit = InspectorPanel.textLimit
+        let limit = InspectorContent.textLimit
         let full = String(repeating:"a",count:limit)
-        XCTAssertEqual(InspectorPanel.fitted("short",after:""),"short")
-        XCTAssertTrue(InspectorPanel.fitted(String(repeating:"가",count:limit+500),after:"") == String(repeating:"가",count:limit),"a long paste is cut")
-        XCTAssertTrue(InspectorPanel.fitted("aaaaXaaaa"+full.dropFirst(8),after:full) == full,"a key in a full title changes nothing")
+        XCTAssertEqual(InspectorContent.fitted("short",after:""),"short")
+        XCTAssertTrue(InspectorContent.fitted(String(repeating:"가",count:limit+500),after:"") == String(repeating:"가",count:limit),"a long paste is cut")
+        XCTAssertTrue(InspectorContent.fitted("aaaaXaaaa"+full.dropFirst(8),after:full) == full,"a key in a full title changes nothing")
         let middle = "ab"+String(repeating:"x",count:limit)+"cd"
-        XCTAssertTrue(InspectorPanel.fitted(middle,after:"abcd") == "ab"+String(repeating:"x",count:limit-4)+"cd","a paste in the middle keeps the end")
-        XCTAssertEqual(InspectorPanel.fitted(String(repeating:"y",count:limit+10),after:"old text").count,limit)
+        XCTAssertTrue(InspectorContent.fitted(middle,after:"abcd") == "ab"+String(repeating:"x",count:limit-4)+"cd","a paste in the middle keeps the end")
+        XCTAssertEqual(InspectorContent.fitted(String(repeating:"y",count:limit+10),after:"old text").count,limit)
         // The caret goes after what was kept of the typing, counted as the text view counts (UTF-16).
-        XCTAssertEqual(InspectorPanel.fitting(middle,after:"abcd").caret,limit-2)
-        XCTAssertEqual(InspectorPanel.fitting("aaaaXaaaa"+full.dropFirst(8),after:full).caret,4)
-        XCTAssertEqual(InspectorPanel.fitting("👍"+String(repeating:"z",count:limit),after:"👍").caret,2+limit-1)
+        XCTAssertEqual(InspectorContent.fitting(middle,after:"abcd").caret,limit-2)
+        XCTAssertEqual(InspectorContent.fitting("aaaaXaaaa"+full.dropFirst(8),after:full).caret,4)
+        XCTAssertEqual(InspectorContent.fitting("👍"+String(repeating:"z",count:limit),after:"👍").caret,2+limit-1)
     }
 
     /// A paste cut to fit, or a key refused in a full title, leaves the caret where the user was
@@ -178,7 +178,7 @@ func inspectorSectionsUnfolded() -> () -> Void {
         field.setSelectedRange(NSRange(location:100,length:0))
         field.insertText(String(repeating:"X",count:20),replacementRange:caret)
         try await spin(400)
-        XCTAssertEqual(field.string.count,InspectorPanel.textLimit)
+        XCTAssertEqual(field.string.count,InspectorContent.textLimit)
         XCTAssertEqual(field.selectedRange(),NSRange(location:110,length:0),"after the ten that fit")
         field.setSelectedRange(NSRange(location:50,length:0))
         field.insertText("Y",replacementRange:caret)
@@ -211,7 +211,7 @@ func inspectorSectionsUnfolded() -> () -> Void {
         field.selectAll(nil)
         field.insertText(String(repeating:"가",count:2500),replacementRange:caret)
         try await spin(400)
-        let limit = InspectorPanel.textLimit
+        let limit = InspectorContent.textLimit
         XCTAssertEqual(field.string.count,limit,"the field shows what the title keeps")
         XCTAssertEqual(style(store,a.id).text.count,limit)
         XCTAssertGreaterThan(try orange(view),40,"the note is shown")
@@ -242,22 +242,22 @@ func inspectorSectionsUnfolded() -> () -> Void {
         store.edit("Fixture") { $0.clips = [a] }
         store.selectedClipID = a.id
         func slide(_ key: WritableKeyPath<ClipStyle,Double>, _ value: Double, _ range: ClosedRange<Double>, multiplier: Double = 1, switches: Bool = true) {
-            InspectorPanel.slide(key,to:value,range:range,multiplier:multiplier,switches:switches,of:a.id,name:"Effect",closesWhenIdle:false,in:store)
+            InspectorContent.slide(key,to:value,range:range,multiplier:multiplier,switches:switches,of:a.id,name:"Effect",closesWhenIdle:false,in:store)
             store.endLiveEdit()
         }
         slide(\.outlineWidth,0.4,0...20)
         XCTAssertEqual(style(store,a.id).outlineWidth,0); XCTAssertFalse(style(store,a.id).hasOutline)
         slide(\.outlineWidth,0.5,0...20)
-        XCTAssertEqual(style(store,a.id).outlineWidth,0.5); XCTAssertEqual(InspectorPanel.reading(0.5),"1","read as it is drawn: on")
+        XCTAssertEqual(style(store,a.id).outlineWidth,0.5); XCTAssertEqual(InspectorContent.reading(0.5),"1","read as it is drawn: on")
         slide(\.shadowOpacity,0.004,0...1,multiplier:100)
         XCTAssertEqual(style(store,a.id).shadowOpacity,0); XCTAssertFalse(style(store,a.id).hasShadow)
         slide(\.shadowOpacity,0.005,0...1,multiplier:100)
-        XCTAssertEqual(style(store,a.id).shadowOpacity,0.005); XCTAssertEqual(InspectorPanel.reading(0.005,multiplier:100),"1")
-        XCTAssertEqual(InspectorPanel.reading(-0.2),"0","never “-0”")
+        XCTAssertEqual(style(store,a.id).shadowOpacity,0.005); XCTAssertEqual(InspectorContent.reading(0.005,multiplier:100),"1")
+        XCTAssertEqual(InspectorContent.reading(-0.2),"0","never “-0”")
         // One saved below a step before (an earlier Ara's slider left it there) is on and says so.
-        XCTAssertEqual(InspectorPanel.reading(0.3,switches:true),"0.3")
-        XCTAssertEqual(InspectorPanel.reading(0.0004,multiplier:100,switches:true),"0.1")
-        XCTAssertEqual(InspectorPanel.reading(0,switches:true),"0")
+        XCTAssertEqual(InspectorContent.reading(0.3,switches:true),"0.3")
+        XCTAssertEqual(InspectorContent.reading(0.0004,multiplier:100,switches:true),"0.1")
+        XCTAssertEqual(InspectorContent.reading(0,switches:true),"0")
         // A slider that switches nothing keeps small values.
         slide(\.shadowDistance,0.4,0...40,switches:false)
         XCTAssertEqual(style(store,a.id).shadowDistance,0.4)
