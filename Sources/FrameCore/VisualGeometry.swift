@@ -117,9 +117,14 @@ public struct VisualGeometry {
     /// one of `centers` across or down lands exactly on it (each axis on its own). Also returns
     /// the guides it lined up on: the x of a vertical line, the y of a horizontal one.
     public func aligned(to centers: [CGPoint], threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
+        aligned(vertical:centers.map(\.x),horizontal:centers.map(\.y),threshold:threshold)
+    }
+    /// The same with the lines given apart: a vertical line at each of `vertical`, a horizontal
+    /// one at each of `horizontal`.
+    public func aligned(vertical: [CGFloat], horizontal: [CGFloat], threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
         let c = anchor
-        let x = centers.map(\.x).filter { abs($0-c.x) <= threshold }.min { abs($0-c.x) < abs($1-c.x) }
-        let y = centers.map(\.y).filter { abs($0-c.y) <= threshold }.min { abs($0-c.y) < abs($1-c.y) }
+        let x = vertical.filter { abs($0-c.x) <= threshold }.min { abs($0-c.x) < abs($1-c.x) }
+        let y = horizontal.filter { abs($0-c.y) <= threshold }.min { abs($0-c.y) < abs($1-c.y) }
         var result = style
         if style.hasAnchor {
             if let x { result.x = min(2,max(-2,style.x+(x-c.x)/canvasSize.width)) }
@@ -129,6 +134,13 @@ public struct VisualGeometry {
             if let y { result.y = min(2,max(-2,y/canvasSize.height-0.5)) }
         }
         return (result,x,y)
+    }
+    /// The lines a move lines up with: the frame's middle, and the alignment points of the other
+    /// clips showing. One within `reach` of the middle's line on an axis is left out there: near
+    /// the middle only the middle catches, never a point a pixel or two beside it as well.
+    public static func alignmentLines(middle: CGPoint, others: [CGPoint], reach: CGFloat) -> (vertical: [CGFloat], horizontal: [CGFloat]) {
+        (vertical:[middle.x]+others.map(\.x).filter { abs($0-middle.x) > reach },
+         horizontal:[middle.y]+others.map(\.y).filter { abs($0-middle.y) > reach })
     }
     public func moved(by delta: CGSize) -> ClipStyle {
         var result = style

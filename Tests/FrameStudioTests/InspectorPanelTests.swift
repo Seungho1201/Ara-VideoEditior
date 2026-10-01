@@ -279,14 +279,24 @@ func inspectorSectionsUnfolded() -> () -> Void {
 
     nonisolated static let foldKeys = ["inspector.shadowOpen","inspector.transformOpen","inspector.colourOpen"]
     /// The lines of text drawn in `view`, top to bottom, each with the top of its box in points.
+    /// Read in overlapping bands: in one tall, mostly empty picture the recognizer drops lines.
     private func lines(_ view: NSView) throws -> [(text: String, top: CGFloat)] {
         let image = try XCTUnwrap(try painted(view).makeImage())
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate; request.usesLanguageCorrection = false
-        try VNImageRequestHandler(cgImage:image).perform([request])
-        return (request.results ?? []).compactMap { line in
-            line.topCandidates(1).first.map { ($0.string,(1-line.boundingBox.maxY)*view.bounds.height) }
-        }.sorted { $0.top < $1.top }
+        let scale = CGFloat(image.height)/view.bounds.height, band = 800, step = 600
+        var found: [(text: String, top: CGFloat)] = []
+        for start in stride(from:0,to:max(1,image.height-band+step),by:step) {
+            let height = min(band,image.height-start)
+            let part = try XCTUnwrap(image.cropping(to:CGRect(x:0,y:start,width:image.width,height:height)))
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate; request.usesLanguageCorrection = false
+            try VNImageRequestHandler(cgImage:part).perform([request])
+            for line in request.results ?? [] {
+                guard let text = line.topCandidates(1).first?.string else { continue }
+                let top = (CGFloat(start)+(1-line.boundingBox.maxY)*CGFloat(height))/scale
+                if !found.contains(where: { $0.text == text && abs($0.top-top) < 6 }) { found.append((text,top)) }
+            }
+        }
+        return found.sorted { $0.top < $1.top }
     }
     /// Where the line starting with `text` is. Rows' labels, not the spaced capitals of the section
     /// titles, which the text recognizer can miss.
@@ -322,6 +332,46 @@ func inspectorSectionsUnfolded() -> () -> Void {
         // Each folded title's line says what it holds; TIMING's rows and Reset still come last.
         let folded = try ["Width","Off","Default","Edited","Start","Reset appearance"].map { try top($0,in:shown) }
         XCTAssertEqual(folded,folded.sorted(),"\(shown.map(\.text))")
+    }
+
+    /// Beside Adjust Alignment Point: where the alignment point is, in whole pixels of the frame
+    /// from its top-left corner (the middle until the point is moved), and typed to move the clip
+    /// there. While a number is typed the frame keys stand down, so the arrows move the caret.
+    func testTheAlignmentPointIsShownAndTypedInPixels() async throws {
+        _ = NSApplication.shared
+        let store = EditorStore()
+        store.fontFolder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-inspector-fonts-\(UUID().uuidString)")
+        let a = title("Hello")
+        store.edit("Fixture") { $0.clips = [a] }
+        store.selectedClipID = a.id
+        try await settle(store)
+        let (window,view) = host(InspectorPanel(store:store))
+        defer { window.contentView = nil; window.close(); store.pause() }
+        try await spin(150)
+        func fields() -> [NSTextField] { all(NSTextField.self,in:view).filter(\.isEditable) }
+        let x = try XCTUnwrap(fields().first { $0.stringValue == "960" },"\(fields().map(\.stringValue))")
+        XCTAssertNotNil(fields().first { $0.stringValue == "540" },"the middle of a 1920 × 1080 frame")
+        XCTAssertTrue(window.makeFirstResponder(x)); try await spin(60)
+        XCTAssertTrue(store.isEditingText,"the frame keys stand down while a number is typed")
+        let editor = try XCTUnwrap(x.currentEditor() as? NSTextView)
+        editor.selectAll(nil); editor.insertText("1000",replacementRange:caret); editor.insertNewline(nil)
+        try await spin(150)
+        XCTAssertEqual(store.anchorPixel(of:store.project.clips[0]).x,1000); XCTAssertEqual(store.anchorPixel(of:store.project.clips[0]).y,540,"Y left alone")
+        XCTAssertEqual(style(store,a.id).x,40.0/1920,accuracy:1e-9,"the clip moved, its middle with it")
+        XCTAssertEqual(store.undoName,"Adjust clip")
+        window.makeFirstResponder(nil); try await spin(60)
+        XCTAssertFalse(store.isEditingText)
+        store.undo(); try await spin(100)
+        XCTAssertEqual(style(store,a.id).x,0,"one undo step")
+        // With the point moved to the clip's right edge, the numbers are the point's, not the middle's.
+        store.updateStyleLive(a.id,name:"Alignment point",closesWhenIdle:false) { $0.anchorX = 0.5 }; store.endLiveEdit()
+        try await spin(200)
+        let point = store.anchorPixel(of:store.project.clips[0])
+        XCTAssertGreaterThan(point.x,980,"right of the middle"); XCTAssertEqual(point.y,540)
+        XCTAssertNotNil(fields().first { $0.stringValue == "\(point.x)" },"\(fields().map(\.stringValue))")
+        store.placeAnchor(of:a.id,x:100,y:200)
+        XCTAssertTrue(store.anchorPixel(of:store.project.clips[0]) == (100,200),"the point lands where typed")
+        XCTAssertEqual(style(store,a.id).anchorX,0.5,"the point stays where it is in the clip")
     }
 
     /// SHADOW, TRANSFORM and COLOUR fold under their titles: their controls go, the panel gets
@@ -382,8 +432,8 @@ func inspectorSectionsUnfolded() -> () -> Void {
     // MARK: header and tabs
 
     /// At the side panel's narrowest (250 points, 218 inside the inspector's margins) the clip's
-    /// track line and the alignment-point buttons keep the lines they have in a wide panel, and
-    /// the tab titles stay on one line.
+    /// name line and the alignment-point buttons and coordinates keep the lines they have in a wide
+    /// panel, and the tab titles stay on one line.
     func testTheHeaderAndTabsKeepTheirLinesAtThePanelsNarrowest() {
         _ = NSApplication.shared
         let store = EditorStore()
@@ -397,8 +447,9 @@ func inspectorSectionsUnfolded() -> () -> Void {
         }
         for placing in [false,true] {
             store.anchorEditID = placing ? video.id : nil
-            let header = ClipHeader(store:store,clip:video)
+            let header = ClipHeader(store:store,clip:video), alignment = AlignmentControls(store:store,clip:video)
             XCTAssertEqual(height(header,218),height(header,1000),placing ? "placing" : "idle")
+            XCTAssertEqual(height(alignment,218),height(alignment,1000),placing ? "placing" : "idle")
         }
         store.anchorEditID = nil
         for tab in EditorStore.SidePanel.allCases {
@@ -415,7 +466,7 @@ func inspectorSectionsUnfolded() -> () -> Void {
         let video = Clip(mediaID:media.id,name:"base.mp4",kind:.video,lane:.v1,start:.zero,duration:.init(seconds:5))
         store.edit("Fixture") { $0.media = [media]; $0.clips = [video] }
         store.selectedClipID = video.id; store.anchorEditID = video.id
-        let (window,view) = host(ClipHeader(store:store,clip:video).padding(16).frame(width:250,alignment:.leading).background(Theme.panel).preferredColorScheme(.dark),
+        let (window,view) = host(AlignmentControls(store:store,clip:video).padding(16).frame(width:250,alignment:.leading).background(Theme.panel).preferredColorScheme(.dark),
                                  width:250,height:110)
         defer { window.contentView = nil; window.close() }
         RunLoop.main.run(until:Date().addingTimeInterval(0.15))

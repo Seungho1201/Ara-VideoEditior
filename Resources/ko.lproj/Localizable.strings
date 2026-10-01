@@ -108,7 +108,6 @@
 "Iris" = "아이리스";
 "Kind" = "종류";
 "Language" = "언어";
-"Linked A/V" = "연결된 A/V";
 "Local video editing on your Mac" = "Mac에서 하는 로컬 영상 편집";
 "MEDIA" = "미디어";
 "Missing" = "없음";
@@ -148,6 +147,9 @@
 "Plays inside the clip; the tracks below show through." = "클립 안에서 재생되며 아래 트랙이 비쳐 보입니다.";
 "Position X" = "위치 X";
 "Position Y" = "위치 Y";
+"Alignment point X in pixels" = "정렬점 X(픽셀)";
+"Alignment point Y in pixels" = "정렬점 Y(픽셀)";
+"Where the alignment point is, in pixels from the frame's top-left corner. Type a number to move the clip there." = "정렬점의 위치(화면 왼쪽 위에서부터 픽셀). 숫자를 입력하면 클립이 그 자리로 옮겨집니다.";
 "Preparing preview for %@" = "%@ 미리보기 준비 중";
 "Preview %lld%%" = "미리보기 %lld%%";
 "Previous Frame" = "이전 프레임";

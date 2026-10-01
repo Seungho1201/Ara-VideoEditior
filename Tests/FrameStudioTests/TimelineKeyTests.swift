@@ -40,6 +40,23 @@ import FrameCore
         XCTAssertEqual(passed.keys,[36,76],"with nothing to finish both go on up the responder chain")
     }
 
+    /// A clip with its outline up: the arrow keys in the timeline move the clip (⇧ ten pixels, not
+    /// ten frames). Return lets go of it, and they move the playhead again.
+    func testTheArrowKeysMoveAClipWhoseOutlineIsUp() {
+        let rig = rig(); defer { rig.close() }
+        let t = rig.clip("T")
+        rig.store.selectedClipID = t.id; rig.store.previewTransformID = t.id; rig.store.seek(t.start)
+        rig.press(126,"\u{F700}",arrow)
+        rig.press(124,"\u{F703}",arrow.union(.shift))
+        let style = rig.clip("T").style
+        XCTAssertTrue(rig.store.anchorPixel(of:rig.clip("T")) == (970,539))
+        XCTAssertEqual(rig.store.playhead,t.start,"the playhead stays")
+        rig.press(36,"\r")
+        rig.press(124,"\u{F703}",arrow.union(.shift))
+        XCTAssertEqual(rig.store.playhead,t.start+tenFrames,"after Return ⇧→ steps ten frames again")
+        XCTAssertEqual(rig.clip("T").style,style)
+    }
+
     func testReturnOrEscWhilePlacingTheAlignmentPointEndsOnlyThePlacing() {
         for (code,characters) in [(UInt16(36),"\r"),(UInt16(76),"\u{3}"),(UInt16(53),"\u{1b}")] {
             let rig = rig(); defer { rig.close() }
@@ -100,7 +117,9 @@ import FrameCore
         rig.store.previewTransformID = t; rig.store.seek(.init(seconds:3))
         rig.press(36,"\r")
         XCTAssertNil(rig.store.previewTransformID); XCTAssertEqual(rig.store.project.clips.count,2)
+        XCTAssertNil(rig.store.selectedClipID,"and lets go of the clip")
         // ⇧Esc given to Delete: it is still Esc, which deletes nothing.
+        rig.store.selectedClipID = t
         rig.store.shortcuts.set(Shortcut("escape",.shift),for:.delete)
         rig.press(53,"\u{1b}",.shift)
         XCTAssertEqual(rig.store.project.clips.count,2); XCTAssertEqual(rig.store.selectedClipID,t)

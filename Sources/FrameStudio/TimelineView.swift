@@ -132,7 +132,7 @@ struct TimelineSurface: NSViewRepresentable {
         view.drawsBackground = false; view.scrollerStyle = .legacy
         // No rubber band vertically: the name column follows the canvas's settled offset only.
         view.verticalScrollElasticity = .none
-        let canvas = TimelineCanvas(); canvas.store = store; canvas.pickDelay = 0.03; view.documentView = canvas
+        let canvas = TimelineCanvas(); canvas.store = store; canvas.pickDelay = 0.03; canvas.focusRequest = store.timelineFocusRequest; view.documentView = canvas
         // Tracks that no longer fit scroll vertically; the name column follows the same offset.
         view.contentView.postsBoundsChangedNotifications = true
         let model = scroll, coordinator = context.coordinator
@@ -164,6 +164,9 @@ struct TimelineSurface: NSViewRepresentable {
         if oldZoom != store.zoom {
             let x = max(0,min(canvas.frame.width-scroll.contentSize.width,store.playhead.seconds*store.zoom-scroll.contentSize.width*0.45))
             scroll.contentView.scroll(to:NSPoint(x:x,y:scroll.contentView.bounds.origin.y)); scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        if canvas.focusRequest != store.timelineFocusRequest {
+            canvas.focusRequest = store.timelineFocusRequest; canvas.window?.makeFirstResponder(canvas)
         }
         if canvas.revealPlayheadRequest != store.revealPlayheadRequest {
             canvas.revealPlayheadRequest = store.revealPlayheadRequest
@@ -204,6 +207,7 @@ struct TimelineSurface: NSViewRepresentable {
     }
     var pixelsPerSecond: Double = 64
     var revealPlayheadRequest = 0
+    var focusRequest = 0
     /// Whether rectangle select was armed at the last update (to notice it being switched on).
     var armedForSelect = false
     /// Shared with the SwiftUI track-name column so rows line up.
@@ -1288,6 +1292,8 @@ struct TimelineSurface: NSViewRepresentable {
             if event.keyCode == 53 { cancelDrag(); if store.dragSelectArmed { store.dragSelectArmed = false } }
             return
         }
+        // With a clip's outline up the arrow keys move the clip, a pixel at a time (ten with Shift).
+        if mode == nil, store.nudge(event) { return }
         switch event.keyCode {
         // Shift-arrows move ten frames, whatever the frame keys are set to.
         case 123 where modifiers == [.shift]: store.step(-10); return
@@ -1301,10 +1307,10 @@ struct TimelineSurface: NSViewRepresentable {
             if store.dragSelectArmed { store.dragSelectArmed = false }
             else if store.selectedClipIDs.count > 1 { store.selectClips([]) }
             return
-        // Return (or Enter) finishes a transform in the preview, keeping it, as it does there. With a
-        // modifier, or no transform, it goes on like any other key.
+        // Return (or Enter) finishes a transform in the preview, keeping it and letting go of the
+        // clip, as it does there. With a modifier, or no transform, it goes on like any other key.
         case 36,76:
-            if store.previewTransformID != nil, PreviewTransformOverlay.isReturn(event) { store.previewTransformID = nil; return }
+            if store.previewTransformID != nil, PreviewTransformOverlay.isReturn(event) { store.finishTransform(); return }
         default: break
         }
         // A Korean input source may not produce the Latin menu equivalent, so the timeline's

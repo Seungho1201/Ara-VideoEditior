@@ -99,8 +99,8 @@ struct PreviewSurface: NSViewRepresentable {
         var rotating = false
         /// Placing the alignment point rather than moving the clip.
         var anchoring = false
-        /// The centres a move lines up with: the frame's and those of the other clips showing.
-        var centers: [CGPoint] = []
+        /// The lines a move lines up with (`VisualGeometry.alignmentLines`).
+        var lines: (vertical: [CGFloat], horizontal: [CGFloat]) = ([],[])
     }
     private var drag: Drag?
     private var anchorFeedback = CatchFeedback<Int>()
@@ -117,15 +117,15 @@ struct PreviewSurface: NSViewRepresentable {
     static let centreOpacity: CGFloat = 0.7
     /// Points a moving clip's alignment point can line up with: the frame's centre, and the
     /// alignment point of every other clip showing now (its linked partner aside).
-    private func alignmentCenters(excluding clip: Clip, in canvas: CGRect) -> [CGPoint] {
-        guard let store else { return [] }
+    /// How near a move's alignment point catches a line, in points of the preview.
+    static let alignmentReach: CGFloat = 5
+    private func alignmentLines(excluding clip: Clip, in canvas: CGRect) -> (vertical: [CGFloat], horizontal: [CGFloat]) {
+        guard let store else { return ([],[]) }
         let own = Set(store.project.group(for:clip.id).map(\.id)), size = canvas.size
-        var centers = [CGPoint(x:size.width/2,y:size.height/2)]
-        for other in store.project.clips where other.lane.isVideo && !own.contains(other.id) && other.style.opacity > 0
-            && store.playhead >= other.start && store.playhead < other.end {
-            centers.append(geometry(for:other)?.anchor ?? CGPoint(x:size.width*(0.5+other.style.x),y:size.height*(0.5+other.style.y)))
-        }
-        return centers
+        let others = store.project.clips.filter { other in
+            other.lane.isVideo && !own.contains(other.id) && other.style.opacity > 0 && store.playhead >= other.start && store.playhead < other.end
+        }.map { geometry(for:$0)?.anchor ?? CGPoint(x:size.width*(0.5+$0.style.x),y:size.height*(0.5+$0.style.y)) }
+        return VisualGeometry.alignmentLines(middle:CGPoint(x:size.width/2,y:size.height/2),others:others,reach:Self.alignmentReach)
     }
     weak var chrome: TransformChromeView?
     private let ghost = TransformGhost()
@@ -432,7 +432,7 @@ struct PreviewSurface: NSViewRepresentable {
         guard rotating || corner != nil || geometry.contains(point) || geometry.isNearOutline(point) else { store.previewTransformID = nil; refresh(); return }
         finishDrag(); store.pause(); store.beginInteraction()
         drag = Drag(id:clip.id,origin:point,geometry:geometry,corner:corner,canvas:canvas,rotating:rotating,
-                    centers:alignmentCenters(excluding:clip,in:canvas))
+                    lines:alignmentLines(excluding:clip,in:canvas))
         verticalFeedback = CatchFeedback(); horizontalFeedback = CatchFeedback()
         store.status = rotating ? String(localized:"Rotating clip in preview") : corner == nil ? String(localized:"Moving clip in preview") : String(localized:"Resizing clip in preview")
         (rotating ? Self.rotateCursor : NSCursor.closedHand).set()
@@ -458,7 +458,7 @@ struct PreviewSurface: NSViewRepresentable {
         // or snapping off, lets go.
         if drag.corner == nil, store.snapping, !event.modifierFlags.contains(.shift) {
             let moving = VisualGeometry(sourceSize:drag.geometry.sourceSize,canvasSize:drag.geometry.canvasSize,style:style,isText:drag.geometry.isText)
-            let aligned = moving.aligned(to:drag.centers,threshold:5)
+            let aligned = moving.aligned(vertical:drag.lines.vertical,horizontal:drag.lines.horizontal,threshold:Self.alignmentReach)
             style = aligned.style; guides = (aligned.vertical,aligned.horizontal)
         }
         let caught = verticalFeedback.cue(for:guides.vertical,at:event.timestamp,enabled:store.haptics(.alignment))
@@ -540,8 +540,11 @@ struct PreviewSurface: NSViewRepresentable {
             if let zoomOrigin { store?.updatePreviewTransform(zoomOrigin.id,style:zoomOrigin.style) }
             finishDrag(); store?.previewTransformID = nil; refresh()
         } else if Self.isReturn(event), store?.previewTransformID != nil {
-            // Return (or Enter) is done: keep what is there, a drag in progress included.
-            finishDrag(); store?.previewTransformID = nil; refresh()
+            // Return (or Enter) is done: keep what is there, a drag in progress included, let go of
+            // the clip and give the timeline the keys.
+            finishDrag(); store?.finishTransform(); refresh()
+        } else if drag == nil, store?.nudge(event) == true {
+            // An arrow key moved the clip by a pixel (ten with Shift).
         } else if store?.shortcuts.command(matching:event) == .snapping {
             if !event.isARepeat { store?.snapping.toggle() }
         } else { super.keyDown(with:event) }

@@ -93,4 +93,56 @@ import FrameCore
         XCTAssertTrue(chrome.isHidden)
         XCTAssertFalse(hit(overlay,CGPoint(x:overlay.bounds.midX,y:overlay.bounds.midY)) === chrome)
     }
+
+    /// Return after transforming a title in the preview lets go of the clip and gives the timeline
+    /// the keys: the arrow keys then move the playhead from there.
+    func testReturnLetsGoOfTheClipAndTheArrowsMoveThePlayhead() async throws {
+        _ = NSApplication.shared
+        let saved = Self.keys.reduce(into:[String:Any]()) { values, key in values[key] = UserDefaults.standard.object(forKey:key) }
+        let suite = "ara.tests.chrome-return.\(UUID().uuidString)"
+        let store = EditorStore(registry:ProjectRegistry(defaults:UserDefaults(suiteName:suite)!))
+        store.pasteboard = NSPasteboard(name:.init("ara-chrome-return-\(UUID().uuidString)"))
+        store.shortcuts = ShortcutSettings(defaults:UserDefaults(suiteName:suite)!)     // the default keys, not the user's
+        store.runAlert = { alert in XCTFail("Unexpected question: \(alert.messageText)"); return .alertSecondButtonReturn }
+        let size = CGSize(width:1440,height:920)
+        let window = HostingTestWindow(contentRect:NSRect(origin:.zero,size:size),styleMask:.borderless,backing:.buffered,defer:false)
+        window.isReleasedWhenClosed = false
+        defer {
+            store.pause(); store.pasteboard.releaseGlobally()
+            window.contentView = nil; window.close()
+            UserDefaults(suiteName:suite)?.removePersistentDomain(forName:suite)
+            for key in Self.keys { if let value = saved[key] { UserDefaults.standard.set(value,forKey:key) } else { UserDefaults.standard.removeObject(forKey:key) } }
+        }
+        for key in Self.keys where key.hasPrefix("editor.") { UserDefaults.standard.removeObject(forKey:key) }
+        var title = Clip(name:"Title",kind:.text,lane:.v2,start:.zero,duration:.init(seconds:4)); title.style.text = "Hello"
+        XCTAssertTrue(store.edit("Fixture") { $0.clips = [title] })
+        store.resumeEditing()
+        let host = NSHostingView(rootView:EditorView(store:store).frame(width:size.width,height:size.height))
+        host.frame = NSRect(origin:.zero,size:size)
+        window.contentView = host
+        func settle() async throws { for _ in 0..<20 { host.layoutSubtreeIfNeeded(); try await Task.sleep(for:.milliseconds(25)) } }
+        try await settle()
+        for _ in 0..<1500 where store.isBuilding || store.player.currentItem == nil { try await Task.sleep(for:.milliseconds(10)) }
+        store.selectedClipID = title.id; store.previewTransformID = title.id
+        try await settle()
+        let overlay = try XCTUnwrap(all(PreviewEditorView.self,in:host).first).overlay
+        window.makeFirstResponder(overlay)
+        func key(_ code: UInt16, _ characters: String, _ flags: NSEvent.ModifierFlags = []) -> NSEvent {
+            NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:flags,timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,
+                             context:nil,characters:characters,charactersIgnoringModifiers:characters,isARepeat:false,keyCode:code)!
+        }
+        let before = store.project
+        overlay.keyDown(with:key(36,"\r"))
+        try await settle()
+        XCTAssertNil(store.previewTransformID,"the transform is finished")
+        XCTAssertEqual(store.project,before,"and kept as it was")
+        XCTAssertNil(store.selectedClipID,"the clip is let go of"); XCTAssertTrue(store.selectedClipIDs.isEmpty)
+        let timeline = try XCTUnwrap(all(TimelineCanvas.self,in:host).first)
+        XCTAssertTrue(window.firstResponder === timeline,"the timeline has the keys (\(String(describing:window.firstResponder.map { type(of:$0) })))")
+        let start = store.playhead
+        window.firstResponder?.keyDown(with:key(124,"\u{F703}",[.numericPad,.function]))
+        XCTAssertEqual(store.playhead,start+store.project.frameRate.frame,"→ moves the playhead a frame")
+        window.firstResponder?.keyDown(with:key(123,"\u{F702}",[.numericPad,.function]))
+        XCTAssertEqual(store.playhead,start,"← back")
+    }
 }

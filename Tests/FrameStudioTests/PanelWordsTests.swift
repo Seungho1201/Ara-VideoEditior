@@ -83,7 +83,7 @@ import FrameCore
             XCTAssertEqual(TransitionDirection.allCases.map(\.displayName),["왼쪽","오른쪽","위쪽","아래쪽"])
         }
         try assertKorean(["STILL","Preparing preview · %@","Preparing preview · %@ · %lld more","1x · Normal",
-                          "Linked A/V","A title holds up to %lld characters.","Across a cut","Fade in","Fade out","%.2f s",
+                          "A title holds up to %lld characters.","Across a cut","Fade in","Fade out","%.2f s",
                           "%@ (missing)","Added","System","Font family","Font style",
                           "Outline width","Shadow opacity","Shadow distance","Shadow angle","Shadow blur",
                           "Start","End","Start · fade in","Start · from previous","End · fade out","End · to next",

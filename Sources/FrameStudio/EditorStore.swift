@@ -95,6 +95,83 @@ import FrameMedia
     /// Bumped when placing an alignment point starts: the preview takes the keyboard, so Return
     /// and Esc end the placing there, as after a click in it.
     @Published private(set) var previewFocusRequest = 0
+    /// Asks the timeline for the keyboard (Return after a transform).
+    @Published private(set) var timelineFocusRequest = 0
+    /// Return after transforming a clip: what was done stays, the transform ends, the clip is let
+    /// go of and the timeline takes the keyboard, so the arrow keys move the playhead from there.
+    func finishTransform() { previewTransformID = nil; selectClips([]); timelineFocusRequest += 1 }
+    /// The clip being transformed with its outline up: picked, under the playhead, not playing.
+    var transformingClip: Clip? {
+        guard let id = previewTransformID, id == selectedClipID, !isPlaying else { return nil }
+        return project.clips.first { $0.id == id && $0.lane.isVideo && playhead >= $0.start && playhead < $0.end }
+    }
+    /// The arrow keys while a clip's outline is up: the clip moves a pixel of the frame, ten with
+    /// Shift, landing on whole pixels. False for any other key, or with no outline up (or the
+    /// alignment point being placed), so the key does its usual work, a frame step.
+    func nudge(_ event: NSEvent?) -> Bool {
+        guard let event, event.type == .keyDown, anchorEditID == nil, !isExporting, let clip = transformingClip else { return false }
+        let modifiers = event.modifierFlags.intersection([.command,.shift,.option,.control])
+        guard modifiers.isEmpty || modifiers == [.shift] else { return false }
+        let step = modifiers.isEmpty ? 1.0 : 10.0
+        let (dx,dy): (Double,Double)
+        switch event.keyCode {
+        case 123: (dx,dy) = (-step,0)
+        case 124: (dx,dy) = (step,0)
+        case 125: (dx,dy) = (0,step)
+        case 126: (dx,dy) = (0,-step)
+        default: return false
+        }
+        let point = anchorPoint(of:clip)
+        let to = CGPoint(x:point.x.rounded()+dx,y:point.y.rounded()+dy)
+        updateStyleLive(clip.id,name:"Adjust clip") { style in style = Self.moved(style,anchor:point,to:to,in:project.aspectRatio.size()) }
+        return true
+    }
+    /// Where a clip's alignment point is in the frame (in the frame's pixels from its top-left
+    /// corner), as the preview places it: the clip's middle until the point is moved, and also
+    /// while the clip's size is not known yet (a title not drawn).
+    func anchorPoint(of clip: Clip) -> CGPoint {
+        let frame = project.aspectRatio.size()
+        let size = previewSourceSize(for:clip) ?? (clip.kind == .text ? FrameRenderer.drawnTextImage(clip.style).map {
+            let margin = FrameRenderer.effectMargin(clip.style)
+            return CGSize(width:max(1,$0.extent.width-2*margin),height:max(1,$0.extent.height-2*margin))
+        } : nil)
+        guard let size, size.width > 0, size.height > 0 else { return CGPoint(x:frame.width*(0.5+clip.style.x),y:frame.height*(0.5+clip.style.y)) }
+        return VisualGeometry(sourceSize:size,canvasSize:frame,style:clip.style,isText:clip.kind == .text).anchor
+    }
+    /// The alignment point in whole pixels, as the inspector shows it.
+    func anchorPixel(of clip: Clip) -> (x: Int, y: Int) {
+        let point = anchorPoint(of:clip); return (Int(point.x.rounded()),Int(point.y.rounded()))
+    }
+    /// Moves a clip so its alignment point lands on the pixel typed in the inspector (a nil
+    /// coordinate stays as it is). One undo step.
+    func placeAnchor(of id: UUID, x: Int?, y: Int?) {
+        guard let clip = project.clips.first(where: { $0.id == id }) else { return }
+        // The number it already shows (a field giving up the keyboard sends it again) moves nothing.
+        let shown = anchorPixel(of:clip)
+        guard x.map({ $0 != shown.x }) == true || y.map({ $0 != shown.y }) == true else { return }
+        let point = anchorPoint(of:clip)
+        let to = CGPoint(x:x.map(CGFloat.init) ?? point.x,y:y.map(CGFloat.init) ?? point.y)
+        commitPendingEdits()
+        updateStyleLive(id,name:"Adjust clip",closesWhenIdle:false) { style in style = Self.moved(style,anchor:point,to:to,in:project.aspectRatio.size()) }
+        endLiveEdit()
+    }
+    /// `style` moved so the point at `anchor` goes to `to`: the clip moves, not the point within it.
+    nonisolated static func moved(_ style: ClipStyle, anchor: CGPoint, to: CGPoint, in frame: CGSize) -> ClipStyle {
+        var moved = style
+        moved.x = min(2,max(-2,style.x+(to.x-anchor.x)/frame.width))
+        moved.y = min(2,max(-2,style.y+(to.y-anchor.y)/frame.height))
+        return moved
+    }
+    /// An inspector text field took or gave up the keyboard. The frame keys (unmodified arrows,
+    /// which as menu equivalents beat any field) stand down while one has it; giving it up is
+    /// looked at once the next field has taken it, whichever of the two hears first.
+    func textFocusChanged(_ focused: Bool) {
+        if focused { isEditingText = true; return }
+        DispatchQueue.main.async { [weak self] in
+            let field = NSApp.keyWindow?.firstResponder as? NSTextView
+            self?.isEditingText = field?.isEditable == true
+        }
+    }
     @Published var selectedGap: TimelineGap?
     /// A transition picked on the timeline; exclusive with a clip or gap selection.
     @Published var selectedTransitionID: UUID?

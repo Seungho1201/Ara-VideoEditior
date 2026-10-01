@@ -200,6 +200,27 @@ final class VisualGeometryTests: XCTestCase {
         XCTAssertEqual(result.style,near(330,190).style)
     }
 
+    /// Near the frame's middle only the middle catches: another clip's point a pixel or two beside
+    /// it is no second line there (on that axis), so a move cannot land two pixels off the middle
+    /// with a guide saying it is lined up. Farther out the other point catches as before.
+    func testNearTheMiddleOnlyTheMiddleCatches() {
+        let middle = CGPoint(x:480,y:270)
+        let lines = VisualGeometry.alignmentLines(middle:middle,others:[CGPoint(x:481,y:100),CGPoint(x:300,y:272)],reach:5)
+        XCTAssertEqual(lines.vertical,[480,300],"481 is beside the middle: left out across")
+        XCTAssertEqual(lines.horizontal,[270,100],"272 beside the middle: left out down")
+        func near(_ x: CGFloat, _ y: CGFloat) -> VisualGeometry {
+            var style = ClipStyle(); style.scale = 0.3
+            style.x = x/canvas.width-0.5; style.y = y/canvas.height-0.5
+            return VisualGeometry(sourceSize:canvas,canvasSize:canvas,style:style)
+        }
+        for x: CGFloat in [478,480.6,481,483] {
+            let result = near(x,200).aligned(vertical:lines.vertical,horizontal:lines.horizontal,threshold:5)
+            XCTAssertEqual(result.vertical,480,"from \(x): the middle")
+            XCTAssertEqual(VisualGeometry(sourceSize:canvas,canvasSize:canvas,style:result.style).center.x,480,accuracy:1e-9)
+        }
+        XCTAssertEqual(near(302,200).aligned(vertical:lines.vertical,horizontal:lines.horizontal,threshold:5).vertical,300,"away from the middle another point still catches")
+    }
+
     func testTheAlignmentPointSitsOnTheClipAndCatchesItsStops() {
         var style = ClipStyle(); style.scale = 0.5; style.rotation = 30; style.x = 0.1
         let geometry = VisualGeometry(sourceSize:CGSize(width:400,height:200),canvasSize:canvas,style:style)

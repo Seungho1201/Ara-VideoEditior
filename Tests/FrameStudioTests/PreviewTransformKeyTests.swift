@@ -40,6 +40,7 @@ final class PreviewTransformKeyTests: XCTestCase {
             overlay.keyDown(with:key(36,"\r",in:overlay))
             XCTAssertNil(store.previewTransformID,"Return finishes")
             XCTAssertEqual(store.project,before,"and changes nothing by itself")
+            XCTAssertNil(store.selectedClipID,"lets go of the clip, so the arrow keys move the playhead")
             store.previewTransformID = title.id
             overlay.keyDown(with:key(76,"\u{3}",in:overlay))
             XCTAssertNil(store.previewTransformID,"so does the keypad's Enter")
@@ -50,10 +51,44 @@ final class PreviewTransformKeyTests: XCTestCase {
         }
     }
 
+    /// With the outline up the arrow keys move the clip a pixel of the frame at a time (ten with
+    /// Shift), not the playhead; the moves close as one undo step.
+    @MainActor func testTheArrowKeysMoveTheClipAPixelAtATime() async throws {
+        try await withOverlay { store, overlay, title in
+            let arrow: NSEvent.ModifierFlags = [.numericPad,.function]
+            let before = store.project.clips[0].style
+            @MainActor func at() -> (Int,Int) { let p = store.anchorPixel(of:store.project.clips[0]); return (p.x,p.y) }
+            XCTAssertTrue(at() == (960,540))
+            overlay.keyDown(with:key(124,"\u{F703}",arrow,in:overlay)); XCTAssertTrue(at() == (961,540),"→")
+            overlay.keyDown(with:key(125,"\u{F701}",arrow,in:overlay)); XCTAssertTrue(at() == (961,541),"↓ is down the frame")
+            overlay.keyDown(with:key(123,"\u{F702}",arrow.union(.shift),in:overlay)); XCTAssertTrue(at() == (951,541),"⇧← ten")
+            overlay.keyDown(with:key(126,"\u{F700}",arrow,in:overlay)); XCTAssertTrue(at() == (951,540),"↑")
+            XCTAssertEqual(store.playhead,.zero,"the playhead stays")
+            XCTAssertEqual(store.undoName,"Adjust clip")
+            store.undo()
+            XCTAssertEqual(store.project.clips[0].style,before,"one undo step")
+            // Not a nudge: ⌥→ (Go to Clip End), placing the alignment point, or no outline up.
+            XCTAssertFalse(store.nudge(key(124,"\u{F703}",arrow.union(.option),in:overlay)))
+            store.anchorEditID = title.id
+            XCTAssertFalse(store.nudge(key(124,"\u{F703}",arrow,in:overlay))); store.anchorEditID = nil
+            store.seek(title.end)
+            XCTAssertFalse(store.nudge(key(124,"\u{F703}",arrow,in:overlay)),"the playhead past the clip: no outline")
+            store.seek(.zero)
+            // A moved alignment point lands on whole pixels, a pixel at a time.
+            store.updateStyleLive(title.id,name:"Alignment point",closesWhenIdle:false) { $0.anchorX = 0.3; $0.anchorY = -0.2 }; store.endLiveEdit()
+            let point = store.anchorPoint(of:store.project.clips[0])
+            overlay.keyDown(with:key(124,"\u{F703}",arrow,in:overlay))
+            let moved = store.anchorPoint(of:store.project.clips[0])
+            XCTAssertEqual(moved.x,point.x.rounded()+1,accuracy:1e-6); XCTAssertEqual(moved.y,point.y.rounded(),accuracy:1e-6)
+            store.previewTransformID = nil
+            XCTAssertFalse(store.nudge(key(124,"\u{F703}",arrow,in:overlay)))
+        }
+    }
+
     @MainActor func testReturnKeepsADragInProgressWhereEscCancelsIt() async throws {
         try await withOverlay { store, overlay, title in
             for (code,characters,keeps) in [(UInt16(36),"\r",true),(UInt16(53),"\u{1b}",false)] {
-                store.previewTransformID = title.id
+                store.selectedClipID = title.id; store.previewTransformID = title.id
                 let before = store.project.clips[0].style
                 let centre = CGPoint(x:800*(0.5+before.x),y:450*(0.5+before.y))   // wherever the title is now
                 overlay.mouseDown(with:mouse(.leftMouseDown,centre,in:overlay))
@@ -61,6 +96,7 @@ final class PreviewTransformKeyTests: XCTestCase {
                 XCTAssertNotEqual(store.project.clips[0].style.x,before.x,"the drag moves the title")
                 overlay.keyDown(with:key(code,characters,in:overlay))
                 XCTAssertNil(store.previewTransformID)
+                XCTAssertEqual(store.selectedClipID,keeps ? nil : title.id,keeps ? "Return lets go of the clip" : "Esc only ends the transform")
                 if keeps { XCTAssertGreaterThan(store.project.clips[0].style.x,before.x,"Return keeps the move"); XCTAssertEqual(store.undoName,"Adjust clip") }
                 else { XCTAssertEqual(store.project.clips[0].style,before,"Esc puts it back") }
                 overlay.mouseUp(with:mouse(.leftMouseUp,centre,in:overlay))

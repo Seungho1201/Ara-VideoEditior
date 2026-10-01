@@ -103,8 +103,9 @@ import AppKit
                 Group {
                 Button("Play / Pause") { store.togglePlayback() }.keyboardShortcut(shortcuts.keyboardShortcut(.playPause))
                 // Arrow equivalents win over any focused text view, so they yield while a title is edited.
-                Button("Previous Frame") { store.step(-1) }.keyboardShortcut(shortcuts.keyboardShortcut(.previousFrame)).disabled(store.isEditingText)
-                Button("Next Frame") { store.step(1) }.keyboardShortcut(shortcuts.keyboardShortcut(.nextFrame)).disabled(store.isEditingText)
+                // With a clip's outline up an arrow key moves the clip instead (EditorStore.nudge).
+                Button("Previous Frame") { if !store.nudge(NSApp.currentEvent) { store.step(-1) } }.keyboardShortcut(shortcuts.keyboardShortcut(.previousFrame)).disabled(store.isEditingText)
+                Button("Next Frame") { if !store.nudge(NSApp.currentEvent) { store.step(1) } }.keyboardShortcut(shortcuts.keyboardShortcut(.nextFrame)).disabled(store.isEditingText)
                 Button("Go to Selected Clip Start") { store.goToSelectedClipStart() }.keyboardShortcut(shortcuts.keyboardShortcut(.clipStart)).disabled(store.selectedClip == nil || store.isEditingText)
                 Button("Go to Selected Clip End") { store.goToSelectedClipEnd() }.keyboardShortcut(shortcuts.keyboardShortcut(.clipEnd)).disabled(store.selectedClip == nil || store.isEditingText)
                 Divider()

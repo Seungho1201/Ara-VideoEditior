@@ -184,15 +184,16 @@ import FrameCore
         defer { store.pause() }
         try await built(store); try await spin(400)                              // its frame drawn
         XCTAssertNil(store.heldFrame.value)
-        var events: [String] = []
+        var events: [String] = [], settlingAtSwap: Bool?
         let holds = store.heldFrame.dropFirst().sink { events.append($0.map { "held \($0.width)" } ?? "released") }
-        let swaps = store.player.observe(\.currentItem,options:[.new]) { _,_ in MainActor.assumeIsolated { events.append("swap") } }
+        let swaps = store.player.observe(\.currentItem,options:[.new]) { _,_ in
+            MainActor.assumeIsolated { events.append("swap"); settlingAtSwap = store.previewIsSettling }
+        }
         defer { holds.cancel(); swaps.invalidate() }
         store.edit("Move clip") { $0.clips[0].start = .init(seconds:1) }
         try await built(store)
-        XCTAssertEqual(events,["held 1920","swap"],"held before the swap")
-        XCTAssertTrue(store.previewIsSettling)
-        XCTAssertNotNil(store.heldFrame.value,"until the new frame lands")
+        XCTAssertEqual(Array(events.prefix(2)),["held 1920","swap"],"held before the swap")
+        XCTAssertEqual(settlingAtSwap,true,"held until the new frame lands")
         for _ in 0..<300 where store.heldFrame.value != nil { try await spin(10) }
         XCTAssertEqual(events,["held 1920","swap","released"])
         XCTAssertFalse(store.previewIsSettling)

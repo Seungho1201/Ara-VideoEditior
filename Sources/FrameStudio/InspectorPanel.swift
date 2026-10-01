@@ -91,48 +91,15 @@ struct InspectorContent: View, Equatable {
             } else if let clip = store.selectedClip {
                 ScrollView {
                     VStack(alignment:.leading,spacing:18) {
-                        ClipHeader(store:store,clip:clip)
-                        // A title's own settings come first: what it says and how it looks.
+                        // The name, a title's text (what it says comes first), then where the clip sits.
+                        VStack(alignment:.leading,spacing:12) {
+                            ClipHeader(store:store,clip:clip)
+                            if clip.kind == .text { textBox(clip) }
+                            if clip.lane.isVideo { AlignmentControls(store:store,clip:clip) }
+                        }
+                        // How a title looks.
                         if clip.kind == .text {
                             section("TEXT") {
-                                TextEditor(text:$textDraft).font(.system(size:12)).frame(height:75).scrollContentBackground(.hidden).padding(5).background(Theme.background,in:RoundedRectangle(cornerRadius:4)).accessibilityLabel("Title text")
-                                    .focused($textFocused)
-                                    .onAppear { syncDraft(from:clip,force:true); store.flushPendingEdits = { flushTextCommit() } }
-                                    .onChange(of:clip.id) { _,_ in syncDraft(from:clip,force:true) }
-                                    // Undo/redo or Reset changed the text: follow it even while focused.
-                                    .onChange(of:clip.style.text) { _,now in followOutsideChange(now) }
-                                    // Also when an undo lands on the text last drawn: typing flushed and undone
-                                    // in one call never shows the text change above.
-                                    .onChange(of:store.textRevision) { _,_ in
-                                        if let now = store.project.clips.first(where: { $0.id == draftClipID })?.style.text { followOutsideChange(now) }
-                                    }
-                                    .onChange(of:textDraft) { old,draft in
-                                        // The field holds no more than the title keeps: a longer paste is cut here, in
-                                        // view, and the caret stays after what was kept.
-                                        if draft.count > Self.textLimit {
-                                            let fitted = Self.fitting(draft,after:old)
-                                            textDraft = fitted.text; Self.placeCaret(fitted.caret,in:fitted.text); return
-                                        }
-                                        scheduleTextCommit(composing()?.string ?? draft)
-                                    }
-                                    // A syllable an input method is still composing (Hangul) is in the field
-                                    // but not yet in the binding: the title shows it at once all the same, and
-                                    // loses it again when the composition is cancelled.
-                                    // (The text view says nothing of marked text; its storage does.)
-                                    .onReceive(NotificationCenter.default.publisher(for:NSTextStorage.didProcessEditingNotification)) { note in
-                                        guard let storage = note.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters),
-                                              let field = focusedField(), field.textStorage === storage else { return }
-                                        scheduleTextCommit(field.string)
-                                    }
-                                    .onChange(of:textFocused) { _,focused in
-                                        store.isEditingText = focused
-                                        if !focused { flushTextCommit(); store.endLiveEdit() }
-                                    }
-                                    .onDisappear { store.isEditingText = false; flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
-                                if textDraft.count >= Self.textLimit {
-                                    Text("A title holds up to \(Self.textLimit) characters.")
-                                        .font(.system(size:9)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
-                                }
                                 TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
                                                   isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
                                                   addFonts:{ store.chooseFonts(applyToSelection:true) }).equatable()
@@ -237,6 +204,48 @@ struct InspectorContent: View, Equatable {
                 }.foregroundStyle(Theme.muted).frame(maxWidth:.infinity,maxHeight:.infinity)
             }
         }.background(Theme.panel)
+    }
+    /// What a title says: the field (bound to a draft, never to the store, so composing Hangul
+    /// is not cut off), and a note when it is full.
+    @ViewBuilder private func textBox(_ clip: Clip) -> some View {
+        TextEditor(text:$textDraft).font(.system(size:12)).frame(height:75).scrollContentBackground(.hidden).padding(5).background(Theme.background,in:RoundedRectangle(cornerRadius:4)).accessibilityLabel("Title text")
+            .focused($textFocused)
+            .onAppear { syncDraft(from:clip,force:true); store.flushPendingEdits = { flushTextCommit() } }
+            .onChange(of:clip.id) { _,_ in syncDraft(from:clip,force:true) }
+            // Undo/redo or Reset changed the text: follow it even while focused.
+            .onChange(of:clip.style.text) { _,now in followOutsideChange(now) }
+            // Also when an undo lands on the text last drawn: typing flushed and undone
+            // in one call never shows the text change above.
+            .onChange(of:store.textRevision) { _,_ in
+                if let now = store.project.clips.first(where: { $0.id == draftClipID })?.style.text { followOutsideChange(now) }
+            }
+            .onChange(of:textDraft) { old,draft in
+                // The field holds no more than the title keeps: a longer paste is cut here, in
+                // view, and the caret stays after what was kept.
+                if draft.count > Self.textLimit {
+                    let fitted = Self.fitting(draft,after:old)
+                    textDraft = fitted.text; Self.placeCaret(fitted.caret,in:fitted.text); return
+                }
+                scheduleTextCommit(composing()?.string ?? draft)
+            }
+            // A syllable an input method is still composing (Hangul) is in the field
+            // but not yet in the binding: the title shows it at once all the same, and
+            // loses it again when the composition is cancelled.
+            // (The text view says nothing of marked text; its storage does.)
+            .onReceive(NotificationCenter.default.publisher(for:NSTextStorage.didProcessEditingNotification)) { note in
+                guard let storage = note.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters),
+                      let field = focusedField(), field.textStorage === storage else { return }
+                scheduleTextCommit(field.string)
+            }
+            .onChange(of:textFocused) { _,focused in
+                store.textFocusChanged(focused)
+                if !focused { flushTextCommit(); store.endLiveEdit() }
+            }
+            .onDisappear { store.textFocusChanged(false); flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
+        if textDraft.count >= Self.textLimit {
+            Text("A title holds up to \(Self.textLimit) characters.")
+                .font(.system(size:9)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
+        }
     }
     /// A transition picked on the timeline: its kind, its length (fitted to its clips), removal.
     @ViewBuilder private func transitionInspector(_ transition: FrameCore.Transition) -> some View {
@@ -475,30 +484,15 @@ struct InspectorContent: View, Equatable {
     }
 }
 
-/// The selected clip's name, its track and kind, and for a picture the buttons that place its
-/// alignment point, on a row of their own so the name and track keep the panel's width.
+/// The selected clip's name, with the ★ that keeps it in the favourites.
 struct ClipHeader: View {
     @ObservedObject var store: EditorStore
     let clip: Clip
-    private var placing: Bool { store.anchorEditID == clip.id }
     var body: some View {
-        VStack(alignment:.leading,spacing:6) {
-            HStack(alignment:.top,spacing:6) {
-                Text(clip.name).font(.system(size:13,weight:.semibold)).lineLimit(2)
-                Spacer(minLength:4)
-                favoriteButton
-            }
-            // One line: a narrow panel shortens it rather than break "V1 · Video" in two.
-            HStack { Text(verbatim:"\(clip.lane.rawValue) · \(clip.kind.displayName)"); if clip.linkID != nil { Image(systemName:"link"); Text("Linked A/V") } }
-                .font(.system(size:10)).foregroundStyle(Theme.accent).lineLimit(1)
-            // Where the clip's alignment point is: turning and scaling go about it, and moving lines
-            // it up with the frame's centre and other clips' points. Side by side while they fit.
-            if clip.lane.isVideo {
-                ViewThatFits(in:.horizontal) {
-                    HStack(spacing:6) { adjustButton; resetButton }
-                    VStack(alignment:.leading,spacing:5) { adjustButton; resetButton }
-                }.padding(.top,4)
-            }
+        HStack(alignment:.top,spacing:6) {
+            Text(clip.name).font(.system(size:13,weight:.semibold)).lineLimit(2)
+            Spacer(minLength:4)
+            favoriteButton
         }
     }
     /// Keeps the clip in the favourites (the ★ at the panel's top right), or lets it go.
@@ -512,6 +506,49 @@ struct ClipHeader: View {
         .buttonStyle(.plain)
         .help(kept ? "Remove from Favourites" : "Keep in Favourites, to drag onto any project's timeline")
         .accessibilityLabel(kept ? Text("Remove from Favourites") : Text("Keep in Favourites"))
+    }
+}
+
+/// Where a picture's alignment point is: turning and scaling go about it, and moving lines it up
+/// with the frame's centre and other clips' points. The buttons that place it (side by side while
+/// they fit), and its coordinates on a line of their own, so the lines stay at any panel width.
+struct AlignmentControls: View {
+    @ObservedObject var store: EditorStore
+    let clip: Clip
+    /// The coordinate being typed, if any.
+    @FocusState private var typing: Coordinate?
+    enum Coordinate: Hashable { case x, y }
+    private var placing: Bool { store.anchorEditID == clip.id }
+    var body: some View {
+        VStack(alignment:.leading,spacing:6) {
+            ViewThatFits(in:.horizontal) {
+                HStack(spacing:6) { adjustButton; resetButton }
+                VStack(alignment:.leading,spacing:5) { adjustButton; resetButton }
+            }
+            coordinates
+                .onChange(of:typing) { _,now in store.textFocusChanged(now != nil) }
+                .onDisappear { if typing != nil { store.textFocusChanged(false) } }
+        }
+    }
+    /// Where the alignment point is, in whole pixels of the frame from its top-left corner (the
+    /// clip's middle until the point is moved). Typing a number moves the clip there; the arrow
+    /// keys move it a pixel at a time while its outline is up in the preview.
+    private var coordinates: some View {
+        HStack(spacing:8) { coordinate(.x); coordinate(.y) }
+    }
+    private func coordinate(_ axis: Coordinate) -> some View {
+        HStack(spacing:4) {
+            Text(verbatim:axis == .x ? "X" : "Y").font(.system(size:10,weight:.semibold)).foregroundStyle(Theme.muted)
+            TextField("",value:Binding(get:{
+                let at = store.anchorPixel(of:store.project.clips.first { $0.id == clip.id } ?? clip)
+                return axis == .x ? at.x : at.y
+            },set:{ pixel in store.placeAnchor(of:clip.id,x:axis == .x ? pixel : nil,y:axis == .y ? pixel : nil) }),format:.number.grouping(.never))
+                .textFieldStyle(.plain).multilineTextAlignment(.trailing).font(.system(size:10,design:.monospaced))
+                .frame(width:40).padding(.horizontal,6).padding(.vertical,5).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                .focused($typing,equals:axis).disabled(store.isExporting)
+                .accessibilityLabel(axis == .x ? Text("Alignment point X in pixels") : Text("Alignment point Y in pixels"))
+                .help("Where the alignment point is, in pixels from the frame's top-left corner. Type a number to move the clip there.")
+        }
     }
     private var adjustButton: some View {
         Button { withAnimation(.snappy(duration:0.2)) { store.editAnchor(clip) } } label: {
