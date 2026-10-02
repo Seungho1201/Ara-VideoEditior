@@ -125,24 +125,51 @@ struct ColorPresetRow: Equatable {
 /// One colour of a title: its clip, its three ClipStyle components, and its name, which is the
 /// inspector's label and the undo step's.
 struct ColorTarget {
-    let clipID: UUID
+    /// What the colour is: one of a title's (a clip's style, through its three components), or one
+    /// of the preview chrome's in Settings (`PreviewChromeColors`), which is no edit of the project.
+    enum Kind { case clip(UUID), chrome(PreviewChromeColors.Part) }
+    let kind: Kind
     let red: WritableKeyPath<ClipStyle,Double>, green: WritableKeyPath<ClipStyle,Double>, blue: WritableKeyPath<ClipStyle,Double>
     let name: String
-    func current(in project: Project) -> TitleColor? {
-        project.clips.first { $0.id == clipID }.map { TitleColor(red:$0.style[keyPath:red],green:$0.style[keyPath:green],blue:$0.style[keyPath:blue]) }
+    init(clipID: UUID, red: WritableKeyPath<ClipStyle,Double>, green: WritableKeyPath<ClipStyle,Double>, blue: WritableKeyPath<ClipStyle,Double>, name: String) {
+        kind = .clip(clipID); self.red = red; self.green = green; self.blue = blue; self.name = name
     }
-    /// Shows `color` on the title at once, redrawn in the preview without a rebuild, as part of the
-    /// open run of live edits (one undo step when it ends).
+    init(chrome part: PreviewChromeColors.Part, name: String) {
+        kind = .chrome(part); red = \.red; green = \.green; blue = \.blue; self.name = name
+    }
+    @MainActor func current(in project: Project) -> TitleColor? {
+        switch kind {
+        case .clip(let id): project.clips.first { $0.id == id }.map { TitleColor(red:$0.style[keyPath:red],green:$0.style[keyPath:green],blue:$0.style[keyPath:blue]) }
+        case .chrome(let part): PreviewChromeColors.shared.color(part)
+        }
+    }
+    /// Its colour as it changes, wherever from (undo, a swatch, the colour panel).
+    @MainActor func changes(in store: EditorStore) -> AnyPublisher<TitleColor?,Never> {
+        switch kind {
+        case .clip: return store.$project.map { [self] project in MainActor.assumeIsolated { current(in:project) } }.removeDuplicates().eraseToAnyPublisher()
+        case .chrome(let part):
+            // Read after the change: the publisher tells before it.
+            return PreviewChromeColors.shared.objectWillChange.receive(on:DispatchQueue.main)
+                .map { _ in MainActor.assumeIsolated { Optional(PreviewChromeColors.shared.color(part)) } }
+                .removeDuplicates().eraseToAnyPublisher()
+        }
+    }
+    /// Shows `color` at once: on the title, redrawn in the preview without a rebuild, as part of the
+    /// open run of live edits (one undo step when it ends); for the chrome, set as it is.
     @MainActor func preview(_ color: TitleColor, in store: EditorStore, closesWhenIdle: Bool = false) {
-        // Within half an 8-bit step it is the colour the title has: the colour panel sends its
-        // colour back after a colour-space round trip, and that is not an edit.
+        // Within half an 8-bit step it is the colour it has: the colour panel sends its colour back
+        // after a colour-space round trip, and that is not an edit.
         guard let now = current(in:store.project), !now.isClose(to:color) else { return }
-        store.updateStyleLive(clipID,name:name,closesWhenIdle:closesWhenIdle) { $0[keyPath:red] = color.red; $0[keyPath:green] = color.green; $0[keyPath:blue] = color.blue }
+        switch kind {
+        case .clip(let id):
+            store.updateStyleLive(id,name:name,closesWhenIdle:closesWhenIdle) { $0[keyPath:red] = color.red; $0[keyPath:green] = color.green; $0[keyPath:blue] = color.blue }
+        case .chrome(let part): PreviewChromeColors.shared.set(part,color)
+        }
     }
-    /// Puts `color` on the title as one undo step of its own, after the text just typed. Nothing
-    /// lands while an export reads the project, so nothing is recent either.
+    /// Puts `color` on the title as one undo step of its own, after the text just typed (or on the
+    /// chrome). Nothing lands on a title while an export reads the project, so nothing is recent either.
     @MainActor func pick(_ color: TitleColor, in store: EditorStore, recents: RecentColors) {
-        guard !store.isExporting else { return }
+        if case .clip = kind, store.isExporting { return }
         store.commitPendingEdits()
         preview(color,in:store)
         store.endLiveEdit()
@@ -296,7 +323,7 @@ private struct DotPress: ButtonStyle {
         self.store = store; self.target = target; self.recents = recents
         hsb = (target.current(in:store.project) ?? TitleColor(red:1,green:1,blue:1)).hsb()
         // Changes made elsewhere (undo, a swatch, the colour panel) show here, the hue kept for greys.
-        following = store.$project.map { [target] in target.current(in:$0) }.removeDuplicates().sink { [weak self] color in
+        following = target.changes(in:store).sink { [weak self] color in
             MainActor.assumeIsolated {
                 guard let self, let color, !color.isClose(to:self.shown) else { return }
                 self.hsb = color.hsb(keeping:self.hsb)

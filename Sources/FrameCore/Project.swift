@@ -60,6 +60,12 @@ public struct ClipStyle: Codable, Hashable, Sendable {
     public var x: Double = 0
     public var y: Double = 0
     public var scale: Double = 1
+    /// A picture stretched (or squeezed) across and down on top of `scale`, from the middles of its
+    /// outline's edges: 1 is as it came in.
+    public var stretchX: Double = 1
+    public var stretchY: Double = 1
+    /// How far a picture may be stretched or squeezed either way.
+    public static let stretchRange = 0.05...10.0
     public var rotation: Double = 0
     public var opacity: Double = 1
     public var brightness: Double = 0
@@ -105,7 +111,7 @@ public struct ClipStyle: Codable, Hashable, Sendable {
     public var hasShadow: Bool { shadowOpacity > 0 }
     public init() {}
     private enum CodingKeys: String, CodingKey {
-        case x, y, scale, rotation, opacity, brightness, contrast, saturation, volume, muted, text, fontName, fontSize, red, green, blue
+        case x, y, scale, stretchX, stretchY, rotation, opacity, brightness, contrast, saturation, volume, muted, text, fontName, fontSize, red, green, blue
         case outlineWidth, outlineRed, outlineGreen, outlineBlue
         case shadowOpacity, shadowDistance, shadowAngle, shadowBlur, shadowRed, shadowGreen, shadowBlue
         case anchorX, anchorY
@@ -132,6 +138,8 @@ public struct ClipStyle: Codable, Hashable, Sendable {
         shadowRed = try optional(.shadowRed,0); shadowGreen = try optional(.shadowGreen,0); shadowBlue = try optional(.shadowBlue,0)
         // Documents from before anchors: the centre.
         anchorX = try optional(.anchorX,0); anchorY = try optional(.anchorY,0)
+        // Documents from before stretching: as the picture came in.
+        stretchX = try optional(.stretchX,1); stretchY = try optional(.stretchY,1)
     }
 }
 
@@ -301,6 +309,7 @@ public struct Project: Codable, Hashable, Sendable {
                   (8...300).contains(s.fontSize), s.text.count <= 2000,
                   !s.fontName.isEmpty, s.fontName.count <= 255, !s.fontName.contains(where: \.isNewline) else { throw EditError("Invalid clip properties.") }
             guard (-2...2).contains(s.x), (-2...2).contains(s.y), (-360...360).contains(s.rotation),
+                  [s.stretchX,s.stretchY].allSatisfy({ ClipStyle.stretchRange.contains($0) }),
                   [s.red,s.green,s.blue].allSatisfy({ (0...1).contains($0) }) else { throw EditError("Invalid transform or text color.") }
             let effects = [s.outlineWidth,s.outlineRed,s.outlineGreen,s.outlineBlue,s.shadowOpacity,s.shadowDistance,s.shadowAngle,s.shadowBlur,s.shadowRed,s.shadowGreen,s.shadowBlue]
             guard effects.allSatisfy(\.isFinite), (0...20).contains(s.outlineWidth), (0...1).contains(s.shadowOpacity),

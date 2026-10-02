@@ -162,16 +162,15 @@ import FrameMedia
         moved.y = min(2,max(-2,style.y+(to.y-anchor.y)/frame.height))
         return moved
     }
-    /// An inspector text field took or gave up the keyboard. The frame keys (unmodified arrows,
-    /// which as menu equivalents beat any field) stand down while one has it; giving it up is
-    /// looked at once the next field has taken it, whichever of the two hears first.
-    func textFocusChanged(_ focused: Bool) {
-        if focused { isEditingText = true; return }
-        DispatchQueue.main.async { [weak self] in
-            let field = NSApp.keyWindow?.firstResponder as? NSTextView
-            self?.isEditingText = field?.isEditable == true
-        }
+    /// An inspector text field (by its own id) took or gave up the keyboard. The frame keys
+    /// (unmodified arrows, which as menu equivalents beat any field) stand down while one has it.
+    /// Kept per field, so the keyboard passing from one to the next reads right whichever of the
+    /// two hears first.
+    func textFocusChanged(_ focused: Bool, field: UUID) {
+        if focused { editingFields.insert(field) } else { editingFields.remove(field) }
+        if isEditingText != !editingFields.isEmpty { isEditingText = !editingFields.isEmpty }
     }
+    private var editingFields: Set<UUID> = []
     @Published var selectedGap: TimelineGap?
     /// A transition picked on the timeline; exclusive with a clip or gap selection.
     @Published var selectedTransitionID: UUID?
@@ -573,6 +572,7 @@ import FrameMedia
               instruction.layers.contains(where: { $0.clip.id == id }) else { return }
         var clip = project.clips[index]
         clip.style.x = style.x; clip.style.y = style.y; clip.style.scale = style.scale; clip.style.rotation = style.rotation
+        clip.style.stretchX = style.stretchX; clip.style.stretchY = style.stretchY
         clip.style.anchorX = style.anchorX; clip.style.anchorY = style.anchorY
         guard clip != project.clips[index] else { return }
         var candidate = project; candidate.clips[index] = clip

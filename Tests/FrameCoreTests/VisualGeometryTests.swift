@@ -221,6 +221,101 @@ final class VisualGeometryTests: XCTestCase {
         XCTAssertEqual(near(302,200).aligned(vertical:lines.vertical,horizontal:lines.horizontal,threshold:5).vertical,300,"away from the middle another point still catches")
     }
 
+    /// A picture stretched from the middle of an edge: that way alone changes, the opposite edge
+    /// stays where it was, turned clips included, and it stays within its range.
+    func testStretchingFromAnEdgeMiddleKeepsTheOppositeEdge() {
+        var style = ClipStyle(); style.scale = 0.5
+        let source = CGSize(width:1920,height:1080)
+        let plain = VisualGeometry(sourceSize:source,canvasSize:canvas,style:style)
+        let middles = plain.edgeMiddles                                   // top, right, bottom, left
+        assertPoint(middles[1],CGPoint(x:720,y:270)); assertPoint(middles[3],CGPoint(x:240,y:270))
+        // The right edge pulled 120 points right: 25 % wider, the left edge where it was.
+        let wider = plain.stretched(edge:1,to:CGPoint(x:840,y:300))
+        XCTAssertEqual(wider.stretchX,1.25,accuracy:1e-9); XCTAssertEqual(wider.stretchY,1)
+        let after = VisualGeometry(sourceSize:source,canvasSize:canvas,style:wider)
+        assertPoint(after.edgeMiddles[3],middles[3]); assertPoint(after.edgeMiddles[1],CGPoint(x:840,y:270))
+        // The top edge pulled down: shorter, the bottom edge kept.
+        let shorter = plain.stretched(edge:0,to:CGPoint(x:480,y:200))
+        XCTAssertEqual(shorter.stretchY,(405.0-200)/270,accuracy:1e-9); XCTAssertEqual(shorter.stretchX,1)
+        assertPoint(VisualGeometry(sourceSize:source,canvasSize:canvas,style:shorter).edgeMiddles[2],middles[2])
+        // Turned a quarter: the clip's right edge faces down, and pulling it down widens the clip.
+        var turned = style; turned.rotation = 90
+        let quarter = VisualGeometry(sourceSize:source,canvasSize:canvas,style:turned)
+        let held = quarter.edgeMiddles[3], grabbed = quarter.edgeMiddles[1]
+        XCTAssertEqual(grabbed.x,held.x,accuracy:1e-6); XCTAssertGreaterThan(grabbed.y,held.y)
+        let pulled = quarter.stretched(edge:1,to:CGPoint(x:grabbed.x+30,y:grabbed.y+60))
+        XCTAssertEqual(pulled.stretchX,(grabbed.y+60-held.y)/(grabbed.y-held.y),accuracy:1e-9,"only along the clip's own axis")
+        assertPoint(VisualGeometry(sourceSize:source,canvasSize:canvas,style:pulled).edgeMiddles[3],held)
+        // Past the opposite edge: the least stretch, never turned inside out.
+        XCTAssertEqual(plain.stretched(edge:1,to:CGPoint(x:100,y:270)).stretchX,ClipStyle.stretchRange.lowerBound)
+        // A stretch is saved, and a document from before reads as unstretched.
+        var saved = ClipStyle(); saved.stretchX = 1.5
+        let data = try! JSONEncoder().encode(saved)
+        XCTAssertEqual(try! JSONDecoder().decode(ClipStyle.self,from:data).stretchX,1.5)
+        var old = try! JSONSerialization.jsonObject(with:data) as! [String:Any]
+        old["stretchX"] = nil; old["stretchY"] = nil
+        let earlier = try! JSONDecoder().decode(ClipStyle.self,from:JSONSerialization.data(withJSONObject:old))
+        XCTAssertEqual(earlier.stretchX,1); XCTAssertEqual(earlier.stretchY,1)
+    }
+
+    /// Edges catch lines: the frame's edges and middle and other clips' (one near a frame line is
+    /// left out). A move takes whichever of its alignment point or edges is nearest; a stretched
+    /// edge and a resized corner land on a line exactly. A clip turned off square catches with
+    /// its alignment point alone.
+    func testEdgesCatchTheFramesAndOtherClipsLines() {
+        let lines = VisualGeometry.edgeLines(frame:canvas,others:[CGRect(x:100,y:50,width:200,height:100),CGRect(x:478,y:3,width:10,height:10)],reach:5)
+        XCTAssertEqual(lines.vertical,[0,480,960,100,200,300,488],"483 is beside the middle: left out")
+        XCTAssertEqual(lines.horizontal,[0,270,540,50,100,150,8,13],"3 is beside the frame's top: left out")
+        var style = ClipStyle(); style.scale = 0.5                         // 480 × 270 about the middle
+        let source = CGSize(width:1920,height:1080)
+        func at(_ x: Double, _ y: Double = 0) -> VisualGeometry {
+            var moved = style; moved.x = x; moved.y = y
+            return VisualGeometry(sourceSize:source,canvasSize:canvas,style:moved)
+        }
+        // Left edge 3 pt from the frame's left: it lands there.
+        let near = at((243.0-480)/960)                                     // left edge at 3
+        let moved = near.aligned(vertical:[480],horizontal:[270],edges:lines,threshold:5)
+        XCTAssertEqual(moved.vertical,0)
+        XCTAssertEqual(VisualGeometry(sourceSize:source,canvasSize:canvas,style:moved.style).bounds.minX,0,accuracy:1e-9)
+        // Turned off square: the edges catch nothing (the middle is too far).
+        var turned = near.style; turned.rotation = 30
+        XCTAssertNil(VisualGeometry(sourceSize:source,canvasSize:canvas,style:turned).aligned(vertical:[480],horizontal:[270],edges:lines,threshold:5).vertical)
+        // The right edge stretched to 3 pt short of the frame's right: it lands on it.
+        let plain = at(0)
+        let stretched = plain.stretched(edge:1,to:CGPoint(x:957,y:300),catching:lines,threshold:5)
+        XCTAssertEqual(stretched.vertical,960)
+        XCTAssertEqual(VisualGeometry(sourceSize:source,canvasSize:canvas,style:stretched.style).bounds.maxX,960,accuracy:1e-6)
+        XCTAssertEqual(VisualGeometry(sourceSize:source,canvasSize:canvas,style:stretched.style).bounds.minX,240,accuracy:1e-6,"the left edge stays")
+        // The bottom-right corner resized (along its diagonal) to just short of the frame's corner:
+        // it lands on the nearer line, keeping its shape.
+        let resized = plain.resized(corner:2,to:CGPoint(x:958,y:537),catching:lines,threshold:5)
+        XCTAssertEqual(resized.horizontal,540)
+        let grown = VisualGeometry(sourceSize:source,canvasSize:canvas,style:resized.style)
+        XCTAssertEqual(grown.bounds.maxY,540,accuracy:1e-6); XCTAssertEqual(grown.bounds.width/grown.bounds.height,16.0/9,accuracy:1e-6)
+        // Far from every line: as dragged.
+        XCTAssertNil(plain.stretched(edge:1,to:CGPoint(x:800,y:300),catching:lines,threshold:5).vertical)
+    }
+
+    /// A stretch coming back to within reach of the picture's own proportions lands on them
+    /// exactly, turned or not; elsewhere it is as dragged.
+    func testAStretchCatchesThePicturesOwnProportions() {
+        var style = ClipStyle(); style.scale = 0.5; style.stretchX = 1.3     // pulled wider earlier
+        let source = CGSize(width:1920,height:1080)
+        for rotation in [0.0,30] {
+            style.rotation = rotation
+            let wide = VisualGeometry(sourceSize:source,canvasSize:canvas,style:style)
+            let held = wide.edgeMiddles[3], grabbed = wide.edgeMiddles[1]
+            let length = hypot(grabbed.x-held.x,grabbed.y-held.y), ux = (grabbed.x-held.x)/length, uy = (grabbed.y-held.y)/length
+            // 3 pt past where the width is the height's again.
+            let even = length/1.3, near = CGPoint(x:held.x+ux*(even+3),y:held.y+uy*(even+3))
+            let caught = wide.stretched(edge:1,to:near,catching:([],[]),threshold:5)
+            XCTAssertTrue(caught.proportional,"at \(rotation)°")
+            XCTAssertEqual(caught.style.stretchX,1,accuracy:1e-9); XCTAssertEqual(caught.style.stretchY,1)
+            let far = CGPoint(x:held.x+ux*(even+20),y:held.y+uy*(even+20))
+            XCTAssertFalse(wide.stretched(edge:1,to:far,catching:([],[]),threshold:5).proportional)
+        }
+    }
+
     func testTheAlignmentPointSitsOnTheClipAndCatchesItsStops() {
         var style = ClipStyle(); style.scale = 0.5; style.rotation = 30; style.x = 0.1
         let geometry = VisualGeometry(sourceSize:CGSize(width:400,height:200),canvasSize:canvas,style:style)

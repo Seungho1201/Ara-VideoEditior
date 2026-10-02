@@ -26,6 +26,7 @@ struct PreviewSurface: NSViewRepresentable {
     private var playheadWatch: AnyCancellable?
     private var heldWatch: AnyCancellable?
     private var buildWatch: AnyCancellable?
+    private var colourWatch: AnyCancellable?
     init(store: EditorStore) {
         overlay = PreviewTransformOverlay(store:store)
         super.init(frame:.zero)
@@ -35,6 +36,10 @@ struct PreviewSurface: NSViewRepresentable {
         playerView.allowsVideoFrameAnalysis = false
         addSubview(playerView); addSubview(held); addSubview(overlay)
         heldWatch = store.heldFrame.sink { [weak self] frame in MainActor.assumeIsolated { self?.held.show(frame) } }
+        // Colours chosen in Settings show at once (after the change: the publisher tells before it).
+        colourWatch = PreviewChromeColors.shared.objectWillChange.receive(on:DispatchQueue.main).sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.chrome.needsDisplay = true }
+        }
         // A build ending no longer redraws the editor: the outline, which waits for the new player
         // item's pictures, looks again here (after the change; `$active` tells before it).
         buildWatch = store.building.$active.dropFirst().filter { !$0 }.receive(on:DispatchQueue.main).sink { [weak self] _ in
@@ -96,29 +101,51 @@ struct PreviewSurface: NSViewRepresentable {
         let geometry: VisualGeometry
         let corner: Int?
         let canvas: CGRect
+        /// Stretching from the middle of this edge (`VisualGeometry.edgeMiddles`).
+        var edge: Int? = nil
         var rotating = false
         /// Placing the alignment point rather than moving the clip.
         var anchoring = false
         /// The lines a move lines up with (`VisualGeometry.alignmentLines`).
         var lines: (vertical: [CGFloat], horizontal: [CGFloat]) = ([],[])
+        /// The lines its edges catch on (`VisualGeometry.edgeLines`).
+        var edges: (vertical: [CGFloat], horizontal: [CGFloat]) = ([],[])
     }
     private var drag: Drag?
     private var anchorFeedback = CatchFeedback<Int>()
     /// The centre guides a move is on right now (x of a vertical line, y of a horizontal one).
     private(set) var guides: (vertical: CGFloat?, horizontal: CGFloat?) = (nil,nil)
     private var verticalFeedback = CatchFeedback<CGFloat>(), horizontalFeedback = CatchFeedback<CGFloat>()
+    /// A stretch coming back to the picture's own proportions.
+    private var proportionFeedback = CatchFeedback<Bool>()
+    /// A stretch on the picture's own proportions right now: its outline is drawn in that colour.
+    private(set) var proportional = false
     /// Kept at the AppKit boundary so tests can capture cues without vibrating hardware.
     var performHaptic: (NSHapticFeedbackManager.FeedbackPattern) -> Void = { pattern in
         NSHapticFeedbackManager.defaultPerformer.perform(pattern,performanceTime:.now)
     }
-    static let guideColor = NSColor.systemYellow
-    static let centreColor = NSColor.systemRed
+    /// The chrome's colours, as chosen in Settings ▸ Preview.
+    static var guideColor: NSColor { PreviewChromeColors.shared.nsColor(.guide) }
+    static var centreColor: NSColor { PreviewChromeColors.shared.nsColor(.point) }
+    static var outlineColor: NSColor { PreviewChromeColors.shared.nsColor(.outline) }
+    static var proportionColor: NSColor { PreviewChromeColors.shared.nsColor(.proportion) }
+    /// The outline's and handles' colour now: green while a stretch sits on its own proportions.
+    var frameColor: NSColor { proportional ? Self.proportionColor : Self.outlineColor }
     /// How solid the centre is drawn while transforming (30% less than whole).
     static let centreOpacity: CGFloat = 0.7
     /// Points a moving clip's alignment point can line up with: the frame's centre, and the
     /// alignment point of every other clip showing now (its linked partner aside).
     /// How near a move's alignment point catches a line, in points of the preview.
     static let alignmentReach: CGFloat = 5
+    /// The frame's edges and middle and the boxes of the other clips showing, for edges to catch.
+    private func edgeLines(excluding clip: Clip, in canvas: CGRect) -> (vertical: [CGFloat], horizontal: [CGFloat]) {
+        guard let store else { return ([],[]) }
+        let own = Set(store.project.group(for:clip.id).map(\.id))
+        let others = store.project.clips.filter { other in
+            other.lane.isVideo && !own.contains(other.id) && other.style.opacity > 0 && store.playhead >= other.start && store.playhead < other.end
+        }.compactMap { geometry(for:$0)?.bounds }
+        return VisualGeometry.edgeLines(frame:canvas.size,others:others,reach:Self.alignmentReach)
+    }
     private func alignmentLines(excluding clip: Clip, in canvas: CGRect) -> (vertical: [CGFloat], horizontal: [CGFloat]) {
         guard let store else { return ([],[]) }
         let own = Set(store.project.group(for:clip.id).map(\.id)), size = canvas.size
@@ -144,7 +171,7 @@ struct PreviewSurface: NSViewRepresentable {
         clipsToBounds = true
         setAccessibilityElement(true); setAccessibilityRole(.group)
         setAccessibilityLabel(String(localized:"Preview transform canvas"))
-        toolTip = String(localized:"Double-click a clip to transform it. Drag to move; corners, pinch or Option-scroll to resize; the top handle rotates (Shift: 15° steps). Turning, pinch and Option-scroll go about the alignment point; move it with Adjust alignment point in the inspector. Return or Esc to finish.")
+        toolTip = String(localized:"Double-click a clip to transform it. Drag to move; corners, pinch or Option-scroll to resize; a picture's edge middles stretch it one way; the top handle rotates (Shift: 15° steps). Turning, pinch and Option-scroll go about the alignment point; move it with Adjust alignment point in the inspector. Return or Esc to finish.")
         ghost.onReady = { [weak self] in self?.chrome?.needsDisplay = true }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -183,7 +210,8 @@ struct PreviewSurface: NSViewRepresentable {
         }
         setAccessibilityValue(activeClip.map { clip in
             store?.anchorEditID == clip.id ? String(localized:"Placing the alignment point of \(clip.name). Click or drag to place it; Return or Esc to finish.")
-                                           : String(localized:"Transforming \(clip.name). Drag to move; corner handles resize; the top handle rotates.")
+                                           : clip.kind == .text ? String(localized:"Transforming \(clip.name). Drag to move; corner handles resize; the top handle rotates.")
+                                           : String(localized:"Transforming \(clip.name). Drag to move; corner handles resize; edge handles stretch; the top handle rotates.")
         } ?? String(localized:"Double-click a visible clip to transform."))
     }
     // Everything visible is drawn by the chrome above the whole window; see drawChrome(in:).
@@ -198,10 +226,34 @@ struct PreviewSurface: NSViewRepresentable {
         // off-canvas part is a picture, and the transport, inspector and timeline under it keep working.
         // While the alignment point is placed the knob is hidden, and takes nothing.
         let knob = store?.anchorEditID != clip.id && isOnRotationHandle(point,geometry)
-        if geometry.corners.contains(where: { hypot($0.x-point.x,$0.y-point.y) <= 12 }) || geometry.isNearOutline(point) || knob { return true }
+        if (geometry.corners+edgeHandles(clip,geometry)).contains(where: { hypot($0.x-point.x,$0.y-point.y) <= 12 }) || geometry.isNearOutline(point) || knob { return true }
         return bounds.contains(location) && geometry.contains(point)
     }
     private static let handleRadius: CGFloat = 11
+    /// The handles in the middles of the outline's edges, which stretch a picture one way. A title
+    /// has none: its letters only scale.
+    private func edgeHandles(_ clip: Clip, _ geometry: VisualGeometry) -> [CGPoint] { clip.kind == .text ? [] : geometry.edgeMiddles }
+    /// The cursor for stretching from `edge`: across or down, whichever the turned edge is nearer.
+    private static func stretchCursor(_ geometry: VisualGeometry, _ edge: Int) -> NSCursor {
+        let middles = geometry.edgeMiddles, a = middles[edge], b = middles[(edge+2)%4]
+        return abs(a.x-b.x) >= abs(a.y-b.y) ? .resizeLeftRight : .resizeUpDown
+    }
+    /// The cursor for resizing from `corner`: the double arrow along the diagonal it pulls on (the
+    /// clip's own, turned with it), whichever of the four ways (two diagonals, across, down) it is nearest.
+    static func cornerCursor(_ geometry: VisualGeometry, _ corner: Int) -> NSCursor {
+        let corners = geometry.corners, p = corners[corner]
+        func away(_ q: CGPoint) -> CGVector {
+            let dx = p.x-q.x, dy = p.y-q.y, length = hypot(dx,dy)
+            return length > 0 ? CGVector(dx:dx/length,dy:dy/length) : .zero
+        }
+        let a = away(corners[(corner+1)%4]), b = away(corners[(corner+3)%4])
+        switch Int((atan2(a.dy+b.dy,a.dx+b.dx)/(.pi/4)).rounded()) & 3 {   // y down
+        case 0: return .resizeLeftRight
+        case 2: return .resizeUpDown
+        case 1: return .frameResize(position:.bottomRight,directions:.all)  // ↖ ↘
+        default: return .frameResize(position:.topRight,directions:.all)    // ↙ ↗
+        }
+    }
     /// Where the knob may sit, in canvas space: the viewer, the PROGRAM title strip above it and
     /// the padding beside it. Not below it: the transport buttons are there, and a knob over
     /// them would take their clicks.
@@ -212,10 +264,13 @@ struct PreviewSurface: NSViewRepresentable {
     private func rotationHandle(_ geometry: VisualGeometry) -> (edge: CGPoint, knob: CGPoint) {
         geometry.rotationHandle(within:rotationHandleArea)
     }
-    /// A knob with nowhere allowed to go (a clip far bigger than the frame) is not shown.
+    /// A knob with nowhere allowed to go (a clip far bigger than the frame) is not shown, nor
+    /// while an edge stretches the clip.
     private func showsRotationHandle(_ geometry: VisualGeometry) -> Bool {
-        rotationHandleArea.contains(rotationHandle(geometry).knob)
+        !isStretching && rotationHandleArea.contains(rotationHandle(geometry).knob)
     }
+    /// An edge's middle is being dragged.
+    var isStretching: Bool { drag?.edge != nil }
     /// The active clip's rotation handle in this view's coordinates, when it shows.
     func activeRotationHandle() -> (edge: CGPoint, knob: CGPoint)? {
         guard let clip = activeClip, let geometry = geometry(for:clip), showsRotationHandle(geometry) else { return nil }
@@ -298,10 +353,18 @@ struct PreviewSurface: NSViewRepresentable {
         let points = geometry.corners.map { chrome.convert(CGPoint(x:$0.x+canvas.minX,y:$0.y+canvas.minY),from:self) }
         let outline = NSBezierPath(); outline.move(to:points[0]); points.dropFirst().forEach { outline.line(to:$0) }; outline.close()
         NSColor.black.withAlphaComponent(0.6).setStroke(); outline.lineWidth = 3.5; outline.stroke()
-        Theme.accentNS.setStroke(); outline.lineWidth = 1.5; outline.stroke()
+        frameColor.setStroke(); outline.lineWidth = 1.5; outline.stroke()
         for point in points {
             let handle = NSBezierPath(roundedRect:CGRect(x:point.x-5,y:point.y-5,width:10,height:10),xRadius:2,yRadius:2)
-            Theme.accentNS.setFill(); handle.fill(); NSColor.black.withAlphaComponent(0.65).setStroke(); handle.lineWidth = 1; handle.stroke()
+            frameColor.setFill(); handle.fill(); NSColor.black.withAlphaComponent(0.65).setStroke(); handle.lineWidth = 1; handle.stroke()
+        }
+        // The stretch handles, rounder than the corners', which scale.
+        if let clip = activeClip {
+            for middle in edgeHandles(clip,geometry) {
+                let point = chrome.convert(CGPoint(x:middle.x+canvas.minX,y:middle.y+canvas.minY),from:self)
+                let handle = NSBezierPath(ovalIn:CGRect(x:point.x-4.5,y:point.y-4.5,width:9,height:9))
+                frameColor.setFill(); handle.fill(); NSColor.black.withAlphaComponent(0.65).setStroke(); handle.lineWidth = 1; handle.stroke()
+            }
         }
         // 4. The centre, as a red crosshair in a ring: yellow while it sits on a guide.
         let placing = store.anchorEditID == clip.id
@@ -334,9 +397,9 @@ struct PreviewSurface: NSViewRepresentable {
         let knob = chrome.convert(CGPoint(x:rotation.knob.x+canvas.minX,y:rotation.knob.y+canvas.minY),from:self)
         let stem = NSBezierPath(); stem.move(to:edge); stem.line(to:knob)
         NSColor.black.withAlphaComponent(0.6).setStroke(); stem.lineWidth = 3.5; stem.stroke()
-        Theme.accentNS.setStroke(); stem.lineWidth = 1.5; stem.stroke()
+        frameColor.setStroke(); stem.lineWidth = 1.5; stem.stroke()
         let r: CGFloat = 8, disc = NSBezierPath(ovalIn:CGRect(x:knob.x-r,y:knob.y-r,width:2*r,height:2*r))
-        Theme.accentNS.setFill(); disc.fill(); NSColor.black.withAlphaComponent(0.65).setStroke(); disc.lineWidth = 1; disc.stroke()
+        frameColor.setFill(); disc.fill(); NSColor.black.withAlphaComponent(0.65).setStroke(); disc.lineWidth = 1; disc.stroke()
         if let glyph = Self.rotateGlyph {
             let size = glyph.size
             glyph.draw(in:CGRect(x:knob.x-size.width/2,y:knob.y-size.height/2,width:size.width,height:size.height),from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
@@ -373,11 +436,16 @@ struct PreviewSurface: NSViewRepresentable {
                 if !rect.isEmpty { chrome.addCursorRect(rect,cursor:hand) }
             }
         }
-        for p in points {
+        for (corner,p) in points.enumerated() {
             let rect = CGRect(x:p.x-9,y:p.y-9,width:18,height:18).intersection(chrome.bounds)
-            if !rect.isEmpty { chrome.addCursorRect(rect,cursor:.crosshair) }
+            if !rect.isEmpty { chrome.addCursorRect(rect,cursor:placing ? .crosshair : Self.cornerCursor(geometry,corner)) }
         }
         guard !placing else { return }
+        for (edge,middle) in edgeHandles(clip,geometry).enumerated() {
+            let p = chrome.convert(CGPoint(x:middle.x+canvas.minX,y:middle.y+canvas.minY),from:self)
+            let rect = CGRect(x:p.x-9,y:p.y-9,width:18,height:18).intersection(chrome.bounds)
+            if !rect.isEmpty { chrome.addCursorRect(rect,cursor:Self.stretchCursor(geometry,edge)) }
+        }
         for rect in rotationCursorRects(geometry) {
             let r = chrome.convert(rect,from:self).intersection(chrome.bounds)
             if !r.isEmpty { chrome.addCursorRect(r,cursor:Self.rotateCursor) }
@@ -388,13 +456,17 @@ struct PreviewSurface: NSViewRepresentable {
         if store?.anchorEditID == clip.id { addCursorRect(bounds,cursor:.crosshair); return }
         addCursorRect(bounds,cursor:.openHand)
         if let clip = activeClip, let geometry = geometry(for:clip) {
-            for p in geometry.corners {
+            for (corner,p) in geometry.corners.enumerated() {
                 let rect = CGRect(x:p.x+canvas.minX-9,y:p.y+canvas.minY-9,width:18,height:18).intersection(bounds)
-                if !rect.isEmpty { addCursorRect(rect,cursor:.crosshair) }
+                if !rect.isEmpty { addCursorRect(rect,cursor:Self.cornerCursor(geometry,corner)) }
             }
             for rect in rotationCursorRects(geometry) {
                 let r = rect.intersection(bounds)
                 if !r.isEmpty { addCursorRect(r,cursor:Self.rotateCursor) }
+            }
+            for (edge,middle) in edgeHandles(clip,geometry).enumerated() {
+                let rect = CGRect(x:middle.x+canvas.minX-9,y:middle.y+canvas.minY-9,width:18,height:18).intersection(bounds)
+                if !rect.isEmpty { addCursorRect(rect,cursor:Self.stretchCursor(geometry,edge)) }
             }
         }
     }
@@ -427,15 +499,22 @@ struct PreviewSurface: NSViewRepresentable {
             anchorFeedback = CatchFeedback()
             placeAnchor(drag!,at:point,event:event); return
         }
-        let rotating = isOnRotationHandle(point,geometry)
-        let corner = rotating ? nil : geometry.corners.firstIndex { hypot($0.x-point.x,$0.y-point.y) <= 12 }
-        guard rotating || corner != nil || geometry.contains(point) || geometry.isNearOutline(point) else { store.previewTransformID = nil; refresh(); return }
+        // The knob first, then a corner, then an edge's middle (a small clip brings them within
+        // reach of each other), then the knob's stem: the top edge's middle is where the stem starts.
+        let knob = showsRotationHandle(geometry) && { let k = rotationHandle(geometry).knob; return hypot(k.x-point.x,k.y-point.y) <= Self.handleRadius }()
+        let corner = knob ? nil : geometry.corners.firstIndex { hypot($0.x-point.x,$0.y-point.y) <= 12 }
+        let edge = knob || corner != nil ? nil : edgeHandles(clip,geometry).firstIndex { hypot($0.x-point.x,$0.y-point.y) <= 12 }
+        let rotating = knob || (corner == nil && edge == nil && isOnRotationHandle(point,geometry))
+        guard rotating || corner != nil || edge != nil || geometry.contains(point) || geometry.isNearOutline(point) else { store.previewTransformID = nil; refresh(); return }
         finishDrag(); store.pause(); store.beginInteraction()
-        drag = Drag(id:clip.id,origin:point,geometry:geometry,corner:corner,canvas:canvas,rotating:rotating,
-                    lines:alignmentLines(excluding:clip,in:canvas))
-        verticalFeedback = CatchFeedback(); horizontalFeedback = CatchFeedback()
-        store.status = rotating ? String(localized:"Rotating clip in preview") : corner == nil ? String(localized:"Moving clip in preview") : String(localized:"Resizing clip in preview")
-        (rotating ? Self.rotateCursor : NSCursor.closedHand).set()
+        drag = Drag(id:clip.id,origin:point,geometry:geometry,corner:corner,canvas:canvas,edge:edge,rotating:rotating,
+                    lines:alignmentLines(excluding:clip,in:canvas),edges:edgeLines(excluding:clip,in:canvas))
+        verticalFeedback = CatchFeedback(); horizontalFeedback = CatchFeedback(); proportionFeedback = CatchFeedback()
+        store.status = rotating ? String(localized:"Rotating clip in preview") : edge != nil ? String(localized:"Stretching clip in preview")
+            : corner == nil ? String(localized:"Moving clip in preview") : String(localized:"Resizing clip in preview")
+        (rotating ? Self.rotateCursor : edge.map { Self.stretchCursor(geometry,$0) } ?? corner.map { Self.cornerCursor(geometry,$0) } ?? NSCursor.closedHand).set()
+        // Stretching, the rotation knob steps aside until the drag ends.
+        if edge != nil { chrome?.needsDisplay = true }
     }
     override func mouseDragged(with event: NSEvent) {
         guard let drag, let store, activeClip?.id == drag.id, !dropStaleGesture() else { return }
@@ -450,22 +529,41 @@ struct PreviewSurface: NSViewRepresentable {
             store.status = String(format:String(localized:"Rotation %.0f°"),style.rotation)
             return
         }
-        var style = drag.corner.map { drag.geometry.resized(corner:$0,to:point) }
-            ?? drag.geometry.moved(by:CGSize(width:point.x-drag.origin.x,height:point.y-drag.origin.y))
-        guides = (nil,nil)
-        // A move lines the clip's alignment point up with the frame's centre or another clip's
-        // point, within 5 pt: a yellow guide shows it, and a tick is felt. Shift during the drag,
+        // Snapping lines things up within 5 pt, with a yellow guide and a tick: a move's alignment
+        // point (or, square to the frame, its edges) with the frame's middle and edges and the other
+        // clips'; a resized corner or a stretched edge with those lines too. Shift during the drag,
         // or snapping off, lets go.
-        if drag.corner == nil, store.snapping, !event.modifierFlags.contains(.shift) {
-            let moving = VisualGeometry(sourceSize:drag.geometry.sourceSize,canvasSize:drag.geometry.canvasSize,style:style,isText:drag.geometry.isText)
-            let aligned = moving.aligned(vertical:drag.lines.vertical,horizontal:drag.lines.horizontal,threshold:Self.alignmentReach)
-            style = aligned.style; guides = (aligned.vertical,aligned.horizontal)
+        let snaps = store.snapping && !event.modifierFlags.contains(.shift)
+        guides = (nil,nil); proportional = false
+        var style: ClipStyle
+        if let edge = drag.edge {
+            if snaps {
+                let caught = drag.geometry.stretched(edge:edge,to:point,catching:drag.edges,threshold:Self.alignmentReach)
+                style = caught.style; guides = (caught.vertical,caught.horizontal); proportional = caught.proportional
+            } else { style = drag.geometry.stretched(edge:edge,to:point) }
+        } else if let corner = drag.corner {
+            if snaps {
+                let caught = drag.geometry.resized(corner:corner,to:point,catching:drag.edges,threshold:Self.alignmentReach)
+                style = caught.style; guides = (caught.vertical,caught.horizontal)
+            } else { style = drag.geometry.resized(corner:corner,to:point) }
+        } else {
+            style = drag.geometry.moved(by:CGSize(width:point.x-drag.origin.x,height:point.y-drag.origin.y))
+            if snaps {
+                let moving = VisualGeometry(sourceSize:drag.geometry.sourceSize,canvasSize:drag.geometry.canvasSize,style:style,isText:drag.geometry.isText)
+                let aligned = moving.aligned(vertical:drag.lines.vertical,horizontal:drag.lines.horizontal,edges:drag.edges,threshold:Self.alignmentReach)
+                style = aligned.style; guides = (aligned.vertical,aligned.horizontal)
+            }
         }
         let caught = verticalFeedback.cue(for:guides.vertical,at:event.timestamp,enabled:store.haptics(.alignment))
         let caughtAcross = horizontalFeedback.cue(for:guides.horizontal,at:event.timestamp,enabled:store.haptics(.alignment))
-        if caught || caughtAcross { performHaptic(.alignment) }
+        // Back to its own proportions while stretching: a tick too.
+        let even = proportionFeedback.cue(for:proportional ? true : nil,at:event.timestamp,enabled:store.haptics(.alignment))
+        if caught || caughtAcross || even { performHaptic(.alignment) }
         apply(drag.id,style)
-        store.status = String(format:String(localized:"Position %.0f%%, %.0f%% · Scale %.0f%%"),style.x*100,style.y*100,style.scale*100)
+        store.status = drag.edge != nil
+            ? (proportional ? String(format:String(localized:"Width %.0f%% · Height %.0f%% · Its own proportions"),style.stretchX*100,style.stretchY*100)
+                            : String(format:String(localized:"Width %.0f%% · Height %.0f%%"),style.stretchX*100,style.stretchY*100))
+            : String(format:String(localized:"Position %.0f%%, %.0f%% · Scale %.0f%%"),style.x*100,style.y*100,style.scale*100)
     }
     override func mouseUp(with event: NSEvent) { finishDrag() }
     /// One step of a drag or pinch.
@@ -493,7 +591,7 @@ struct PreviewSurface: NSViewRepresentable {
     func finishDrag() {
         guard drag != nil || zoomOrigin != nil else { return }
         zoomEndTask?.cancel(); zoomEndTask = nil
-        drag = nil; zoomOrigin = nil; guides = (nil,nil); store?.endInteraction(); window?.invalidateCursorRects(for:self)
+        drag = nil; zoomOrigin = nil; guides = (nil,nil); proportional = false; store?.endInteraction(); window?.invalidateCursorRects(for:self)
         chrome?.needsDisplay = true; if let chrome { chrome.window?.invalidateCursorRects(for:chrome) }
     }
     override func magnify(with event: NSEvent) { scaleBy(max(0.1,1+event.magnification)) }

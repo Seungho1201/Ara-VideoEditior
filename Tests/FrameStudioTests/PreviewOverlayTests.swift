@@ -36,7 +36,7 @@ import FrameCore
         XCTAssertFalse(store.isBuilding)
     }
     /// A built store with these clips, a private pasteboard, and the app's timeline settings put back afterwards.
-    private func withStore(_ clips: [Clip], _ check: (EditorStore) async throws -> Void) async throws {
+    private func withStore(_ clips: [Clip], _ check: @MainActor (EditorStore) async throws -> Void) async throws {
         _ = NSApplication.shared
         let saved = Self.keys.reduce(into:[String:Any]()) { values, key in values[key] = UserDefaults.standard.object(forKey:key) }
         let store = EditorStore()
@@ -54,7 +54,7 @@ import FrameCore
         try await check(store)
     }
     /// The first clip selected and transforming in an 800 × 450 overlay (the canvas fills it).
-    private func withOverlay(_ clips: [Clip], _ check: (EditorStore, PreviewTransformOverlay) async throws -> Void) async throws {
+    private func withOverlay(_ clips: [Clip], _ check: @MainActor (EditorStore, PreviewTransformOverlay) async throws -> Void) async throws {
         try await withStore(clips) { store in
             let window = OverlayTestWindow(contentRect:NSRect(x:0,y:0,width:800,height:450),styleMask:.borderless,backing:.buffered,defer:false)
             window.isReleasedWhenClosed = false
@@ -69,7 +69,7 @@ import FrameCore
     }
     /// The whole preview (its chrome in the window above it), 800 × 450 at (150, 120) in a
     /// 1100 × 700 backdrop, with the first clip selected and transforming.
-    private func withPreview(_ clips: [Clip], _ check: (EditorStore, PreviewEditorView, NSView) async throws -> Void) async throws {
+    private func withPreview(_ clips: [Clip], _ check: @MainActor (EditorStore, PreviewEditorView, NSView) async throws -> Void) async throws {
         try await withStore(clips) { store in
             let window = OverlayTestWindow(contentRect:NSRect(x:0,y:0,width:1100,height:700),styleMask:.borderless,backing:.buffered,defer:false)
             window.isReleasedWhenClosed = false
@@ -448,5 +448,135 @@ final class PreviewImportDuringADragTests: ProjectTestCase {
         store.undo(); XCTAssertTrue(store.project.media.isEmpty)
         store.redo(); store.redo()
         XCTAssertEqual(store.project.media.count,1); XCTAssertEqual(store.project.clips[0].style.x,0.2,accuracy:0.01)
+    }
+}
+
+/// The outline of a picture has a handle in the middle of each edge: dragging one stretches the
+/// picture that way alone, the opposite edge staying put, as one undo step. A title's outline has
+/// none: there the edge is the outline, which moves the title.
+final class PreviewStretchTests: ProjectTestCase {
+    func testAPicturesEdgeMiddlesStretchIt() async throws {
+        let still = try makeStill("Wide.png",width:64,height:36)
+        let store = makeStore()
+        store.pasteboard = NSPasteboard(name:.init("ara-preview-stretch-\(UUID().uuidString)"))
+        defer { store.pause(); store.pasteboard.releaseGlobally() }
+        store.importFiles([still])
+        let imported = await eventually { !store.isImporting && !store.project.media.isEmpty }
+        XCTAssertTrue(imported)
+        let media = try XCTUnwrap(store.project.media.first)
+        var picture = Clip(mediaID:media.id,name:"Wide",kind:.image,lane:.v1,start:.zero,duration:.init(seconds:5)); picture.style.scale = 0.5
+        var words = Clip(name:"T",kind:.text,lane:.v2,start:.zero,duration:.init(seconds:5)); words.style.text = "Words"; words.style.x = 0.3
+        XCTAssertTrue(store.edit("Fixture") { $0.videoTrackCount = 2; $0.clips = [picture,words] },store.message ?? "")
+        let built = await eventually { !store.isBuilding && store.player.currentItem != nil }
+        XCTAssertTrue(built)
+        let window = OverlayTestWindow(contentRect:NSRect(x:0,y:0,width:800,height:450),styleMask:.borderless,backing:.buffered,defer:false)
+        window.isReleasedWhenClosed = false
+        let overlay = PreviewTransformOverlay(store:store)
+        overlay.frame = NSRect(x:0,y:0,width:800,height:450); overlay.performHaptic = { _ in }
+        window.contentView = overlay
+        defer { overlay.finishDrag(); window.contentView = nil; window.close() }
+        func mouse(_ type: NSEvent.EventType, _ point: CGPoint) -> NSEvent {
+            NSEvent.mouseEvent(with:type,location:overlay.convert(point,to:nil),modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                               windowNumber:window.windowNumber,context:nil,eventNumber:0,clickCount:1,pressure:1)!
+        }
+        func style(_ id: UUID) -> ClipStyle { store.project.clips.first { $0.id == id }!.style }
+        func drag(_ from: CGPoint, by dx: CGFloat) {
+            overlay.mouseDown(with:mouse(.leftMouseDown,from))
+            overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:from.x+dx/2,y:from.y+15)))
+            overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:from.x+dx,y:from.y+15)))
+            overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:from.x+dx,y:from.y+15)))
+        }
+        store.selectedClipID = picture.id; store.previewTransformID = picture.id
+        // 16:9 at half size in an 800 × 450 canvas: 400 × 225 about the middle. The right edge's
+        // middle pulled 100 points right (and a little down, which counts for nothing).
+        drag(CGPoint(x:600,y:225),by:100)
+        XCTAssertEqual(style(picture.id).stretchX,1.25,accuracy:1e-9); XCTAssertEqual(style(picture.id).stretchY,1)
+        let stretched = VisualGeometry(sourceSize:CGSize(width:64,height:36),canvasSize:CGSize(width:800,height:450),style:style(picture.id))
+        XCTAssertEqual(stretched.edgeMiddles[3].x,200,accuracy:1e-6,"the left edge stays")
+        XCTAssertEqual(store.undoName,"Adjust clip")
+        store.undo()
+        XCTAssertEqual(style(picture.id).stretchX,1); XCTAssertEqual(style(picture.id).x,0,"one step")
+        // Stretched again, then let go 3 pt from its own proportions: back on them, with a tick.
+        let rebuiltForEven = await eventually { !store.isBuilding }
+        XCTAssertTrue(rebuiltForEven)
+        var cues: [NSHapticFeedbackManager.FeedbackPattern] = []
+        overlay.performHaptic = { cues.append($0) }
+        drag(CGPoint(x:600,y:225),by:100)                                  // 1.25 wide
+        let wideAgain = await eventually { !store.isBuilding }
+        XCTAssertTrue(wideAgain)
+        cues = []
+        overlay.mouseDown(with:mouse(.leftMouseDown,CGPoint(x:700,y:225)))
+        XCTAssertTrue(overlay.frameColor === PreviewTransformOverlay.outlineColor)
+        overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:603,y:225)))
+        XCTAssertTrue(overlay.proportional); XCTAssertTrue(overlay.frameColor === PreviewTransformOverlay.proportionColor,"its outline green while there")
+        overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:620,y:225)))
+        XCTAssertFalse(overlay.proportional,"off them, the outline's own colour"); XCTAssertTrue(overlay.frameColor === PreviewTransformOverlay.outlineColor)
+        overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:603,y:225)))
+        overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:603,y:225)))
+        XCTAssertFalse(overlay.proportional,"let go: no longer stretching")
+        XCTAssertEqual(style(picture.id).stretchX,1,accuracy:1e-9,"its own proportions again")
+        XCTAssertEqual(cues,[.alignment],"one tick: back on them within a moment is not another")
+        overlay.performHaptic = { _ in }
+        store.undo(); store.undo()
+        // The top edge's middle, where the rotation knob's stem starts, stretches too: down here, shorter.
+        let rebuiltOnce = await eventually { !store.isBuilding }
+        XCTAssertTrue(rebuiltOnce)
+        overlay.mouseDown(with:mouse(.leftMouseDown,CGPoint(x:400,y:112.5)))
+        overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:400,y:150)))
+        overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:400,y:150)))
+        XCTAssertEqual(style(picture.id).stretchY,(337.5-150)/225,accuracy:1e-9); XCTAssertEqual(style(picture.id).rotation,0,"not turned")
+        store.undo()
+        // Snapping: the right edge let go 3 pt short of the frame's right lands on it, with its guide;
+        // with Shift it stays where it was let go.
+        let rebuiltTwice = await eventually { !store.isBuilding }
+        XCTAssertTrue(rebuiltTwice)
+        store.snapping = true
+        XCTAssertNotNil(overlay.activeRotationHandle())
+        overlay.mouseDown(with:mouse(.leftMouseDown,CGPoint(x:600,y:225)))
+        XCTAssertTrue(overlay.isStretching); XCTAssertNil(overlay.activeRotationHandle(),"the rotation knob steps aside while stretching")
+        overlay.mouseDragged(with:mouse(.leftMouseDragged,CGPoint(x:797,y:225)))
+        XCTAssertEqual(overlay.guides.vertical,800); XCTAssertNil(overlay.activeRotationHandle())
+        overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:797,y:225)))
+        XCTAssertFalse(overlay.isStretching); XCTAssertNotNil(overlay.activeRotationHandle(),"and is back once let go")
+        XCTAssertEqual(style(picture.id).stretchX,1.5,accuracy:1e-9,"from 200 to the frame's edge at 800")
+        store.undo()
+        let rebuiltThrice = await eventually { !store.isBuilding }
+        XCTAssertTrue(rebuiltThrice)
+        overlay.mouseDown(with:mouse(.leftMouseDown,CGPoint(x:600,y:225)))
+        overlay.mouseDragged(with:NSEvent.mouseEvent(with:.leftMouseDragged,location:overlay.convert(CGPoint(x:797,y:225),to:nil),modifierFlags:[.shift],
+                                                     timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,eventNumber:0,clickCount:1,pressure:1)!)
+        XCTAssertNil(overlay.guides.vertical)
+        overlay.mouseUp(with:mouse(.leftMouseUp,CGPoint(x:797,y:225)))
+        XCTAssertEqual(style(picture.id).stretchX,597.0/400,accuracy:1e-9,"Shift: no snapping")
+        store.undo()
+        // A title: its outline's edge middle moves it, and it is never stretched.
+        let rebuilt = await eventually { !store.isBuilding }
+        XCTAssertTrue(rebuilt)
+        store.selectedClipID = words.id; store.previewTransformID = words.id
+        let size = try XCTUnwrap(store.previewSourceSize(for:store.project.clips.first { $0.id == words.id }!))
+        let edge = VisualGeometry(sourceSize:size,canvasSize:CGSize(width:800,height:450),style:style(words.id),isText:true).edgeMiddles[1]
+        drag(edge,by:40)
+        XCTAssertEqual(style(words.id).stretchX,1)
+        XCTAssertGreaterThan(style(words.id).x,0.3,"moved instead")
+    }
+}
+
+/// A corner's pointer is the double arrow along the diagonal it pulls on, turned with the clip.
+@MainActor final class PreviewCornerCursorTests: XCTestCase {
+    func testCornersShowTheDiagonalTheyPullOn() {
+        let falling = NSCursor.frameResize(position:.bottomRight,directions:.all), rising = NSCursor.frameResize(position:.topRight,directions:.all)
+        func cursors(rotation: Double = 0, stretchX: Double = 1) -> [NSCursor] {
+            var style = ClipStyle(); style.scale = 0.5; style.rotation = rotation; style.stretchX = stretchX
+            let geometry = VisualGeometry(sourceSize:CGSize(width:64,height:36),canvasSize:CGSize(width:800,height:450),style:style)
+            return (0..<4).map { PreviewTransformOverlay.cornerCursor(geometry,$0) }
+        }
+        func same(_ a: [NSCursor], _ b: [NSCursor]) -> Bool { zip(a,b).allSatisfy(===) }
+        // The corners from the top left, clockwise: ↖↘, ↗↙, ↖↘, ↗↙.
+        XCTAssertTrue(same(cursors(),[falling,rising,falling,rising]))
+        XCTAssertTrue(same(cursors(stretchX:6),[falling,rising,falling,rising]),"a long, thin clip still pulls on the diagonal")
+        XCTAssertTrue(same(cursors(rotation:90),[rising,falling,rising,falling]),"turned a right angle, the other diagonal")
+        // Turned 45°, a corner pulls straight across or down.
+        XCTAssertTrue(same(cursors(rotation:45),[NSCursor.resizeLeftRight,NSCursor.resizeUpDown,NSCursor.resizeLeftRight,NSCursor.resizeUpDown])
+                      || same(cursors(rotation:45),[NSCursor.resizeUpDown,NSCursor.resizeLeftRight,NSCursor.resizeUpDown,NSCursor.resizeLeftRight]))
     }
 }

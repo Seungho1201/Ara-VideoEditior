@@ -10,7 +10,7 @@ import FrameCore
 
 /// Return (or Enter) finishes a transform in the preview and keeps it; Esc still cancels a drag.
 final class PreviewTransformKeyTests: XCTestCase {
-    @MainActor private func withOverlay(_ check: (EditorStore, PreviewTransformOverlay, Clip) async throws -> Void) async throws {
+    @MainActor private func withOverlay(_ check: @MainActor (EditorStore, PreviewTransformOverlay, Clip) async throws -> Void) async throws {
         _ = NSApplication.shared
         let store = EditorStore()
         var title = Clip(name:"Title",kind:.text,lane:.v1,start:.zero,duration:.init(seconds:5)); title.style.text = "Return"

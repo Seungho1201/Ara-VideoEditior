@@ -16,7 +16,7 @@ public struct VisualGeometry {
         let fit = isText ? min(canvasSize.width,canvasSize.height) / 1080 : min(canvasSize.width/sourceSize.width,canvasSize.height/sourceSize.height)
         let factor = fit * style.scale
         return CGAffineTransform(translationX:-sourceSize.width/2,y:-sourceSize.height/2)
-            .concatenating(CGAffineTransform(scaleX:factor,y:factor))
+            .concatenating(CGAffineTransform(scaleX:factor*style.stretchX,y:factor*style.stretchY))
             .concatenating(CGAffineTransform(rotationAngle:-style.rotation * .pi/180))
             .concatenating(CGAffineTransform(translationX:canvasSize.width*(0.5+style.x),y:canvasSize.height*(0.5-style.y)))
     }
@@ -119,6 +119,98 @@ public struct VisualGeometry {
     public func aligned(to centers: [CGPoint], threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
         aligned(vertical:centers.map(\.x),horizontal:centers.map(\.y),threshold:threshold)
     }
+    /// The box the clip covers in viewer space.
+    public var bounds: CGRect {
+        let c = corners, xs = c.map(\.x), ys = c.map(\.y)
+        return CGRect(x:xs.min()!,y:ys.min()!,width:xs.max()!-xs.min()!,height:ys.max()!-ys.min()!)
+    }
+    /// Square to the frame (turned by a whole number of quarter turns): its edges run along the
+    /// frame's, so they can line up with lines.
+    public var isSquare: Bool {
+        let rest = abs(style.rotation.truncatingRemainder(dividingBy:90))
+        return rest < 0.01 || 90-rest < 0.01
+    }
+    /// The lines a clip's edges catch on: the frame's edges and middle, and the edges and middles
+    /// of the other clips showing (`others`, their boxes). One within `reach` of a frame line is
+    /// left out on that axis: the frame's line catches there alone.
+    public static func edgeLines(frame: CGSize, others: [CGRect], reach: CGFloat) -> (vertical: [CGFloat], horizontal: [CGFloat]) {
+        let xs = [0,frame.width/2,frame.width], ys = [0,frame.height/2,frame.height]
+        let otherXs = others.flatMap { [$0.minX,$0.midX,$0.maxX] }.filter { x in !xs.contains { abs($0-x) <= reach } }
+        let otherYs = others.flatMap { [$0.minY,$0.midY,$0.maxY] }.filter { y in !ys.contains { abs($0-y) <= reach } }
+        return (xs+otherXs,ys+otherYs)
+    }
+    /// A move's alignment with its edges too: the alignment point catches `vertical` and
+    /// `horizontal` as `aligned(vertical:horizontal:threshold:)` does, and a square clip's edges
+    /// (left or right, top or bottom) catch `edges`, whichever is nearest on each axis.
+    public func aligned(vertical: [CGFloat], horizontal: [CGFloat], edges: (vertical: [CGFloat], horizontal: [CGFloat]),
+                        threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
+        let c = anchor, box = bounds, square = isSquare
+        func nearest(_ point: CGFloat, _ lines: [CGFloat], _ low: CGFloat, _ high: CGFloat, _ edgeLines: [CGFloat]) -> (shift: CGFloat, line: CGFloat)? {
+            var options = lines.map { ($0-point,$0) }
+            if square { options += edgeLines.flatMap { [($0-low,$0),($0-high,$0)] } }
+            return options.filter { abs($0.0) <= threshold }.min { abs($0.0) < abs($1.0) }.map { (shift:$0.0,line:$0.1) }
+        }
+        let x = nearest(c.x,vertical,box.minX,box.maxX,edges.vertical), y = nearest(c.y,horizontal,box.minY,box.maxY,edges.horizontal)
+        var result = style
+        if let x { result.x = min(2,max(-2,style.x+x.shift/canvasSize.width)) }
+        if let y { result.y = min(2,max(-2,style.y+y.shift/canvasSize.height)) }
+        return (result,x?.line,y?.line)
+    }
+    /// `stretched(edge:to:)` with the edge pulled catching, within `threshold`: the place where the
+    /// picture has its own proportions again (stretched as much one way as the other), and for a
+    /// square clip the nearest of `lines`, whichever is nearer. Also returns the line caught
+    /// (vertical when the edge moves across the frame, horizontal when down), and whether the
+    /// proportions were.
+    public func stretched(edge: Int, to point: CGPoint, catching lines: (vertical: [CGFloat], horizontal: [CGFloat]),
+                          threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?, proportional: Bool) {
+        let free = stretched(edge:edge,to:point)
+        let middles = edgeMiddles
+        guard middles.indices.contains(edge) else { return (free,nil,nil,false) }
+        let held = middles[(edge+2)%4], grabbed = middles[edge]
+        let dx = grabbed.x-held.x, dy = grabbed.y-held.y, length = hypot(dx,dy)
+        guard length > 0 else { return (free,nil,nil,false) }
+        let ux = dx/length, uy = dy/length
+        let wanted = (point.x-held.x)*ux+(point.y-held.y)*uy                 // along the clip's own axis
+        let acrossClip = edge % 2 == 1
+        let before = acrossClip ? style.stretchX : style.stretchY, other = acrossClip ? style.stretchY : style.stretchX
+        var best: (gap: CGFloat, reach: CGFloat, vertical: CGFloat?, horizontal: CGFloat?, proportional: Bool)?
+        let even = length*other/before
+        if abs(wanted-even) <= threshold { best = (abs(wanted-even),even,nil,nil,true) }
+        if isSquare {
+            let across = abs(dx) >= abs(dy), unit = across ? ux : uy, start = across ? held.x : held.y
+            if abs(unit) > 0.5 {
+                for line in across ? lines.vertical : lines.horizontal {
+                    let gap = abs(line-(start+unit*wanted))
+                    if gap <= threshold, gap < (best?.gap ?? .infinity) { best = (gap,(line-start)/unit,across ? line : nil,across ? nil : line,false) }
+                }
+            }
+        }
+        guard let best, best.reach > 0 else { return (free,nil,nil,false) }
+        return (stretched(edge:edge,to:CGPoint(x:held.x+ux*best.reach,y:held.y+uy*best.reach)),best.vertical,best.horizontal,best.proportional)
+    }
+    /// `resized(corner:to:)` with the corner dragged catching the nearest of `lines` across or down
+    /// within `threshold`, for a square clip (the other way follows, the size keeping its shape).
+    public func resized(corner: Int, to point: CGPoint, catching lines: (vertical: [CGFloat], horizontal: [CGFloat]),
+                        threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
+        let free = resized(corner:corner,to:point)
+        guard isSquare, corners.indices.contains(corner) else { return (free,nil,nil) }
+        let fixed = corners[(corner+2)%4], handle = corners[corner]
+        let reached = VisualGeometry(sourceSize:sourceSize,canvasSize:canvasSize,style:free,isText:isText).corners[corner]
+        var best: (gap: CGFloat, ratio: CGFloat, vertical: CGFloat?, horizontal: CGFloat?)?
+        if abs(handle.x-fixed.x) > 0.5 {
+            for line in lines.vertical where abs(line-reached.x) <= threshold && abs(line-reached.x) < (best?.gap ?? .infinity) {
+                best = (abs(line-reached.x),(line-fixed.x)/(handle.x-fixed.x),line,nil)
+            }
+        }
+        if abs(handle.y-fixed.y) > 0.5 {
+            for line in lines.horizontal where abs(line-reached.y) <= threshold && abs(line-reached.y) < (best?.gap ?? .infinity) {
+                best = (abs(line-reached.y),(line-fixed.y)/(handle.y-fixed.y),nil,line)
+            }
+        }
+        guard let best, best.ratio > 0 else { return (free,nil,nil) }
+        let on = CGPoint(x:fixed.x+(handle.x-fixed.x)*best.ratio,y:fixed.y+(handle.y-fixed.y)*best.ratio)
+        return (resized(corner:corner,to:on),best.vertical,best.horizontal)
+    }
     /// The same with the lines given apart: a vertical line at each of `vertical`, a horizontal
     /// one at each of `horizontal`.
     public func aligned(vertical: [CGFloat], horizontal: [CGFloat], threshold: CGFloat) -> (style: ClipStyle, vertical: CGFloat?, horizontal: CGFloat?) {
@@ -141,6 +233,34 @@ public struct VisualGeometry {
     public static func alignmentLines(middle: CGPoint, others: [CGPoint], reach: CGFloat) -> (vertical: [CGFloat], horizontal: [CGFloat]) {
         (vertical:[middle.x]+others.map(\.x).filter { abs($0-middle.x) > reach },
          horizontal:[middle.y]+others.map(\.y).filter { abs($0-middle.y) > reach })
+    }
+    /// The middles of the outline's edges, clockwise from the top (the unrotated source's top,
+    /// right, bottom and left), in viewer space.
+    public var edgeMiddles: [CGPoint] {
+        let c = corners
+        return (0..<4).map { CGPoint(x:(c[$0].x+c[($0+1)%4].x)/2,y:(c[$0].y+c[($0+1)%4].y)/2) }
+    }
+    /// Stretched or squeezed from the middle of edge `edge` (as `edgeMiddles`) to `point`: the
+    /// opposite edge stays where it is, and only that one way changes (across for the left and
+    /// right edges, down for the top and bottom), within `ClipStyle.stretchRange`.
+    public func stretched(edge: Int, to point: CGPoint) -> ClipStyle {
+        let middles = edgeMiddles
+        guard middles.indices.contains(edge) else { return style }
+        let held = middles[(edge+2)%4], grabbed = middles[edge]
+        let dx = grabbed.x-held.x, dy = grabbed.y-held.y, length = hypot(dx,dy)
+        guard length > 0 else { return style }
+        let ux = dx/length, uy = dy/length
+        let wanted = (point.x-held.x)*ux+(point.y-held.y)*uy                 // along the clip's own axis
+        var result = style
+        let across = edge % 2 == 1
+        let before = across ? style.stretchX : style.stretchY
+        let after = min(ClipStyle.stretchRange.upperBound,max(ClipStyle.stretchRange.lowerBound,before*wanted/length))
+        if across { result.stretchX = after } else { result.stretchY = after }
+        // The middle moves to halfway along the new length from the edge that stays.
+        let reach = length*after/before
+        result.x = min(2,max(-2,(held.x+ux*reach/2)/canvasSize.width-0.5))
+        result.y = min(2,max(-2,(held.y+uy*reach/2)/canvasSize.height-0.5))
+        return result
     }
     public func moved(by delta: CGSize) -> ClipStyle {
         var result = style

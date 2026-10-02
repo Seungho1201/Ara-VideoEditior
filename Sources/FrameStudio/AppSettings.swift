@@ -299,10 +299,47 @@ struct SettingsView: View {
         TabView {
             GeneralSettings(store:store).tabItem { Label("General",systemImage:"gearshape") }
             HapticSettings(store:store).tabItem { Label("Trackpad",systemImage:"hand.tap") }
+            PreviewSettings(store:store).tabItem { Label("Preview",systemImage:"viewfinder") }
             ShortcutSettingsView().tabItem { Label("Shortcuts",systemImage:"keyboard") }
         }
         .frame(width:560,height:520)
         .preferredColorScheme(.dark)
+    }
+}
+
+/// The colours of the preview's transform chrome, with a picture of it in them. Each is chosen as a
+/// title's colour is: a click on its swatch shows the preset colours beside it, + the palette.
+struct PreviewSettings: View {
+    @ObservedObject var store: EditorStore
+    @ObservedObject private var colors = PreviewChromeColors.shared
+    var body: some View {
+        Form {
+            Section {
+                ChromeColorPreview(colors:colors).frame(height:170)
+            } footer: {
+                Text("How a clip being transformed in the preview is drawn: its outline and handles, its outline once a stretch is back at its own proportions, the guides it snaps to, and its alignment point.")
+                    .font(.system(size:11)).foregroundStyle(.secondary)
+            }
+            Section {
+                ForEach(PreviewChromeColors.Part.allCases) { part in
+                    HStack(spacing:12) {
+                        // The names as wide as the widest, so the swatches stand in one column.
+                        ZStack(alignment:.leading) {
+                            ForEach(PreviewChromeColors.Part.allCases) { Text(LocalizedStringKey($0.name)).hidden() }
+                            Text(LocalizedStringKey(part.name))
+                        }
+                        TitleColorControl(store:store,target:ColorTarget(chrome:part,name:part.name),color:colors.color(part),showsName:false)
+                        Button { colors.reset(part) } label: { Image(systemName:"arrow.counterclockwise") }
+                            .buttonStyle(.borderless).disabled(colors.isStandard(part))
+                            .help("Restore the default colour").accessibilityLabel(Text("Restore the default colour"))
+                    }
+                }
+            }
+            Section {
+                Button("Restore Defaults") { colors.resetAll() }.disabled(colors.allStandard)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

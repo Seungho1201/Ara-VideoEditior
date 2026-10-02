@@ -50,6 +50,8 @@ struct InspectorContent: View, Equatable {
     /// The document the draft was taken from. A draft never lands in a different document.
     @State private var draftSession: UUID?
     @FocusState private var textFocused: Bool
+    /// The title text field's own id, for `EditorStore.textFocusChanged`.
+    @State private var textField = UUID()
     /// The title whose appearance slider is being dragged: its edits stay one undo step until release.
     @State private var titleDrag: UUID?
     /// Whether the SHADOW, TRANSFORM and COLOUR sections are unfolded; kept across launches.
@@ -96,7 +98,8 @@ struct InspectorContent: View, Equatable {
                         VStack(alignment:.leading,spacing:12) {
                             ClipHeader(store:store,clip:clip)
                             if clip.kind == .text { section("TEXT") { textBox(clip) } }
-                            if clip.lane.isVideo { AlignmentControls(store:store,clip:clip) }
+                            // A title's place sits between its text and its font; other clips' under their style.
+                            if clip.kind == .text { AlignmentControls(store:store,clip:clip) }
                             if clip.kind == .text {
                                 TitleFontControls(fontName:clip.style.fontName,revision:store.fontsRevision,addedFolder:store.fontFolder,
                                                   isAdding:store.isAddingFonts,apply:{ [clipID = clip.id] in store.applyFont($0,to:clipID) },
@@ -106,6 +109,7 @@ struct InspectorContent: View, Equatable {
                         if clip.kind == .text {
                             section("TITLE STYLE") {
                                 titleLine("Text colour",\.red,\.green,\.blue,amount:\.fontSize,range:8...300,step:1,undoName:"Font size",label:"Font size",clip:clip)
+                                opacityLine(clip)
                             }
                             // Width and opacity switch the effect on; the rest wait until it is.
                             section("OUTLINE") {
@@ -126,48 +130,67 @@ struct InspectorContent: View, Equatable {
                             // A colour folded away hides its presets, and unfolds without them.
                             .onChange(of:shadowOpen) { _,open in if !open { store.colorPresetRow.close("Shadow colour") } }
                         }
+                        // How a picture or sound plays out: its volume (the sound a video plays too) and its
+                        // opacity, first under where it sits.
+                        if clip.kind != .text {
+                            section("STYLE") {
+                                if clip.kind == .audio || clip.linkID != nil { VolumeControls(store:store,clipID:clip.id) }
+                                if clip.kind != .audio { opacityLine(clip) }
+                            }
+                        }
+                        // Its speed, a line as the style's are, with the common speeds under it.
                         if clip.kind == .video || clip.kind == .audio {
-                            section("SPEED") {
-                                HStack {
-                                    Text("Playback").foregroundStyle(Theme.muted); Spacer()
+                            VStack(alignment:.leading,spacing:8) {
+                                HStack(spacing:8) {
+                                    StyleMark(symbol:"speedometer",name:"Playback speed")
+                                    // On a log scale, so 1x sits in the middle and slow speeds get as much room as fast ones.
+                                    Slider(value:Binding(get:{log2(store.selectedClip?.speed ?? 1)},
+                                                         set:{ v in store.setSpeedInteractively(min(Clip.speedRange.upperBound,max(Clip.speedRange.lowerBound,(pow(2,v)*20).rounded()/20))) }),
+                                           in:log2(Clip.speedRange.lowerBound)...log2(Clip.speedRange.upperBound),
+                                           onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } })
+                                        .controlSize(.mini).accessibilityLabel("Playback speed")
                                     // Type any speed from 0.1x to 10x; Return applies it.
-                                    SpeedField(store:store)
+                                    HStack(spacing:3) {
+                                        SpeedField(store:store,width:30,asLine:true)
+                                        Text(verbatim:"x").font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted).frame(width:14,alignment:.leading)
+                                    }
                                 }
-                                // On a log scale, so 1x sits in the middle and slow speeds get as much room as fast ones.
-                                Slider(value:Binding(get:{log2(store.selectedClip?.speed ?? 1)},
-                                                     set:{ v in store.setSpeedInteractively(min(Clip.speedRange.upperBound,max(Clip.speedRange.lowerBound,(pow(2,v)*20).rounded()/20))) }),
-                                       in:log2(Clip.speedRange.lowerBound)...log2(Clip.speedRange.upperBound),
-                                       onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } })
-                                    .controlSize(.mini).accessibilityLabel("Playback speed")
-                                HStack(spacing:5) {
+                                // Lined up with the slider while the presets fit there, from the edge otherwise.
+                                let presets = HStack(spacing:5) {
                                     ForEach([0.25,0.5,1.0,2.0,4.0,5.0],id:\.self) { preset in
                                         Button(preset == 1 ? "1x" : String(format:"%gx",preset)) { store.setSpeed(preset) }
                                             .controlSize(.mini).disabled(abs(clip.speed-preset) < 0.001)
                                     }
-                                }
-                                Text(clip.speed == 1 ? "Source length \(store.project.frameRate.timecode(clip.sourceLength))"
-                                                     : "Uses \(store.project.frameRate.timecode(clip.sourceLength)) of source · audio pitch preserved")
+                                }.fixedSize()
+                                let note = Text(clip.speed == 1 ? "Source length \(store.project.frameRate.timecode(clip.sourceLength))"
+                                                                : "Uses \(store.project.frameRate.timecode(clip.sourceLength)) of source · audio pitch preserved")
                                     .font(.system(size:9)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
-                            }
+                                ViewThatFits(in:.horizontal) {
+                                    VStack(alignment:.leading,spacing:8) { presets; note }.padding(.leading,StyleMark.width+8)
+                                    VStack(alignment:.leading,spacing:8) { presets; note }
+                                }
+                            }.font(.system(size:11))
+                        }
+                        // Where a picture sits: its alignment point, under its style.
+                        if clip.kind != .text, clip.lane.isVideo {
+                            section("POSITION") { AlignmentControls(store:store,clip:clip) }
                         }
                         if clip.kind != .audio {
                             FoldingSection(title:"TRANSFORM",isOpen:$transformOpen,summary:Self.isDefaultTransform(clip.style) ? .unchanged : .changed) {
                                 control("Position X",\.x,range:-1...1,multiplier:100,suffix:"%")
                                 control("Position Y",\.y,range:-1...1,multiplier:100,suffix:"%")
                                 control("Scale",\.scale,range:0.05...4,multiplier:100,suffix:"%")
+                                // A picture stretched across or down (also from its outline's edge middles in the preview).
+                                if clip.kind != .text {
+                                    control("Stretch across",\.stretchX,range:0.05...4,multiplier:100,suffix:"%")
+                                    control("Stretch down",\.stretchY,range:0.05...4,multiplier:100,suffix:"%")
+                                }
                                 control("Rotation",\.rotation,range:-180...180,suffix:"°")
-                                control("Opacity",\.opacity,range:0...1,multiplier:100,suffix:"%")
                             }
                             FoldingSection(title:"COLOUR · SDR",isOpen:$colourOpen,summary:Self.isDefaultColour(clip.style) ? .unchanged : .changed) {
                                 control("Brightness",\.brightness,range:-1...1,multiplier:100)
                                 control("Contrast",\.contrast,range:0...3,multiplier:100,suffix:"%")
                                 control("Saturation",\.saturation,range:0...3,multiplier:100,suffix:"%")
-                            }
-                        }
-                        if clip.kind == .audio || clip.linkID != nil {
-                            section("AUDIO") {
-                                control("Volume",\.volume,range:0...2,multiplier:100,suffix:"%")
-                                Toggle("Mute",isOn:Binding(get:{store.selectedClip?.style.muted ?? false},set:{v in store.updateStyle { $0.muted = v } })).toggleStyle(.switch).controlSize(.mini)
                             }
                         }
                         // Where the clip is: read-only, so below everything that changes it.
@@ -239,10 +262,10 @@ struct InspectorContent: View, Equatable {
                 scheduleTextCommit(field.string)
             }
             .onChange(of:textFocused) { _,focused in
-                store.textFocusChanged(focused)
+                store.textFocusChanged(focused,field:textField)
                 if !focused { flushTextCommit(); store.endLiveEdit() }
             }
-            .onDisappear { store.textFocusChanged(false); flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
+            .onDisappear { store.textFocusChanged(false,field:textField); flushTextCommit(); store.endLiveEdit(); store.flushPendingEdits = nil }
         if textDraft.count >= Self.textLimit {
             Text("A title holds up to \(Self.textLimit) characters.")
                 .font(.system(size:9)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
@@ -428,7 +451,8 @@ struct InspectorContent: View, Equatable {
     /// Whether a clip is placed as it came in: TRANSFORM folded says Default rather than Edited.
     static func isDefaultTransform(_ style: ClipStyle) -> Bool {
         let plain = ClipStyle()
-        return style.x == plain.x && style.y == plain.y && style.scale == plain.scale && style.rotation == plain.rotation && style.opacity == plain.opacity
+        return style.x == plain.x && style.y == plain.y && style.scale == plain.scale && style.rotation == plain.rotation
+            && style.stretchX == plain.stretchX && style.stretchY == plain.stretchY
     }
     /// Whether a clip's colour is as it came in, for COLOUR folded.
     static func isDefaultColour(_ style: ClipStyle) -> Bool {
@@ -468,6 +492,13 @@ struct InspectorContent: View, Equatable {
                               color:TitleColor(red:clip.style[keyPath:red],green:clip.style[keyPath:green],blue:clip.style[keyPath:blue]),
                               showsName:false,roomWhenClosed:false).disabled(!colourOn)
             TitleAmountControls(store:store,clipID:clip.id,key:key,range:range,step:step,undoName:undoName,label:label,colour:colour,switches:switches)
+        }
+    }
+    /// A clip's opacity as the style lines are shown: its mark, slider and percentage typed.
+    private func opacityLine(_ clip: Clip) -> some View {
+        HStack(spacing:8) {
+            StyleMark(symbol:"circle.lefthalf.filled",name:"Opacity")
+            TitleAmountControls(store:store,clipID:clip.id,key:\.opacity,range:0...1,step:0.01,undoName:"Adjust clip",label:"Opacity",colour:"",multiplier:100,unit:"%")
         }
     }
     /// A title colour: its swatch, the presets beside it, and the palette (ColorControls.swift).
@@ -541,11 +572,13 @@ struct TitleAmountControls: View {
     let colour: String
     /// An amount that switches its effect on: one that reads 0 is 0 (InspectorContent.slide).
     var switches = false
+    /// How the number typed reads the amount (100 for a share shown in percent), and its unit.
+    var multiplier = 1.0
+    var unit = "pt"
     @State private var dragging = false
-    @FocusState private var typing: Bool
     private var amount: Double { store.project.clips.first { $0.id == clipID }?.style[keyPath:key] ?? range.lowerBound }
     private func set(_ value: Double) {
-        InspectorContent.slide(key,to:value,range:range,switches:switches,of:clipID,name:undoName,closesWhenIdle:!dragging,in:store)
+        InspectorContent.slide(key,to:value,range:range,multiplier:multiplier,switches:switches,of:clipID,name:undoName,closesWhenIdle:!dragging,in:store)
     }
     var body: some View {
         if store.colorPresetRow.open != colour {
@@ -554,19 +587,95 @@ struct TitleAmountControls: View {
                     // The title's typed text lands first, as its own step.
                     if active { store.commitPendingEdits(); dragging = true } else { dragging = false; store.endLiveEdit() }
                 }).controlSize(.mini).accessibilityLabel(Text(LocalizedStringKey(label)))
-                HStack(spacing:3) {
-                    // Whole points, with a tenth for a fraction (an outline just switched on).
-                    TextField("",value:Binding(get:{ (amount*10).rounded()/10 },set:{ set($0); store.endLiveEdit() }),
-                              format:.number.precision(.fractionLength(0...1)).grouping(.never))
-                        .textFieldStyle(.plain).multilineTextAlignment(.trailing).font(.system(size:10,design:.monospaced))
-                        .frame(width:30).padding(.horizontal,5).frame(height:AlignmentControls.height).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
-                        .focused($typing).onChange(of:typing) { _,now in store.textFocusChanged(now) }
-                        .onDisappear { if typing { store.textFocusChanged(false) } }
-                        .accessibilityLabel(Text(LocalizedStringKey(label+" in points")))
-                    Text(verbatim:"pt").font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted)
-                }
+                AmountField(store:store,value:amount*multiplier,unit:unit,label:label+(unit == "%" ? " in percent" : " in points")) { set($0/multiplier); store.endLiveEdit() }
             }
             .transition(.opacity)
+        }
+    }
+}
+
+/// The volume as a title's amounts are shown: its slider and the percentage typed. Volume changes
+/// the audio mix (and the linked clip's level), so each step rebuilds; one drag is one undo step.
+/// A clip muted by an earlier Ara reads 0 %, and a volume set unmutes it.
+struct VolumeControls: View {
+    @ObservedObject var store: EditorStore
+    let clipID: UUID
+    private var shown: Double {
+        guard let clip = store.project.clips.first(where: { $0.id == clipID }) else { return 1 }
+        return clip.style.muted ? 0 : clip.style.volume
+    }
+    private func set(_ volume: Double) {
+        let volume = min(2,max(0,volume))
+        // The number it shows given back (a field taking or leaving the keyboard) changes nothing.
+        guard abs(volume-shown) > 0.0001 else { return }
+        store.updateStyle { $0.volume = volume; $0.muted = false }
+    }
+    var body: some View {
+        HStack(spacing:8) {
+            StyleMark(symbol:"speaker.wave.2",name:"Volume")
+            Slider(value:Binding(get:{ shown },set:set),in:0...2,onEditingChanged:{ active in if active { store.beginInteraction() } else { store.endInteraction() } })
+                .controlSize(.mini).accessibilityLabel(Text("Volume"))
+            AmountField(store:store,value:shown*100,unit:"%",label:"Volume in percent") { set($0/100) }
+        }
+    }
+}
+
+/// What a style line without a colour sets (the volume, the opacity), where a colour line has its
+/// swatch, and as wide, so the sliders of all the lines start together.
+struct StyleMark: View {
+    let symbol: String
+    /// What the mark stands for, shown on hover.
+    let name: String
+    static let width: CGFloat = 42
+    var body: some View {
+        Image(systemName:symbol).font(.system(size:12)).foregroundStyle(Theme.muted)
+            .frame(width:Self.width,height:AlignmentControls.height).help(LocalizedStringKey(name)).accessibilityHidden(true)
+    }
+}
+
+/// A number typed beside a slider, with its unit ("pt", "%"): whole, with a tenth for a fraction.
+/// What is typed is set on Return or on leaving the field, never key by key (a value set while typing
+/// could be written back over by the one shown before it); something unreadable puts the shown
+/// number back. While it is typed in, the frame keys stand down.
+struct AmountField: View {
+    let store: EditorStore
+    let value: Double
+    let unit: String
+    /// What VoiceOver calls it.
+    let label: String
+    var width: CGFloat = 30
+    let set: (Double) -> Void
+    @State private var text = ""
+    /// The number as last put in the field, and whether something else has been typed since (the
+    /// field reports a number put in as if typed).
+    @State private var put = ""
+    @State private var edited = false
+    @State private var id = UUID()
+    @FocusState private var typing: Bool
+    static func shown(_ value: Double) -> String { ((value*10).rounded()/10).formatted(.number.precision(.fractionLength(0...1)).grouping(.never)) }
+    /// The number in `text`, with a comma read as the decimal point; nil when there is none.
+    static func read(_ text: String) -> Double? {
+        Double(text.trimmingCharacters(in:.whitespaces).replacingOccurrences(of:",",with:".")).flatMap { $0.isFinite ? $0 : nil }
+    }
+    /// Sets what was typed. The number set comes back as `value` (kept in range, a step of its
+    /// own), and is shown then.
+    private func show(_ value: Double) { edited = false; put = Self.shown(value); text = put }
+    private func commit() {
+        if edited, let typed = Self.read(text), Self.shown(typed) != Self.shown(value) { set(typed) }
+        show(value)
+    }
+    var body: some View {
+        HStack(spacing:3) {
+            TextField("",text:Binding(get:{ text },set:{ text = $0; if $0 != put { edited = true } }))
+                .textFieldStyle(.plain).multilineTextAlignment(.trailing).font(.system(size:10,design:.monospaced))
+                .frame(width:width).padding(.horizontal,5).frame(height:AlignmentControls.height).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                .focused($typing).onSubmit(commit)
+                .onChange(of:typing) { _,now in if !now { commit() }; store.textFocusChanged(now,field:id) }
+                .onAppear { show(value) }
+                .onChange(of:value) { _,now in if !edited { show(now) } }
+                .onDisappear { store.textFocusChanged(false,field:id) }
+                .accessibilityLabel(Text(LocalizedStringKey(label)))
+            if !unit.isEmpty { Text(verbatim:unit).font(.system(size:10,design:.monospaced)).foregroundStyle(Theme.muted).frame(width:14,alignment:.leading) }
         }
     }
 }
@@ -577,8 +686,6 @@ struct TitleAmountControls: View {
 struct AlignmentControls: View {
     @ObservedObject var store: EditorStore
     let clip: Clip
-    /// The coordinate being typed, if any.
-    @FocusState private var typing: Coordinate?
     enum Coordinate: Hashable { case x, y }
     private var placing: Bool { store.anchorEditID == clip.id }
     /// The height of the buttons and fields on the line.
@@ -589,8 +696,6 @@ struct AlignmentControls: View {
             Spacer(minLength:8)
             coordinates
         }
-        .onChange(of:typing) { _,now in store.textFocusChanged(now != nil) }
-        .onDisappear { if typing != nil { store.textFocusChanged(false) } }
     }
     /// Where the alignment point is, in whole pixels of the frame from its top-left corner (the
     /// clip's middle until the point is moved). Typing a number moves the clip there; the arrow
@@ -599,17 +704,15 @@ struct AlignmentControls: View {
         HStack(spacing:8) { coordinate(.x); coordinate(.y) }
     }
     private func coordinate(_ axis: Coordinate) -> some View {
-        HStack(spacing:4) {
+        let at = store.anchorPixel(of:store.project.clips.first { $0.id == clip.id } ?? clip)
+        return HStack(spacing:4) {
             Text(verbatim:axis == .x ? "X" : "Y").font(.system(size:10,weight:.semibold)).foregroundStyle(Theme.muted)
-            TextField("",value:Binding(get:{
-                let at = store.anchorPixel(of:store.project.clips.first { $0.id == clip.id } ?? clip)
-                return axis == .x ? at.x : at.y
-            },set:{ pixel in store.placeAnchor(of:clip.id,x:axis == .x ? pixel : nil,y:axis == .y ? pixel : nil) }),format:.number.grouping(.never))
-                .textFieldStyle(.plain).multilineTextAlignment(.trailing).font(.system(size:10,design:.monospaced))
-                .frame(width:40).padding(.horizontal,6).frame(height:Self.height).background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
-                .focused($typing,equals:axis).disabled(store.isExporting)
-                .accessibilityLabel(axis == .x ? Text("Alignment point X in pixels") : Text("Alignment point Y in pixels"))
-                .help("Where the alignment point is, in pixels from the frame's top-left corner. Type a number to move the clip there.")
+            AmountField(store:store,value:Double(axis == .x ? at.x : at.y),unit:"",label:axis == .x ? "Alignment point X in pixels" : "Alignment point Y in pixels",width:42) { typed in
+                let pixel = Int(typed.rounded())
+                store.placeAnchor(of:clip.id,x:axis == .x ? pixel : nil,y:axis == .y ? pixel : nil)
+            }
+            .disabled(store.isExporting)
+            .help("Where the alignment point is, in pixels from the frame's top-left corner. Type a number to move the clip there.")
         }
     }
     private var adjustButton: some View {
@@ -683,6 +786,7 @@ struct TitleFontControls: View, Equatable {
         VStack(alignment:.leading,spacing:10) {
             HStack {
                 label("Font"); Spacer()
+                addButton
                 // Each family in its own face, so the menu shows what it offers.
                 FontPopUp(entries:familyEntries(current:current,menu:menu,listed:listed),selected:current?.family ?? FontMenu.missingTag,
                           title:current?.familyDisplayName ?? missingTitle,titleFace:readable ? current?.postScriptName : nil,label:String(localized:"Font family")) { family in
@@ -690,7 +794,6 @@ struct TitleFontControls: View, Equatable {
                           let face = FontLibrary.closestFace(inFamily:family,toWeight:current?.weight ?? 0.4,italic:current?.isItalic ?? false) else { return }
                     apply(face.postScriptName)
                 }.frame(maxWidth:170)
-                addButton
             }
             if let current {
                 let faces = FontLibrary.faces(ofFamily:current.family)
@@ -704,10 +807,10 @@ struct TitleFontControls: View, Equatable {
                             FontPopUp.Entry.item(tag:face.postScriptName,title:repeated.contains(face.style) ? "\(face.style) · \(face.postScriptName)" : face.style,
                                                  face:readable ? face.postScriptName : nil)
                         }
+                        Color.clear.frame(width:Self.addSize,height:1)      // lines up with the font menu above
                         FontPopUp(entries:entries,selected:current.postScriptName,title:current.style,titleFace:readable ? current.postScriptName : nil,label:String(localized:"Font style")) { name in
                             if name != current.postScriptName { apply(name) }
                         }.frame(maxWidth:170)
-                        Color.clear.frame(width:Self.addSize,height:1)      // lines up with the font menu above
 
                     }
                 }
@@ -722,7 +825,7 @@ struct TitleFontControls: View, Equatable {
     private func label(_ name: LocalizedStringKey) -> some View {
         ZStack(alignment:.leading) { Text("Font").hidden(); Text("Style").hidden(); Text(name).foregroundStyle(Theme.muted) }
     }
-    /// Add Font… as a + beside the font menu; while fonts are being added, a spinner in its place.
+    /// Add Font… as a + on the font menu's left; while fonts are being added, a spinner in its place.
     @ViewBuilder private var addButton: some View {
         if isAdding {
             ProgressView().controlSize(.mini).frame(width:Self.addSize,height:Self.addSize).accessibilityLabel("Adding fonts")
@@ -894,13 +997,26 @@ struct SpeedField: View {
     @ObservedObject var store: EditorStore
     var width: CGFloat = 62
     var focusOnAppear = false
+    /// Shown as the inspector's style lines show their numbers: a plain field on a raised ground,
+    /// its unit beside it rather than in it.
+    var asLine = false
     var onCommit: () -> Void = {}
     @State private var text = ""
+    @State private var id = UUID()
     @FocusState private var focused: Bool
-    private var shown: String { String(format:"%.2fx",store.selectedSpeed) }
+    private var shown: String { String(format:asLine ? "%.2f" : "%.2fx",store.selectedSpeed) }
     var body: some View {
+        if asLine {
+            field.textFieldStyle(.plain).padding(.horizontal,5).frame(height:AlignmentControls.height)
+                .background(Theme.raised,in:RoundedRectangle(cornerRadius:5))
+                .onChange(of:focused) { _,now in store.textFocusChanged(now,field:id) }
+                .onDisappear { store.textFocusChanged(false,field:id) }
+        } else {
+            field.textFieldStyle(.roundedBorder).controlSize(.mini)
+        }
+    }
+    private var field: some View {
         TextField("",text:$text)
-            .textFieldStyle(.roundedBorder).controlSize(.mini)
             .font(.system(size:10,design:.monospaced)).multilineTextAlignment(.trailing)
             .frame(width:width).focused($focused)
             .onSubmit { if store.setCustomSpeed(text) { onCommit() }; text = shown }

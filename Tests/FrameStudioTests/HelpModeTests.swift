@@ -33,7 +33,7 @@ private struct Overlaid: View {
         for _ in 0..<steps { view.layoutSubtreeIfNeeded(); try await Task.sleep(for:.milliseconds(25)) }
     }
     /// The editor at `size` with a title selected, help shown, the app's settings put back afterwards.
-    private func withHelp(_ size: CGSize, tracks: Bool = false, _ check: (EditorStore, NSView) async throws -> Void) async throws {
+    private func withHelp(_ size: CGSize, tracks: Bool = false, _ check: @MainActor (EditorStore, NSView) async throws -> Void) async throws {
         _ = NSApplication.shared
         let saved = Self.keys.reduce(into:[String:Any]()) { values, key in values[key] = UserDefaults.standard.object(forKey:key) }
         let suite = "ara.tests.help-mode.\(UUID().uuidString)"

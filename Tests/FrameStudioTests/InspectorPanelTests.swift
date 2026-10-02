@@ -442,6 +442,78 @@ func inspectorSectionsUnfolded() -> () -> Void {
         XCTAssertNotNil(fields().first { $0.stringValue == "72" },"the text's size stays: only the outline's line is taken")
     }
 
+    /// AUDIO is the volume's slider and its percentage typed, as the title's amounts are; there is
+    /// no mute switch. A clip muted by an earlier Ara reads 0 %, and a volume typed unmutes it and
+    /// reaches the linked sound.
+    func testTheVolumeIsASliderAndAPercentage() async throws {
+        _ = NSApplication.shared
+        let store = EditorStore()
+        let media = timelineTestVideo(), link = UUID()
+        var video = Clip(mediaID:media.id,name:"base.mp4",kind:.video,lane:.v1,start:.zero,duration:.init(seconds:5),linkID:link)
+        var sound = Clip(mediaID:media.id,name:"base.mp4",kind:.audio,lane:.a1,start:.zero,duration:.init(seconds:5),linkID:link)
+        video.style.muted = true; sound.style.muted = true
+        store.edit("Fixture") { $0.media = [media]; $0.clips = [video,sound] }
+        store.selectedClipID = video.id
+        let (window,view) = host(InspectorPanel(store:store))
+        defer { window.contentView = nil; window.close(); store.pause() }
+        try await spin(150)
+        XCTAssertTrue(all(NSSwitch.self,in:view).isEmpty && all(NSButton.self,in:view).allSatisfy { ($0.cell as? NSButtonCell)?.title != "Mute" },"no mute switch")
+        let fields = all(NSTextField.self,in:view).filter(\.isEditable)
+        let volume = try XCTUnwrap(fields.first { $0.stringValue == "0" },"muted reads 0 %: \(fields.map(\.stringValue))")
+        XCTAssertTrue(window.makeFirstResponder(volume)); try await spin(40)
+        let editor = try XCTUnwrap(volume.currentEditor() as? NSTextView)
+        XCTAssertTrue(style(store,video.id).muted,"taking the keyboard changes nothing"); XCTAssertEqual(style(store,video.id).volume,1)
+        editor.selectAll(nil); editor.insertText("150",replacementRange:caret); editor.insertNewline(nil)
+        try await spin(150)
+        XCTAssertEqual(style(store,video.id).volume,1.5); XCTAssertFalse(style(store,video.id).muted,"unmuted")
+        XCTAssertEqual(style(store,sound.id).volume,1.5,"the linked sound too"); XCTAssertFalse(style(store,sound.id).muted)
+        editor.selectAll(nil); editor.insertText("500",replacementRange:caret); editor.insertNewline(nil)
+        try await spin(150)
+        XCTAssertEqual(style(store,video.id).volume,2,"at most 200 %")
+        window.makeFirstResponder(nil)
+    }
+
+    /// STYLE holds a video's volume and opacity as slider-and-number lines, with the playback speed
+    /// as one more line under them; the opacity moved there from TRANSFORM, whose folded summary no
+    /// longer counts it. A title has the opacity line under its colour and size.
+    func testStyleHoldsTheVolumeAndTheOpacity() async throws {
+        _ = NSApplication.shared
+        let restore = inspectorSectionsUnfolded(); defer { restore() }
+        let store = EditorStore()
+        store.fontFolder = FileManager.default.temporaryDirectory.appendingPathComponent("ara-inspector-fonts-\(UUID().uuidString)")
+        let media = timelineTestVideo(), link = UUID()
+        let video = Clip(mediaID:media.id,name:"base.mp4",kind:.video,lane:.v1,start:.zero,duration:.init(seconds:5),linkID:link)
+        let sound = Clip(mediaID:media.id,name:"base.mp4",kind:.audio,lane:.a1,start:.zero,duration:.init(seconds:5),linkID:link)
+        let words = title("Words",lane:.v2)
+        XCTAssertTrue(store.edit("Fixture") { $0.media = [media]; $0.videoTrackCount = 2; $0.clips = [video,sound,words] },store.message ?? "")
+        store.selectedClipID = video.id
+        let (window,view) = host(InspectorPanel(store:store))
+        defer { window.contentView = nil; window.close(); store.pause() }
+        try await spin(150)
+        func fields() -> [NSTextField] { all(NSTextField.self,in:view).filter(\.isEditable) }
+        XCTAssertEqual(fields().filter { $0.stringValue == "100" }.count,2,"volume and opacity at 100 %: \(fields().map(\.stringValue))")
+        let opacity = try XCTUnwrap(fields().filter { $0.stringValue == "100" }.last)
+        XCTAssertTrue(window.makeFirstResponder(opacity)); try await spin(40)
+        let editor = try XCTUnwrap(opacity.currentEditor() as? NSTextView)
+        editor.selectAll(nil); editor.insertText("40",replacementRange:caret); editor.insertNewline(nil)
+        try await spin(150)
+        XCTAssertEqual(style(store,video.id).opacity,0.4,accuracy:1e-9); XCTAssertEqual(style(store,video.id).volume,1,"the volume left alone")
+        XCTAssertEqual(store.undoName,"Adjust clip")
+        XCTAssertTrue(InspectorContent.isDefaultTransform(style(store,video.id)),"opacity is no longer TRANSFORM's")
+        // The speed, a line under them: its number typed without the x, which sits beside it.
+        let speed = try XCTUnwrap(fields().first { $0.stringValue == "1.00" },"\(fields().map(\.stringValue))")
+        XCTAssertTrue(window.makeFirstResponder(speed)); try await spin(40)
+        XCTAssertTrue(store.isEditingText,"the frame keys stand down while the speed is typed")
+        let typing = try XCTUnwrap(speed.currentEditor() as? NSTextView)
+        typing.selectAll(nil); typing.insertText("2",replacementRange:caret); typing.insertNewline(nil)
+        try await spin(150)
+        XCTAssertEqual(store.project.clips.first { $0.id == video.id }?.speed,2)
+        window.makeFirstResponder(nil)
+        // A title: its colour and size, then its opacity.
+        store.selectedClipID = words.id; try await spin(150)
+        XCTAssertNotNil(fields().first { $0.stringValue == "100" },"the title's opacity")
+    }
+
     /// SHADOW, TRANSFORM and COLOUR fold under their titles: their controls go, the panel gets
     /// shorter, and each stays as it was left (kept in the defaults). Folding a colour away hides
     /// its presets.

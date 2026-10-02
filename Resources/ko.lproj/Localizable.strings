@@ -113,7 +113,6 @@
 "Missing" = "없음";
 "Motion" = "모션";
 "Multiple selection" = "여러 개 선택";
-"Mute" = "음소거";
 "Name" = "이름";
 "Name, quality, aspect ratio and fps" = "이름, 화질, 화면비, fps";
 "New" = "새 파일";
@@ -184,6 +183,9 @@
 "SDR Rec.709 · Non-drop timecode" = "SDR Rec.709 · 논드롭 타임코드";
 "SHADOW" = "그림자";
 "SPEED" = "속도";
+"STYLE" = "스타일";
+"POSITION" = "포지션";
+"Opacity in percent" = "불투명도(퍼센트)";
 "Saturation" = "채도";
 "Save" = "저장";
 "Save Project" = "프로젝트 저장";
@@ -191,6 +193,8 @@
 "Save Timeline Snapshot…" = "타임라인 스냅샷 저장…";
 "Save current frame as PNG %@" = "현재 프레임을 PNG로 저장 %@";
 "Scale" = "크기";
+"Stretch across" = "가로 늘이기";
+"Stretch down" = "세로 늘이기";
 "Search" = "검색";
 "Select a timeline clip" = "타임라인 클립을 선택하십시오";
 "Select clips with a rectangle: the next drag across the timeline, no Shift needed" = "사각형으로 클립 선택: 다음 한 번의 타임라인 드래그, Shift 필요 없음";
@@ -298,6 +302,9 @@
 "Relink this source in the library before adding it." = "추가하기 전에 라이브러리에서 이 원본을 다시 연결하십시오.";
 "Removed %@" = "%@ 제거됨";
 "Resizing clip in preview" = "미리보기에서 클립 크기 조절 중";
+"Stretching clip in preview" = "미리보기에서 클립 늘이는 중";
+"Width %.0f%% · Height %.0f%%" = "가로 %.0f%% · 세로 %.0f%%";
+"Width %.0f%% · Height %.0f%% · Its own proportions" = "가로 %.0f%% · 세로 %.0f%% · 원래 비율";
 "Rotating clip in preview" = "미리보기에서 클립 회전 중";
 "Rotation %.0f°" = "회전 %.0f°";
 "Save Ara project" = "Ara 프로젝트 저장";
@@ -411,9 +418,10 @@
 "%@ · in" = "%@ · 페이드 인";
 "%@ · out" = "%@ · 페이드 아웃";
 "Preview transform canvas" = "미리보기 변형 캔버스";
-"Double-click a clip to transform it. Drag to move; corners, pinch or Option-scroll to resize; the top handle rotates (Shift: 15° steps). Turning, pinch and Option-scroll go about the alignment point; move it with Adjust alignment point in the inspector. Return or Esc to finish." = "클립을 더블클릭하면 변형할 수 있습니다. 드래그하면 이동하고, 모서리·핀치·⌥ 스크롤로 크기를 조절하며, 위쪽 핸들로 회전합니다(Shift: 15° 단위). 회전과 핀치·⌥ 스크롤 크기 조절은 정렬점을 기준으로 하며, 정렬점은 인스펙터의 정렬점 재조정으로 옮기십시오. Return이나 Esc로 끝냅니다.";
+"Double-click a clip to transform it. Drag to move; corners, pinch or Option-scroll to resize; a picture's edge middles stretch it one way; the top handle rotates (Shift: 15° steps). Turning, pinch and Option-scroll go about the alignment point; move it with Adjust alignment point in the inspector. Return or Esc to finish." = "클립을 더블클릭하면 변형할 수 있습니다. 드래그하면 이동하고, 모서리·핀치·⌥ 스크롤로 크기를 조절하고, 영상·이미지는 변 가운데 핸들로 한 방향으로 늘이며, 위쪽 핸들로 회전합니다(Shift: 15° 단위). 회전과 핀치·⌥ 스크롤 크기 조절은 정렬점을 기준으로 하며, 정렬점은 인스펙터의 정렬점 재조정으로 옮기십시오. Return이나 Esc로 끝냅니다.";
 "Double-click a visible clip to transform." = "보이는 클립을 더블클릭하면 변형할 수 있습니다.";
 "Transforming %@. Drag to move; corner handles resize; the top handle rotates." = "%@ 변형 중입니다. 드래그하면 이동하고, 모서리 핸들로 크기를 조절하며, 위쪽 핸들로 회전합니다.";
+"Transforming %@. Drag to move; corner handles resize; edge handles stretch; the top handle rotates." = "%@ 변형 중입니다. 드래그하면 이동하고, 모서리 핸들로 크기를 조절하고, 변 가운데 핸들로 늘이며, 위쪽 핸들로 회전합니다.";
 "Placing the alignment point of %@. Click or drag to place it; Return or Esc to finish." = "%@의 정렬점을 놓는 중입니다. 클릭하거나 드래그하여 놓고, Return이나 Esc로 끝냅니다.";
 "A title holds up to %lld characters." = "자막에는 최대 %lld자까지 넣을 수 있습니다.";
 "Across a cut" = "컷 사이";
@@ -630,3 +638,11 @@
 "Keeps its transitions" = "전환 효과 포함";
 "Font size in points" = "글자 크기(pt)";
 "Outline width in points" = "외곽선 두께(pt)";
+"Volume in percent" = "볼륨(퍼센트)";
+"Preview" = "미리보기";
+"Outline and handles" = "외곽선과 조절점";
+"Original proportions snap" = "원래 비율 스냅";
+"Snap guides" = "스냅 정렬선";
+"Restore the default colour" = "기본 색으로 되돌리기";
+"How a clip being transformed in the preview is drawn: its outline and handles, its outline once a stretch is back at its own proportions, the guides it snaps to, and its alignment point." = "미리보기에서 변형 중인 클립을 그리는 색입니다: 외곽선과 조절점, 늘이다 원래 비율에 붙었을 때의 외곽선, 붙는 정렬선, 정렬점.";
+"The preview's outline, guides and alignment point in the colours chosen" = "고른 색으로 그린 미리보기의 외곽선, 정렬선, 정렬점";
